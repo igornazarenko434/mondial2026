@@ -54,7 +54,13 @@ def test_fbref_shapes_and_normalizes(tmp_path):
     assert stats["Türkiye"]["xg_for"] == 1.8 and stats["Türkiye"]["xg_against"] == 0.0
 
 
-def test_live_fetchers_raise_until_wired():
-    import pytest
-    with pytest.raises(NotImplementedError):
-        sdio.national_team_elo(fetch=None, cache_path=None)
+def test_live_eloratings_fetcher_is_wired(monkeypatch):
+    """The live fetcher is now wired to eloratings.net/World.tsv. Patch the
+    underlying fetcher to avoid hitting the network; verify the public path
+    returns shaped rows. The detailed parsing is covered in test_data_wiring.py."""
+    monkeypatch.setattr(
+        "core.data.soccerdata_io._fetch_eloratings",
+        lambda: [("Spain", 2155.0), ("France", 2062.0)],
+    )
+    elo = sdio.national_team_elo(fetch=None, cache_path=None)
+    assert elo["Spain"] == 2155.0 and elo["France"] == 2062.0

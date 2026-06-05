@@ -39,14 +39,51 @@ def national_team_elo(fetch=None, cache_path=_DEFAULT, ttl_hours: float = 24) ->
     return cached_json(path, ttl_hours, produce)
 
 
-def _fetch_eloratings():
-    """LIVE (run on your machine): scrape eloratings.net/2026 → [(team, elo), ...].
-    Verified Jun 2026: active, updated after each fixture, highest predictive power.
-    Fallback source if the layout changes: international-football.net/elo-ratings-table.
-    Raises until wired so a half-working scrape can't feed silent garbage."""
-    raise NotImplementedError(
-        "Wire the eloratings.net scrape (or pass fetch=...). The surrounding "
-        "normalize/cache/lookup logic is already implemented & tested.")
+ELORATINGS_TSV_URL = "https://www.eloratings.net/World.tsv"
+
+
+def _fetch_eloratings(url: str = ELORATINGS_TSV_URL, http_get=None):
+    """LIVE: download eloratings.net/World.tsv and yield (team_name, elo) rows.
+
+    The TSV is tab-separated and has no header. Column layout (verified
+    Jun 2026): row_number, rank, team_code, current_elo, +stats... We only
+    need columns [2] (eloratings 2-letter code) and [3] (current Elo rating).
+    The code map (core.data.eloratings_codes) translates the football-specific
+    eloratings codes to canonical team names; unknown codes are skipped (logged
+    once per call) so the team falls back to the neutral 1500 baseline in elo_of().
+
+    http_get is injectable so tests can mock without hitting the network.
+    """
+    import requests
+    from core.data.eloratings_codes import EL_CODE_TO_TEAM
+    if http_get is None:
+        from core import obs
+        def _do():
+            with obs.external_call("eloratings", "world_tsv"):
+                r = requests.get(url, timeout=20)
+                r.raise_for_status()
+                return r.text
+        text = _do()
+    else:
+        text = http_get(url)
+    out, unknown = [], set()
+    for line in text.strip().split("\n"):
+        cols = line.split("\t")
+        if len(cols) < 4:
+            continue
+        code, elo_raw = cols[2].strip(), cols[3].strip()
+        team = EL_CODE_TO_TEAM.get(code)
+        if not team:
+            unknown.add(code)
+            continue
+        try:
+            out.append((team, float(elo_raw)))
+        except ValueError:
+            log.warning("eloratings: bad rating %r for code %s", elo_raw, code)
+    if unknown:
+        log.info("eloratings: %d codes not in map (skipped, fall back to 1500): %s",
+                 len(unknown), sorted(unknown)[:10])
+    return out
 
 
 def elo_of(elo: dict, team: str, default: float = DEFAULT_ELO) -> float:

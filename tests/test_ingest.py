@@ -13,7 +13,9 @@ SAMPLE = {"matches": [
      "score": {"fullTime": {"home": None, "away": None}}},
     {"id": 2, "utcDate": "2026-07-05T19:00:00Z", "status": "SCHEDULED",
      "stage": "LAST_16", "group": None,
-     "homeTeam": {"name": "Korea Republic"}, "awayTeam": {"name": "Cabo Verde"},
+     # spellings that football-data.org actually emits in the WC feed (Jun 2026):
+     "homeTeam": {"name": "Korea Republic"},
+     "awayTeam": {"name": "Cape Verde Islands"},
      "score": {"fullTime": {"home": None, "away": None}}},
     {"id": 3, "utcDate": "2026-06-11T16:00:00Z", "status": "FINISHED",
      "stage": "GROUP_STAGE", "group": "Group B",

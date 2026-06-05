@@ -21,6 +21,7 @@ _ALIASES = {
     "dr congo": "Congo DR", "democratic republic of congo": "Congo DR",
     "congo dr": "Congo DR", "congo": "Congo DR",
     "cabo verde": "Cape Verde", "cape verde": "Cape Verde",
+    "cape verde islands": "Cape Verde",   # football-data.org's spelling
     "czech republic": "Czechia", "czechia": "Czechia",
     "bosnia and herzegovina": "Bosnia-Herzegovina",
     "bosnia-herzegovina": "Bosnia-Herzegovina", "bosnia": "Bosnia-Herzegovina",
