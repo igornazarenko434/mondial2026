@@ -148,6 +148,7 @@ _KNOWN_CROSS_SOURCE_SPELLINGS = [
     ("legacy", "Czech Republic", "Czechia"),
     # Bosnia
     ("alt", "Bosnia and Herzegovina", "Bosnia-Herzegovina"),
+    ("the-odds-api", "Bosnia & Herzegovina", "Bosnia-Herzegovina"),
     ("alt", "Bosnia", "Bosnia-Herzegovina"),
     # Curacao
     ("accented", "Curaçao", "Curacao"),

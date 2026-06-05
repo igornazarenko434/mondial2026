@@ -24,6 +24,7 @@ _ALIASES = {
     "cape verde islands": "Cape Verde",   # football-data.org's spelling
     "czech republic": "Czechia", "czechia": "Czechia",
     "bosnia and herzegovina": "Bosnia-Herzegovina",
+    "bosnia & herzegovina": "Bosnia-Herzegovina",   # the-odds-api spelling
     "bosnia-herzegovina": "Bosnia-Herzegovina", "bosnia": "Bosnia-Herzegovina",
     "curacao": "Curacao", "curaçao": "Curacao",
     "iran": "Iran", "ir iran": "Iran",
