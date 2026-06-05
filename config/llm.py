@@ -12,12 +12,20 @@ Auth (set whichever you use in .env):
 """
 import os
 
-DEFAULT_CHAIN = ["claude", "gemini", "openai"]
+# Free first, cheap-paid second: Gemini Flash is the project's only "free tier"
+# (1500 req/day; we need ~5/day), so put it ahead of paid Claude. Haiku is the
+# cheap-paid safety net when Gemini rate-limits or errors. OpenAI mini is the
+# last fallback. Override via env: LLM_PROVIDER_CHAIN="gemini,claude,openai".
+DEFAULT_CHAIN = ["gemini", "claude", "openai"]
 
-# Cheap/fast models are plenty for this job (parse news -> structured deltas,
-# write the recommendation card). Override per provider via env *_MODEL.
+# Small/cheap class models are correct for this job. The only LLM task is the
+# news/injury agent (orchestrator/agents/news_agent.py): match a fixed rubric
+# and emit a 4-key JSON object. That's structured extraction, not reasoning —
+# Haiku/Flash/mini tier is purpose-built for it, ~6x cheaper than the mid-tier
+# (Sonnet) with comparable accuracy on this shape of task. Override per
+# provider via env *_MODEL if needed.
 MODELS = {
-    "claude": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
+    "claude": os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001"),
     "gemini": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
     "openai": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
 }

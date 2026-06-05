@@ -16,40 +16,59 @@ Important compliance note: the OAuth credential tied to Free/Pro/Max is intended
 **only** for Claude Code / claude.ai / the Agent SDK. Use it **through the Agent
 SDK**, not by hand-rolling it into an unrelated service.
 
-## Recommended setup for you (you have a Claude subscription)
-This project barely touches the LLM — only the **news/injury agent** (parse text
-→ structured deltas) and the **card writer**. That's a handful of small calls per
-match, so cost is tiny.
+## Recommended setup (cheapest path that still works)
 
-1. **Primary: Claude via the Agent SDK on your Pro/Max subscription.** Authenticate
-   Claude Code / the Agent SDK with your plan; the monthly Agent SDK credit covers
-   this hobby usage with near-certainty. Set `CLAUDE_CODE_OAUTH_TOKEN`.
-2. **Fallback: Gemini free tier.** Create a free Google AI Studio key; set
-   `GEMINI_API_KEY`. Free within ~1,500 req/day (Flash) — far more than you need.
-3. **Optional: OpenAI** only if you want a third fallback and don't mind a few
-   cents of pay-as-you-go.
+This project barely touches the LLM — only the **news/injury agent**
+(`orchestrator/agents/news_agent.py`) parses unstructured pre-match news into a
+small JSON object `{home_goal_delta, away_goal_delta, confidence, notes}`. About
+**3–5 calls per match × 104 matches ≈ ~400–500 calls total**, ~500–2000 input
+tokens and ~50–200 output tokens each. That's structured extraction against a
+fixed rubric, not reasoning, so the **small/cheap tier** of each provider is
+correct — Sonnet/GPT-4o/Opus would be overkill and ~6–60× the cost.
+
+The default chain is therefore **free-first, cheap-paid-second**:
+
+1. **Primary: Gemini 2.5 Flash** (free tier, 1,500 req/day — we need ~5/day).
+   Set `GEMINI_API_KEY` from Google AI Studio.
+2. **Fallback: Claude Haiku 4.5** (pay-as-you-go, ~$0.001/1k tokens average).
+   Used only when Gemini errors or rate-limits. Set `ANTHROPIC_API_KEY`
+   (or `CLAUDE_CODE_OAUTH_TOKEN` if you have a Pro/Max Agent SDK credit).
+3. **Last fallback: GPT-4o-mini** (pay-as-you-go, ~$0.0006/1k input). Optional.
+   Set `OPENAI_API_KEY` if you want a third fallback.
 
 ```bash
-# .env
-LLM_PROVIDER_CHAIN=claude,gemini      # try Claude first, fall back to free Gemini
-CLAUDE_CODE_OAUTH_TOKEN=...           # from your Claude subscription
-GEMINI_API_KEY=...                    # free, AI Studio
+# .env (default chain matches config/llm.py)
+LLM_PROVIDER_CHAIN=gemini,claude,openai   # try free first, fall back to cheap paid
+GEMINI_API_KEY=...                         # free, AI Studio
+ANTHROPIC_API_KEY=...                      # pay-as-you-go (or CLAUDE_CODE_OAUTH_TOKEN)
+# OPENAI_API_KEY=...                       # optional 3rd fallback
 ```
 
-The router (`core/llm/router.py`) is fully model-agnostic: change one env var to
-reorder providers or drop one. Missing keys/libraries are skipped automatically,
-so a provider you haven't configured simply isn't used.
+### Why these specific models (and not Sonnet/Opus/Pro)
+
+| Picked model | Tier | What it gets us | Why not the bigger model |
+|---|---|---|---|
+| `gemini-2.5-flash` | small/free | Structured JSON, fast, free tier | Pro is paid and unneeded for rubric extraction |
+| `claude-haiku-4-5-20251001` | small | Cheap, accurate JSON | Sonnet 4.6 is ~6× the price for the same output here; Opus is ~60× |
+| `gpt-4o-mini` | small | Cheapest OpenAI with native JSON mode | GPT-4o / GPT-5 are ~30–50× the price; unnecessary |
+
+The router (`core/llm/router.py`) is fully model-agnostic — set `CLAUDE_MODEL`,
+`GEMINI_MODEL`, `OPENAI_MODEL` per provider to override defaults without code
+changes. Missing keys/libraries are skipped, so an unconfigured provider is
+simply skipped.
 
 ## Total running cost of the whole system
 - **Data** (football-data.org, soccerdata, eloratings) — **free**.
 - **Odds** (The Odds API free tier, 500 req/mo) — **free** if you only pull near
   kickoff.
 - **Lineups/injuries** (API-Football free, 100 req/day) — **free**.
-- **LLM** — **$0** on your Claude subscription credit + Gemini free tier.
+- **LLM** — **~$0** in the common case (Gemini covers it); **~$0.40 worst case**
+  for the whole tournament if every call fell back to Haiku.
 
-→ **Expected out-of-pocket: $0** for normal use. The only way you'd pay is if you
-choose OpenAI pay-as-you-go, or blow past the free quotas (the throttling and
-near-kickoff scheduling in the design prevent that).
+→ **Expected out-of-pocket: ~$0** for normal use. The only way you'd pay is if
+you (a) blow past Gemini's 1,500 req/day (impossible at our ~5/day), (b) every
+Gemini call fails so Haiku takes them all (~$0.40 tournament-wide), or (c) you
+deliberately enable OpenAI as the active provider.
 
 ## How the agent layer plugs in (build order, day 9)
 1. Install `claude-agent-sdk` (and optionally `google-genai`).

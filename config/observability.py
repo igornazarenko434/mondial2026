@@ -31,13 +31,15 @@ PROVIDER_LIMITS = {
 }
 
 # Rough $/unit for cost ESTIMATES (free providers = 0). Tune to your plan.
+# Anthropic Haiku 4.5 pay-as-you-go: ~$1/Mtok input, ~$5/Mtok output (mixed avg
+# ~0.001/1k). Set this so the cost ledger reflects real spend, not zero.
 PRICING = {
     "football_data": {"per_call": 0.0},
     "odds_api":      {"per_call": 0.0},   # free tier; "cost" tracked as credits
     "api_football":  {"per_call": 0.0},
-    "gemini":        {"per_1k_tokens": 0.0},    # free tier
-    "claude":        {"per_1k_tokens": 0.0},    # covered by subscription credit
-    "openai":        {"per_1k_tokens": 0.0006}, # example gpt-4o-mini-ish input price
+    "gemini":        {"per_1k_tokens": 0.0},    # gemini-2.5-flash free tier
+    "claude":        {"per_1k_tokens": 0.001},  # claude-haiku-4-5 PAYG (avg in/out)
+    "openai":        {"per_1k_tokens": 0.0006}, # gpt-4o-mini-ish input price
 }
 
 # Warn when a provider's budget usage crosses this fraction.
