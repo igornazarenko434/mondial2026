@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (132 tests should stay green).
+11. Run `pytest tests/ -q` after every change (171 tests should stay green).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -120,20 +120,55 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       degradation-safe), `tools/calibrate.py` (load→fit→tune→recommend weights).
       ON YOUR MACHINE: wire `results_io._fetch_live`, run `tools.calibrate.run(...)`,
       paste the recommended weights into `config.rules.BLEND_WEIGHTS`.
-- [ ] **Day 4 — odds.** Finish `oddsapi.fetch_match_odds` (match events to
-      fixtures, prefer Pinnacle/Betfair), store snapshots, blend market probs.
-      The WC sport key is resolved at runtime via `oddsapi.resolve_wc_key()` —
-      confirm it returns the live key. Check `ledger.over_budget('odds_api')`
-      before pulls (500 credits/mo; credits = markets×regions).
+- [x] **Day 4 — odds (DONE incl. live audit).** `oddsapi.fetch_match_odds`
+      with budget-guarded fetch (`ledger.over_budget('odds_api')`), `fetch_all_odds`
+      batch path (1 credit returns all events), `match_event_to_fixture` (canonical
+      names + ±36h date window — prevents same-team friendlies false-matching a
+      WC fixture), `pick_book` (Pinnacle → Betfair Exchange → Betfair) with
+      `consensus_book` synthetic fallback, `snapshot_odds` upserting into
+      `odds_snapshots`, `latest_snapshot` reading the sharpest available.
+      LIVE-AUDIT JUN 2026: 1 credit fetched 72 events, 72/72 WC fixtures matched
+      (100% incl. Bosnia after alias fix), 70 Pinnacle + 2 Betfair, Mexico v
+      South Africa devig = 67/21/12 (textbook heavy-favorite), round-trip OK.
+      Re-run the audit script if `the-odds-api` adds new team-name spellings.
 - [ ] **Day 5 — scoring at scale.** Wire actual results → `score_match` →
       `standings` table; implement the -15% reset and prize split end-to-end.
-- [ ] **Day 6 — card + delivery.** Persist `recommend()` to `predictions`, then
-      run it through `orchestrator.pipeline.process_match` so it's delivered via
-      `core/delivery` (file always; add Telegram for phone push) with run-status
-      recorded. Wire `daily_summary()` to push a health report. Schedule
-      `tools/dashboard.py` to refresh `reports/dashboard.html`. Optionally pass the
-      card through `strategy.recommend_to_win(rec, standings_context, tilt)` to add
-      the win-equity tilt (default off; enable late in the tournament).
+      NEW: **penalty winner prediction for knockout draws** —
+      `core/scoring/penalties.py::predict_shootout(elo_h, elo_a) -> {"winner":
+      "H"|"A", "p_winner": float}`. Use small Elo edge (penalties are ~50/50
+      ± weak skill differential — bound `|p_winner - 0.5| <= 0.05` per literature).
+      Carry through to card on KO+draw branch. Add unit tests pinning the bound.
+- [ ] **Day 6 — card + delivery (with FULL AUDIT TRAIL).** Persist `recommend()`
+      to `predictions`, route through `orchestrator.pipeline.process_match`,
+      deliver via `core/delivery`, record run-status. Wire `daily_summary()` and
+      schedule `tools/dashboard.py`. Strategy tilt as opt-in post-step (default 0).
+      NEW: **audit-trail fields on every card**, compact one-line format on the
+      Telegram message:
+        - `signals_used`:   list[str] — actually fed into the matrix
+                            (e.g. ["dixon_coles","elo","market","news"])
+        - `signals_failed`: list[str] — attempted but degraded out
+        - `failure_reasons`: dict[str, str] — why each failed, ≤80 chars each
+                            (e.g. {"market":"odds_api over budget",
+                                   "news":"news_agent: gemini 429, claude empty"})
+        - `ev_pathway`: "ev_optimized" | "modal_fallback"  — which decision branch
+        - `penalty_winner` (KO only): {"winner": "H"|"A", "p_winner": float}
+                                      — set ONLY if stage != Group AND model_prob
+                                      gives draw >= 15%; None otherwise.
+      TELEGRAM RENDER (compact, ≤8 lines including header):
+        ⚽ <home> vs <away> — <kickoff> (<stage> <group>)  ⚡DETONATOR x2
+        Locked odds: <home> <H> / Draw <D> / <away> <A>
+        Model: <home> 22% / Draw 26% / <away> 52%
+        ► Pick: France win, exact <home> 1 — <away> 2   (likeliest 0-1)
+        ► If pens: France  (51%)             ← only on KO+draw branch
+        Expected points ≈ 1.90  → ×2 detonator ≈ 3.80
+        Signals: DC+Elo+Market+News   ← or with failures: "DC+Elo  ⚠market: over_budget"
+        ℹ <up to 2 context bullets, ≤60 chars each>
+      Update render_card to enforce ≤8 lines, truncate context >2 bullets, fail
+      gracefully on missing fields. Add render tests pinning each line shape and
+      the failure-message variant.
+      AUDITABILITY GOLDEN RULE: every signal MUST be reflected either in
+      signals_used OR signals_failed+failure_reasons — never both absent (silent
+      bypass = bug). Add a regression test enforcing this on build_card output.
 - [ ] **Day 7 — futures (pre-tournament bets).** The EV ranker is BUILT
       (`core/decision/futures.py`). Feed it probabilities — simplest/sharpest is
       **de-vigged market futures odds** via `futures.implied_probs(odds)` →
@@ -152,10 +187,36 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       docs/SCHEDULING.md). Optionally wrap the workers as Claude Agent SDK
       subagents. Dry-run on day-1 fixtures; confirm `python -m tools.metrics` shows
       per-game data.
-- [ ] **Day 10 — harden.** Calibration, retries, throttle, finalize futures.
-      Confirm the cost ledger shows you well under all free quotas
-      (`ledger().quota_status(...)`); optionally start Jaeger and watch a full
-      match-window trace end to end (see `docs/OBSERVABILITY.md`).
+- [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** with real
+      post-tournament samples (DC + Elo + market + actual). The partial
+      Step-B DC-vs-Elo tune on real data (Jun 2026) showed DC/Elo ratio
+      0.75/0.25 → rescales to (0.375, 0.125, 0.50) with market=0.50 fixed;
+      current (0.30, 0.20, 0.50) defaults are within 0.4% of optimum so no
+      urgent change. After ≥20 played matches with locked odds, re-run
+      `tools.calibrate.run(...)` with the full 3-source grid (don't hold
+      market fixed) and paste the winning triple. Plus: retries, throttle,
+      finalize futures. Confirm `ledger().quota_status(...)` under all free
+      quotas; optionally start Jaeger for a full match-window trace
+      (see `docs/OBSERVABILITY.md`).
+
+## Cross-day audit checklist (run after EVERY day's wire-up)
+
+1. **Edge-case team-name aliases per data source.** The 5 sites use 5 different
+   spellings; `core/data/teams.py` must canonicalize them all. Known per source
+   (regression-tested in `tests/test_data_wiring.py`):
+   - football-data.org: "Korea Republic", "Cabo Verde", "Cape Verde Islands"
+   - the-odds-api: "Bosnia & Herzegovina" (with `&`), "Czech Republic"
+   - eloratings.net: 2-letter codes via `eloratings_codes.py`
+   - martj42 CSV: "Korea Republic", "Cabo Verde", "Cote d'Ivoire"
+   - api-football: empty until tournament starts — audit at Day 8
+   After any new source addition, run the audit:
+   `for n in {api_names}: assert normalize(n) in groups_truth`.
+2. **Cost-ledger reconciliation.** `obs.cost.ledger().quota_status(provider)`
+   for every provider after a window. Flag >50% used as warning, >80% as alert.
+3. **Robustness pass on every external call.** Each `requests.get/post` must be
+   inside `obs.external_call(...)` (rate limit + cost recorded). Run
+   `grep -rn 'requests.\(get\|post\)' core/data/ orchestrator/` to verify zero
+   ungated calls land in main.
 
 > Observability is already wired (logging + cost ledger always on; OTel tracing
 > optional). As you build each step, keep external calls inside

@@ -188,31 +188,63 @@ Pick the max-EV option in each market. The spreadsheet's Futures tab lets you sa
 
 ## 9. The pre-game output — exact spec
 
-Emitted at T−7m and written to `predictions` + a Markdown/Slack card. JSON shape:
+Emitted at T−7m and written to `predictions` + a Markdown/Slack card.
+**Every card carries full auditability** — which signals fed the model, which
+were attempted-but-degraded-out (with one-line reasons), and for knockout
+matches with non-trivial draw probability, the penalty-shootout pick. JSON shape:
 ```json
 {
   "match_id": 401,
   "kickoff_local": "2026-06-26 22:00",
   "home": "Norway", "away": "France", "group": "I",
   "stage": "Group", "detonator": true,
-  "locked_odds": {"home": 4.20, "draw": 3.60, "away": 1.85},
-  "model_prob": {"home": 0.22, "draw": 0.26, "away": 0.52},
-  "pick_direction": "away",
+  "locked_odds": {"H": 4.20, "D": 3.60, "A": 1.85},
+  "model_prob": {"H": 0.22, "D": 0.26, "A": 0.52},
+  "pick_direction": "A",
   "pick_exact_score": {"home": 1, "away": 2},
   "modal_score": {"home": 0, "away": 1},
   "expected_points": {"direction": 0.96, "exact": 1.90, "with_detonator": 3.80},
   "context": ["Norway likely rotates (qualification scenario)", "Mbappé confirmed starts"],
   "confidence": "medium",
-  "data_freshness": {"odds": "T-7m", "lineups": "confirmed", "model_run": "T-7m"}
+  "data_freshness": {"odds": "T-7m", "lineups": "confirmed", "model_run": "T-7m"},
+
+  /* === AUDIT TRAIL — set on every card (Day 6) ============================ */
+  "signals_used":    ["dixon_coles", "elo", "market", "news"],
+  "signals_failed":  [],
+  "failure_reasons": {},      /* e.g. {"market": "odds_api over budget"} */
+  "ev_pathway":      "ev_optimized",   /* or "modal_fallback" if no usable odds */
+
+  /* === Penalties — set ONLY on knockouts where draw probability >= 15% ==== */
+  "penalty_winner":  null     /* or {"winner": "H"|"A", "p_winner": 0.51} */
 }
 ```
-Human card:
+Human card — **compact, ≤8 lines including header** (efficient and straight to
+the point; truncates context to 2 bullets). The `Signals:` line is the audit
+trail; failures appear inline as `⚠<signal>: <one-line reason>` so the user
+sees exactly what fed the pick and what didn't, without bloat:
 ```
-⚽ Norway vs France — 26.06 22:00 (Group I)  ⚡DETONATOR ×2
-Locked odds: NOR 4.20 / X 3.60 / FRA 1.85   | Model: 22% / 26% / 52%
-► Direction: FRANCE WIN     ► Exact score: France 2–1  (likeliest: 1–0)
-   Expected points ≈ 1.90  → ×2 detonator ≈ 3.80
-ℹ Norway may rest starters; Mbappé starts. Odds & lineups locked at T-7m.
+⚽ Norway vs France — 26.06 22:00 (Group I)  ⚡DETONATOR x2
+Locked odds: Norway 4.20 / Draw 3.60 / France 1.85
+Model: Norway 22% / Draw 26% / France 52%
+► Pick: France win    Exact: Norway 1 — France 2  (likeliest 0-1)
+Expected points ≈ 1.90  → ×2 detonator ≈ 3.80
+Signals: DC+Elo+Market+News
+ℹ Norway may rest starters    ℹ Mbappé confirmed starts
+```
+
+Knockout draw branch adds **one extra line** (the penalty winner pick), so
+the card is at most 9 lines on KO+draw:
+```
+► Pick: Draw           Exact: France 1 — Argentina 1   (likeliest 1-1)
+► If pens: France  (51%)
+```
+
+Degradation example — when news fails and odds are over budget, the card
+stays the same shape but the `Signals:` line tells you which paths failed
+and why (so silent bypass is impossible):
+```
+Signals: DC+Elo   ⚠market: odds_api over budget   ⚠news: gemini 429 → claude empty
+Expected points ≈ 1.30 ⚠ degraded (no market multiplier)
 ```
 
 ---
@@ -243,7 +275,7 @@ mondial2026/                # the actual repo (built & tested)
 ├── tools/                 # dashboard.py · metrics.py                  [built]
 ├── data/                  # wc2026 groups + detonators (seeded)
 ├── docs/                  # design, user guide, cost, reliability, scheduling, obs
-└── tests/                 # pytest (132 passing)
+└── tests/                 # pytest (171 passing)
 ```
 Python 3.11+, threads (`concurrent.futures`), `soccerdata`, `penaltyblog`/`scipy`,
 `pandas`, `numpy`, `requests`, `python-dotenv`; optional `opentelemetry-*`,
