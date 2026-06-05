@@ -187,17 +187,32 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       docs/SCHEDULING.md). Optionally wrap the workers as Claude Agent SDK
       subagents. Dry-run on day-1 fixtures; confirm `python -m tools.metrics` shows
       per-game data.
-- [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** with real
-      post-tournament samples (DC + Elo + market + actual). The partial
-      Step-B DC-vs-Elo tune on real data (Jun 2026) showed DC/Elo ratio
-      0.75/0.25 → rescales to (0.375, 0.125, 0.50) with market=0.50 fixed;
-      current (0.30, 0.20, 0.50) defaults are within 0.4% of optimum so no
-      urgent change. After ≥20 played matches with locked odds, re-run
-      `tools.calibrate.run(...)` with the full 3-source grid (don't hold
-      market fixed) and paste the winning triple. Plus: retries, throttle,
-      finalize futures. Confirm `ledger().quota_status(...)` under all free
-      quotas; optionally start Jaeger for a full match-window trace
-      (see `docs/OBSERVABILITY.md`).
+- [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** — two paths:
+      (a) PRE-TOURNAMENT WARM-START (~50 credits, optional). the-odds-api
+          DOES expose a historical-odds endpoint on the free tier (corrected
+          Jun 2026 — earlier docs claimed otherwise). It costs **10× the
+          standard rate** (`GET /historical/sports/<key>/odds`: 1 market ×
+          1 region × 10 = 10 credits/call), so the 500/mo budget allows
+          ~50 historical calls. Pull odds for the last ~50 played
+          internationals + match to results we already have in martj42 →
+          full 3-source samples → real tune NOW.
+      (b) POST-TOURNAMENT (preferred, free). After ≥20 played WC matches
+          with locked T-7m odds + actual scores, re-run
+          `tools.calibrate.run(...)` with the full 3-source grid (don't
+          hold market fixed) and paste the winning triple.
+      Fallback historical archives if (a) is exhausted: football-data.co.uk
+      (European leagues, club only), Kaggle `mexwell/historical-football-
+      resultsbetting-odds-data`, github.com/iredchuk/soccer-bookmaker-odds,
+      footballcsv.github.io (results only, no odds). Most are club-focused —
+      international-team odds archives are sparse, so (a) is the cleanest
+      pre-tournament option.
+      Partial Step-B DC-vs-Elo tune on real data (Jun 2026) showed DC/Elo
+      ratio 0.75/0.25 → rescales to (0.375, 0.125, 0.50) with market=0.50
+      fixed; current (0.30, 0.20, 0.50) defaults are within 0.4% of optimum
+      so no urgent change.
+      Plus: retries, throttle, finalize futures. Confirm
+      `ledger().quota_status(...)` under all free quotas; optionally start
+      Jaeger for a full match-window trace (see `docs/OBSERVABILITY.md`).
 
 ## Cross-day audit checklist (run after EVERY day's wire-up)
 
