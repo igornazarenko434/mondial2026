@@ -234,3 +234,42 @@ def test_latest_snapshot_prefers_pinnacle_over_consensus():
 def test_latest_snapshot_returns_none_for_unknown_match():
     conn = _schema_conn()
     assert oa.latest_snapshot(conn, 999) is None
+
+
+def test_latest_snapshot_prefers_T7m_lock_over_earlier_windows():
+    """Regression: window labels are strings, so naive ORDER BY captured_at
+    DESC picks 'T-pre-tourney' over 'T-7m' (because 'p' > '7' in ASCII).
+    The fix walks WINDOW_PREFERENCE in order — T-7m lock always wins for
+    scoring even if other window labels were written later."""
+    conn = _schema_conn()
+    # Early-window snapshot inserted first (e.g. from a pre-tournament probe)
+    oa.snapshot_odds(conn, 401, "T-pre-tourney", "pinnacle",
+                      {"H": 1.44, "D": 4.48, "A": 8.28})
+    # T-7m LOCK snapshot inserted later (the actual scoring multiplier)
+    oa.snapshot_odds(conn, 401, "T-7m", "pinnacle",
+                      {"H": 1.85, "D": 3.60, "A": 4.20})
+    snap = oa.latest_snapshot(conn, 401)
+    assert snap["captured_at"] == "T-7m"
+    assert snap["H"] == 1.85  # ← was 1.44 before the fix → wrong score
+
+
+def test_latest_snapshot_walks_window_preference_chain():
+    """T-7m absent → T-15m wins; both absent → T-60m, etc."""
+    conn = _schema_conn()
+    oa.snapshot_odds(conn, 401, "T-15m", "pinnacle",
+                      {"H": 2.0, "D": 3.0, "A": 4.0})
+    oa.snapshot_odds(conn, 401, "T-60m", "pinnacle",
+                      {"H": 2.1, "D": 3.1, "A": 4.1})
+    snap = oa.latest_snapshot(conn, 401)
+    assert snap["captured_at"] == "T-15m"   # higher preference than T-60m
+    assert snap["H"] == 2.0
+
+
+def test_latest_snapshot_falls_back_to_any_window_when_none_preferred():
+    """Manual or experimental snapshot with a non-standard label still scores."""
+    conn = _schema_conn()
+    oa.snapshot_odds(conn, 401, "manual-override", "pinnacle",
+                      {"H": 2.5, "D": 3.5, "A": 2.8})
+    snap = oa.latest_snapshot(conn, 401)
+    assert snap is not None
+    assert snap["captured_at"] == "manual-override"

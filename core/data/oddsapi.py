@@ -244,19 +244,45 @@ def snapshot_odds(conn: sqlite3.Connection, match_id: int, captured_at: str,
     conn.commit()
 
 
+# Window-preference list — the T-7m label is the LOCKED scoring multiplier
+# under the Toto rules; we fall back to earlier windows only if the lock
+# snapshot is unavailable for some reason.
+WINDOW_PREFERENCE = ("T-7m", "T-15m", "T-60m", "T-24h", "T-pre-tourney")
+
+
 def latest_snapshot(conn: sqlite3.Connection, match_id: int,
-                    book_preference: tuple[str, ...] = DEFAULT_PREFER_BOOKS
+                    prefer_windows: tuple[str, ...] = WINDOW_PREFERENCE,
+                    prefer_books: tuple[str, ...] = DEFAULT_PREFER_BOOKS
                     ) -> dict | None:
-    """Return the most-recent snapshot for a match, preferring sharper books.
-    Read path used by `score_match` to look up the locked multiplier post-game.
+    """Return the best available snapshot for a match.
+
+    Resolution rules (in this order):
+      1. Walk prefer_windows in order — first window with any rows wins.
+      2. Within that window, walk prefer_books in order — sharpest book wins.
+      3. If no preferred window has rows, fall back to ANY snapshot (sorted
+         by book preference) so a manually-inserted row still scores.
+
+    Used by `core.scoring.standings_writer.score_one_match` to look up the
+    LOCKED scoring multiplier — `T-7m` lock by default; explicit override
+    via `prefer_windows=("T-7m",)` to force a strict lock-only lookup.
     """
+    book_idx = {b: i for i, b in enumerate(prefer_books + ("consensus",))}
+
+    def _best_row(rows):
+        rows.sort(key=lambda r: book_idx.get(r[1], 99))
+        captured_at, book, h, d, a = rows[0]
+        return {"captured_at": captured_at, "book": book,
+                "H": h, "D": d, "A": a}
+
+    for window in prefer_windows:
+        rows = conn.execute(
+            "SELECT captured_at, book, odds_h, odds_d, odds_a "
+            "FROM odds_snapshots WHERE match_id=? AND captured_at=?",
+            (match_id, window)).fetchall()
+        if rows:
+            return _best_row(rows)
+    # No preferred-window snapshot — fall back to any row by book preference.
     rows = conn.execute(
         "SELECT captured_at, book, odds_h, odds_d, odds_a "
-        "FROM odds_snapshots WHERE match_id=? "
-        "ORDER BY captured_at DESC", (match_id,)).fetchall()
-    if not rows:
-        return None
-    by_pref = {b: i for i, b in enumerate(book_preference + ("consensus",))}
-    rows.sort(key=lambda r: by_pref.get(r[1], 99))
-    captured_at, book, h, d, a = rows[0]
-    return {"captured_at": captured_at, "book": book, "H": h, "D": d, "A": a}
+        "FROM odds_snapshots WHERE match_id=?", (match_id,)).fetchall()
+    return _best_row(rows) if rows else None
