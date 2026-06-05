@@ -17,6 +17,6 @@ pytest>=7.4
 # google-genai
 # openai
 
-# Observability (optional; layer degrades to no-ops without these)
-# opentelemetry-sdk
-# opentelemetry-exporter-otlp
+# Observability (tracing — pulls into core/obs/tracing.py automatically)
+opentelemetry-sdk>=1.42
+opentelemetry-exporter-otlp>=1.42     # OTLP exporter for Jaeger/Tempo/Honeycomb
