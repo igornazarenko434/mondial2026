@@ -44,9 +44,15 @@ class CostLedger:
             self.conn = db
         else:
             self.conn = sqlite3.connect(db or ":memory:", check_same_thread=False)
-        self._lock = threading.Lock()
-        self.conn.execute(_DDL)
-        self.conn.commit()
+        # RLock so composed methods (quota_status -> usage) don't self-deadlock.
+        # Every conn.execute() — read or write — must run under this lock.
+        # SQLite with check_same_thread=False lets you share a connection across
+        # threads, but doesn't serialize statements: concurrent SELECT during a
+        # write drops inserts and can return None from fetchone() on aggregates.
+        self._lock = threading.RLock()
+        with self._lock:
+            self.conn.execute(_DDL)
+            self.conn.commit()
 
     def _est(self, provider: str, units: float, tokens: int) -> float:
         p = cfg.PRICING.get(provider, {})
@@ -71,10 +77,11 @@ class CostLedger:
 
     def metrics_for(self, correlation_id: str) -> dict:
         """Per-game / per-run metrics straight from the persisted ledger."""
-        row = self.conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(tokens),0), COALESCE(AVG(duration_ms),0),"
-            " COALESCE(SUM(est_cost),0), SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END)"
-            " FROM api_calls WHERE correlation_id=?", (correlation_id,)).fetchone()
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(tokens),0), COALESCE(AVG(duration_ms),0),"
+                " COALESCE(SUM(est_cost),0), SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END)"
+                " FROM api_calls WHERE correlation_id=?", (correlation_id,)).fetchone()
         return {"correlation_id": correlation_id, "calls": row[0], "tokens": row[1],
                 "avg_ms": round(row[2], 1), "est_cost": round(row[3], 4), "errors": row[4]}
 
@@ -84,7 +91,8 @@ class CostLedger:
         if period:
             q += " AND ts>=?"
             args.append(_period_start(period))
-        c, units, tokens, cost = self.conn.execute(q, args).fetchone()
+        with self._lock:
+            c, units, tokens, cost = self.conn.execute(q, args).fetchone()
         return {"calls": c, "units": units, "tokens": tokens, "est_cost": round(cost, 4)}
 
     def quota_status(self, provider: str) -> dict:
