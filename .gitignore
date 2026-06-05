@@ -1,0 +1,147 @@
+# ---- Secrets (NEVER commit) ---------------------------------------
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+.env.test
+secrets/
+*.pem
+*.key
+*.crt
+credentials.json
+service-account*.json
+
+# ---- Python -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ---- Virtualenvs --------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# ---- Testing & coverage -------------------------------------------
+.pytest_cache/
+.cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ---- Linters / type checkers --------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ---- Jupyter ------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ---- Project artifacts (runtime, regenerable) ---------------------
+store/*.db
+store/*.db-journal
+store/*.db-shm
+store/*.db-wal
+store/heartbeat
+store/*.json
+reports/*.md
+reports/*.html
+*.parquet
+*.csv.gz
+.cache/
+
+# ---- Logs / temp --------------------------------------------------
+*.log
+logs/
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+.#*
+\#*\#
+
+# ---- macOS --------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+Icon
+.fseventsd
+.TemporaryItems
+
+# ---- Windows ------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---- Linux --------------------------------------------------------
+.directory
+.Trash-*
+.nfs*
+
+# ---- Editors / IDEs ----------------------------------------------
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+.project
+.classpath
+.settings/
+nbproject/
+*.iml
+*.ipr
+*.iws
+.history/
+.devcontainer/
+
+# ---- Claude Code / agent local state ------------------------------
+.claude/
+.claude.local.md
+
+# ---- Allowlist (keep these tracked) -------------------------------
+!.env.example
+!.gitkeep

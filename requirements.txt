@@ -1,0 +1,22 @@
+# Core
+pandas>=2.0
+numpy>=1.24
+requests>=2.31
+python-dotenv>=1.0
+# Modeling
+scipy>=1.11
+penaltyblog>=1.0        # Dixon-Coles + helpers (optional; scipy fallback provided)
+soccerdata>=1.8         # FBref / ClubElo / Understat scrapers
+# Orchestration (add when you wire the agent layer)
+# claude-agent-sdk
+# Dev
+pytest>=7.4
+
+# LLM providers (install only the ones you use; router degrades gracefully)
+# anthropic
+# google-genai
+# openai
+
+# Observability (optional; layer degrades to no-ops without these)
+# opentelemetry-sdk
+# opentelemetry-exporter-otlp

@@ -1,0 +1,10 @@
+match_round,date,kickoff_israel_time,home,away,group,detonator,notes
+Group R1,2026-06-11,22:00,Mexico,South Africa,A,Y,Tournament opening match
+Group R1,2026-06-17,23:00,England,Croatia,L,Y,
+Group R2,2026-06-18,22:00,Switzerland,Bosnia-Herzegovina,B,Y,
+Group R2,2026-06-20,20:00,Netherlands,Sweden,F,Y,
+Group R3,2026-06-24,22:00,Switzerland,Canada,B,Y,
+Group R3,2026-06-26,22:00,Norway,France,I,Y,
+KO R32,TBD,TBD,TBD,TBD,,Y,detonator x1 in round of 32 (game TBD)
+KO R16,TBD,TBD,TBD,TBD,,Y,detonator x1 in round of 16 (game TBD)
+KO QF,TBD,TBD,TBD,TBD,,Y,detonator x1 in quarter-final (game TBD)
