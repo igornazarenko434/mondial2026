@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "negev-toto": {
+      "command": "python3",
+      "args": ["-m", "integrations.negev_toto_mcp"],
+      "cwd": "/Users/igornazarenko/private_Igor/Mondial_2026/mondial2026",
+      "env": {
+        "NEGEV_EMAIL": "PUT-YOUR-TOTO-EMAIL-HERE",
+        "NEGEV_PASSWORD": "PUT-YOUR-TOTO-PASSWORD-HERE"
+      }
+    }
+  }
+}
