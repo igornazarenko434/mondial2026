@@ -1,14 +1,28 @@
 """Web-search adapter for the news agent (Day 8).
 
 Currently wires Brave Search API (https://api.search.brave.com). Free tier:
-2,000 queries/month, JSON response. The wrapper is fully OPTIONAL — if
+**2,000 queries/month, 1 query/second.** The wrapper is fully OPTIONAL — if
 `BRAVE_SEARCH_API_KEY` isn't set, every call returns []. The news agent then
 proceeds with API-Football only.
 
+THREE-LAYER QUOTA PROTECTION (defends the free tier):
+  1. Per-second rate limiter — config/observability.py PROVIDER_LIMITS
+     gives brave_search rate=1/per=1 (= 1 req/sec, the published Brave limit).
+     Enforced by obs.external_call via the token-bucket.
+  2. Monthly hard budget — same config sets budget=2000 budget_period='month'.
+     `_budget_clear()` checks before each HTTP and short-circuits when at
+     `BRAVE_BUDGET_BRAKE_FRACTION` (0.95) of cap → leaves the last 5% for
+     kickoff-day spikes.
+  3. Daily soft cap — `BRAVE_DAILY_LIMIT` (default 80/day) prevents one
+     runaway day from blowing the whole month. Counts rolling-24h calls.
+
 Usage:
-    from core.data.web_search import web_search
+    from core.data.web_search import web_search, quota_status
     results = web_search("Norway vs France WC 2026 lineup 2026-06-26", n=5)
     # → [{"title": "...", "snippet": "...", "url": "...", "date": "2026-06-26"}]
+    print(quota_status())  # {"month_used": 612, "month_budget": 2000,
+                            #  "month_fraction": 0.306, "day_used": 31,
+                            #  "day_limit": 80, "ok": True}
 
 Returns at most `n` results, each ≤ ~250 chars of snippet to keep our LLM
 context budget bounded (see config/news.py::SNIPPET_LEN).
@@ -16,11 +30,12 @@ context budget bounded (see config/news.py::SNIPPET_LEN).
 from __future__ import annotations
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 import requests
 
 from core.obs.logging import get_logger
+from config.news import BRAVE_DAILY_LIMIT, BRAVE_BUDGET_BRAKE_FRACTION
 
 log = get_logger("data.web_search")
 
@@ -31,6 +46,74 @@ DEFAULT_FRESHNESS = "pw"      # "past week" — matches our NEWS_RECENCY_HOURS=4
 def available() -> bool:
     """True iff a Brave key is configured. Caller can short-circuit."""
     return bool(os.environ.get("BRAVE_SEARCH_API_KEY"))
+
+
+def _day_count() -> int:
+    """Brave-search calls in the last rolling 24h, from the cost ledger.
+    Cheap query; called once per outbound call so the daily cap is real-time."""
+    try:
+        from core.obs.cost import ledger
+        c = ledger().conn
+        with ledger()._lock:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+            n = c.execute("SELECT COUNT(*) FROM api_calls "
+                           "WHERE provider='brave_search' AND ts>=?",
+                           (cutoff,)).fetchone()[0]
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def _budget_clear() -> bool:
+    """Multi-gate guard: short-circuit BEFORE the HTTP request if either the
+    monthly fraction or the daily cap would be exceeded.
+
+    Returns True when it's safe to call; logs WARN and returns False otherwise.
+    """
+    # Gate 1: monthly fraction
+    try:
+        from core.obs.cost import ledger
+        from config.observability import PROVIDER_LIMITS
+        budget = (PROVIDER_LIMITS.get("brave_search") or {}).get("budget")
+        if budget:
+            st = ledger().quota_status("brave_search")
+            used = int(st.get("used") or 0)
+            if used >= budget * BRAVE_BUDGET_BRAKE_FRACTION:
+                log.warning("brave_search MONTHLY brake hit: %d/%d (%.0f%%) >= %.0f%% — skipping",
+                            used, budget, 100 * used / budget,
+                            100 * BRAVE_BUDGET_BRAKE_FRACTION)
+                return False
+    except Exception as e:                                # noqa: BLE001
+        log.debug("brave_search monthly check failed: %s", e)
+
+    # Gate 2: daily soft cap (rolling 24h)
+    if BRAVE_DAILY_LIMIT > 0:
+        used_today = _day_count()
+        if used_today >= BRAVE_DAILY_LIMIT:
+            log.warning("brave_search DAILY cap hit: %d/%d in last 24h — skipping",
+                        used_today, BRAVE_DAILY_LIMIT)
+            return False
+    return True
+
+
+def quota_status() -> dict:
+    """One-shot summary for tools/dashboard and CLI checks. Safe to call any
+    time — never touches Brave; only reads our local ledger."""
+    out = {"month_used": 0, "month_budget": 2000, "month_fraction": 0.0,
+            "day_used": 0, "day_limit": BRAVE_DAILY_LIMIT, "ok": True,
+            "key_set": available()}
+    try:
+        from core.obs.cost import ledger
+        from config.observability import PROVIDER_LIMITS
+        st = ledger().quota_status("brave_search")
+        out["month_used"] = int(st.get("used") or 0)
+        out["month_budget"] = int(st.get("budget") or 2000)
+        out["month_fraction"] = round(out["month_used"] / max(1, out["month_budget"]), 3)
+        out["day_used"] = _day_count()
+        out["ok"] = _budget_clear()
+    except Exception as e:                                # noqa: BLE001
+        log.debug("quota_status failed: %s", e)
+    return out
 
 
 def _headers() -> dict | None:
@@ -75,6 +158,10 @@ def web_search(query: str, n: int = 5, snippet_len: int = 250,
     """
     h = _headers()
     if not h:
+        return []
+    # Quota gates BEFORE the HTTP — see module docstring; this never blocks
+    # delivery, just returns no web results so API-Football alone drives the LLM.
+    if not _budget_clear():
         return []
     from core import obs
     params = {"q": query, "count": max(1, min(n, 20)), "freshness": freshness,

@@ -23,6 +23,19 @@ QUERIES_PER_WINDOW = {
     "T-15m": int(os.environ.get("NEWS_QUERIES_T_15M", "2")),
 }
 
+# Brave Search free-tier protection (Day 8) — two safeguards layered on top
+# of the monthly 2000-query budget already in config/observability.py.
+#
+# DAILY soft cap: even though the monthly budget is enforced, a runaway run
+# (bad retry loop, debug session) could spend it in one day. This caps the
+# per-rolling-24h call count so we always have at least N days worth of
+# capacity left for the actual tournament. Configurable; 0 disables.
+BRAVE_DAILY_LIMIT = int(os.environ.get("BRAVE_DAILY_LIMIT", "80"))
+# Hard CIRCUIT BREAKER: stop calling Brave when monthly usage crosses this
+# fraction of budget. Leaves a safety margin so a delivery-spike day at
+# kickoff doesn't kill the rest of the tournament.
+BRAVE_BUDGET_BRAKE_FRACTION = float(os.environ.get("BRAVE_BUDGET_BRAKE_FRACTION", "0.95"))
+
 
 def should_search(window: str) -> bool:
     """True if the news agent should look for info in this window (never at T-7m)."""
