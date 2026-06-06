@@ -1,0 +1,255 @@
+"""Day-6 build_card — the central model→decision→audit assembler.
+
+This is the single function the scheduler dispatches at each window. It loads
+every signal, runs the model, stamps the AUDIT TRAIL on the card so a reader
+can see exactly what fed the pick (and what didn't, with one-line reasons),
+optionally predicts a penalty-shootout winner on knockouts with non-trivial
+draw probability, and persists to the `predictions` table.
+
+GOLDEN AUDITABILITY RULE: every signal in {dixon_coles, elo, market, news}
+must appear in EITHER signals_used OR signals_failed+failure_reasons —
+silent bypass is a bug. Pinned by test_build_card.
+
+NEVER RAISES (CLAUDE.md golden rule #10). Loaders are wrapped in try/except;
+on total failure we still return a (degraded) renderable card so the pipeline
+can deliver it with the right alert annotations.
+"""
+from __future__ import annotations
+import json
+from datetime import datetime, timezone
+from typing import Callable
+from zoneinfo import ZoneInfo
+import os
+
+from config.rules import DRAW_PEN_THRESHOLD
+from core.data.teams import normalize
+from core.data.results_io import historical_results
+from core.data.soccerdata_io import national_team_elo, elo_of
+from core.data.oddsapi import fetch_match_odds
+from core.models.fit import cached_strengths, expected_goals_fn
+from core.models.predict import match_card
+from core.scoring.penalties import predict_shootout
+from orchestrator.agents.news_agent import analyze_safe
+from core.obs.logging import get_logger
+
+log = get_logger("decision.build_card")
+
+# Stages eligible for a penalty-winner pick — group games go to draw, not pens.
+_KO_STAGES = {"R32", "R16", "QF", "SF", "3rd", "Final"}
+
+ALL_SIGNALS = ("dixon_coles", "elo", "market", "news")
+
+
+def _trim(s: str, n: int = 80) -> str:
+    """Compact one-line failure reason; never blow up a card with long stacks."""
+    out = " ".join(str(s).split())[:n]
+    return out
+
+
+def _utc_to_local(utc_iso: str | None, tz: str | None = None) -> str | None:
+    """UTC ISO → local-time display string (Israel by default)."""
+    if not utc_iso:
+        return None
+    tz_name = tz or os.environ.get("LOCAL_TZ", "Asia/Jerusalem")
+    try:
+        dt = datetime.fromisoformat(str(utc_iso).replace("Z", "+00:00"))
+        return dt.astimezone(ZoneInfo(tz_name)).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+def build_card(match: dict, conn=None, *,
+               strengths_loader: Callable | None = None,
+               elo_loader: Callable | None = None,
+               odds_fetcher: Callable | None = None,
+               news_analyzer: Callable | None = None,
+               results_loader: Callable | None = None,
+               events_cache: list | None = None,
+               draw_pen_threshold: float | None = None,
+               local_tz: str | None = None,
+               window: str = "T-7m") -> dict:
+    """Build a fully-audited card for one match. Never raises.
+
+    Loaders are injectable for offline testing. In production each defaults
+    to the real wiring (martj42 results → DC fit → strengths cache;
+    eloratings.net daily cache; the-odds-api batched fetch with budget guard;
+    news_agent.analyze_safe).
+
+    events_cache lets the scheduler share ONE fetch_all_odds call across many
+    matches in the same window (saves credits).
+
+    Persists to `predictions` if conn given (upsert on (match_id, window)).
+    """
+    strengths_loader = strengths_loader or cached_strengths
+    elo_loader       = elo_loader       or national_team_elo
+    odds_fetcher     = odds_fetcher     or fetch_match_odds
+    news_analyzer    = news_analyzer    or analyze_safe
+    results_loader   = results_loader   or historical_results
+    threshold        = draw_pen_threshold if draw_pen_threshold is not None else DRAW_PEN_THRESHOLD
+
+    home = normalize(match.get("home")) or "Home"
+    away = normalize(match.get("away")) or "Away"
+    stage = match.get("stage") or "Group"
+    detonator = bool(match.get("detonator", False))
+
+    signals_used: list[str] = []
+    signals_failed: list[str] = []
+    failure_reasons: dict[str, str] = {}
+
+    # ───── 1. Dixon-Coles fit → expected_goals_fn ─────
+    try:
+        results = results_loader()
+        strengths = strengths_loader(results)
+        if not strengths or not strengths.get("teams"):
+            raise ValueError("empty strengths dict")
+        eg_fn = expected_goals_fn(strengths)
+        signals_used.append("dixon_coles")
+    except Exception as e:                       # noqa: BLE001
+        signals_failed.append("dixon_coles")
+        failure_reasons["dixon_coles"] = _trim(e)
+        eg_fn = lambda h, a: (1.3, 1.1)          # neutral fallback
+
+    # ───── 2. Elo ratings ─────
+    try:
+        elo = elo_loader()
+        if not elo:
+            raise ValueError("empty elo dict")
+        signals_used.append("elo")
+    except Exception as e:                       # noqa: BLE001
+        signals_failed.append("elo")
+        failure_reasons["elo"] = _trim(e)
+        elo = {}
+
+    # ───── 3. Market odds (the SCORING multiplier) ─────
+    try:
+        scoring_odds = odds_fetcher(home, away,
+                                    kickoff_utc=match.get("utc_kickoff"),
+                                    events=events_cache)
+        if scoring_odds and all(isinstance(scoring_odds.get(k), (int, float))
+                                and scoring_odds[k] > 1.0 for k in ("H", "D", "A")):
+            signals_used.append("market")
+        else:
+            signals_failed.append("market")
+            failure_reasons["market"] = ("odds_api over budget or no event"
+                                         if scoring_odds is None
+                                         else "incomplete or invalid odds")
+            scoring_odds = None
+    except Exception as e:                       # noqa: BLE001
+        signals_failed.append("market")
+        failure_reasons["market"] = _trim(e)
+        scoring_odds = None
+
+    # ───── 4. News-injury deltas (Day 8) ─────
+    # analyze_safe returns NEUTRAL on any failure, so "success" here may still
+    # mean "no shift". That's correct — the signal ran and contributed zero.
+    try:
+        deltas = news_analyzer(home, away, context_text="")
+        news_deltas = (float(deltas.get("home_goal_delta", 0.0)),
+                       float(deltas.get("away_goal_delta", 0.0)))
+        signals_used.append("news")
+    except Exception as e:                       # noqa: BLE001
+        signals_failed.append("news")
+        failure_reasons["news"] = _trim(e)
+        news_deltas = (0.0, 0.0)
+
+    # ───── 5. Run the model assembler ─────
+    try:
+        card = match_card(home=home, away=away, stage=stage,
+                          detonator=detonator,
+                          expected_goals_fn=eg_fn, elo=elo,
+                          scoring_odds=scoring_odds,
+                          news_deltas=news_deltas)
+    except Exception as e:                       # noqa: BLE001 - defensive only
+        log.exception("match_card raised in build_card; returning alert card")
+        card = {"home": home, "away": away, "stage": stage,
+                "model_prob": {"H": 1/3, "D": 1/3, "A": 1/3},
+                "pick_exact_score": {"home": 0, "away": 0},
+                "pick_direction": "?",
+                "modal_score": {"home": 0, "away": 0},
+                "expected_points": None, "detonator": detonator,
+                "locked_odds": scoring_odds, "ranked_alternatives": [],
+                "note": _trim(f"match_card failed: {e}", 120)}
+        if "model" not in signals_failed:
+            signals_failed.append("model")
+            failure_reasons["model"] = _trim(e)
+
+    # ───── 6. Decision-branch label ─────
+    card["ev_pathway"] = ("modal_fallback"
+                          if card.get("expected_points") is None
+                             or card.get("note")
+                          else "ev_optimized")
+
+    # ───── 7. Penalty-winner pick (KO + draw_prob >= threshold) ─────
+    card["penalty_winner"] = None
+    if stage in _KO_STAGES:
+        draw_p = float(card.get("model_prob", {}).get("D", 0.0) or 0.0)
+        if draw_p >= threshold:
+            elo_h = elo_of(elo, home) if elo else 1500.0
+            elo_a = elo_of(elo, away) if elo else 1500.0
+            card["penalty_winner"] = predict_shootout(elo_h, elo_a)
+
+    # ───── 8. AUDIT TRAIL — pin to the card BEFORE the golden-rule check ─────
+    card["signals_used"]    = signals_used
+    card["signals_failed"]  = signals_failed
+    card["failure_reasons"] = failure_reasons
+
+    # Golden auditability rule: every signal must appear somewhere. The
+    # production path enforces this by construction (we visit every signal
+    # exactly once above), but log loudly if some future refactor breaks it.
+    covered = set(signals_used) | set(signals_failed)
+    missing = [s for s in ALL_SIGNALS if s not in covered]
+    if missing:
+        log.error("auditability violation in build_card: missing %s", missing)
+
+    # ───── 9. Match metadata ─────
+    card["match_id"]    = match.get("match_id")
+    card["window"]      = window
+    card["kickoff_utc"] = match.get("utc_kickoff")
+    # Always re-derive kickoff_local for a clean display format — don't trust
+    # the raw ISO string football-data stored in the matches.local_kickoff col.
+    card["kickoff_local"] = _utc_to_local(match.get("utc_kickoff"), local_tz)
+    # Strip football-data's "GROUP_" prefix for a tighter card header.
+    raw_group = match.get("group") or match.get("grp")
+    if isinstance(raw_group, str) and raw_group.upper().startswith("GROUP_"):
+        raw_group = raw_group[len("GROUP_"):]
+    card["group"] = raw_group
+
+    # ───── 10. Persistence ─────
+    if conn is not None:
+        try:
+            persist_card(conn, card)
+        except Exception as e:                   # noqa: BLE001
+            log.error("persist_card failed for match %s: %s",
+                      card.get("match_id"), e)
+
+    return card
+
+
+def persist_card(conn, card: dict) -> None:
+    """Upsert one card into the predictions table. payload_json holds the
+    full card so we can reconstruct everything (audit, penalty, context)
+    after a restart without re-running the model."""
+    pick  = card.get("pick_exact_score") or {}
+    modal = card.get("modal_score")      or {}
+    ev    = card.get("expected_points")
+    ev_num = ev if isinstance(ev, (int, float)) else None
+    conn.execute(
+        "INSERT INTO predictions (match_id, created_at, window, pick_dir, "
+        "pick_h, pick_a, modal_h, modal_a, expected_points, payload_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(match_id, window) DO UPDATE SET "
+        "created_at=excluded.created_at, "
+        "pick_dir=excluded.pick_dir, "
+        "pick_h=excluded.pick_h, pick_a=excluded.pick_a, "
+        "modal_h=excluded.modal_h, modal_a=excluded.modal_a, "
+        "expected_points=excluded.expected_points, "
+        "payload_json=excluded.payload_json",
+        (card.get("match_id"),
+         datetime.now(timezone.utc).isoformat(),
+         card.get("window", "T-7m"),
+         card.get("pick_direction"),
+         pick.get("home"), pick.get("away"),
+         modal.get("home"), modal.get("away"),
+         ev_num,
+         json.dumps(card, default=str, ensure_ascii=False)))
+    conn.commit()

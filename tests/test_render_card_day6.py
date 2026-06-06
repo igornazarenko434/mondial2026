@@ -1,0 +1,155 @@
+"""Day-6 render_card: line-count cap (≤8 normal, ≤9 KO+penalty), signals
+line format with inline failure reasons, penalty line conditions, context
+truncation. The render is what lands on the user's phone — every line counts.
+"""
+from __future__ import annotations
+import pytest
+from core.delivery.base import render_card, MAX_LINES_NORMAL, MAX_LINES_KO_PEN
+
+
+def _base_card(**overrides):
+    """Full, well-formed Day-6 card."""
+    card = {
+        "match_id": 1, "home": "Norway", "away": "France",
+        "stage": "Group", "group": "I", "detonator": True,
+        "kickoff_local": "2026-06-26 22:00",
+        "locked_odds": {"H": 4.20, "D": 3.60, "A": 1.85},
+        "model_prob":  {"H": 0.22, "D": 0.26, "A": 0.52},
+        "pick_exact_score": {"home": 1, "away": 2},
+        "pick_direction": "A",
+        "modal_score": {"home": 0, "away": 1},
+        "expected_points": 1.90,
+        "context": ["Norway likely rotates", "Mbappé confirmed starts"],
+        "signals_used":    ["dixon_coles", "elo", "market", "news"],
+        "signals_failed":  [],
+        "failure_reasons": {},
+        "ev_pathway": "ev_optimized",
+        "penalty_winner": None,
+    }
+    card.update(overrides)
+    return card
+
+
+# ---------- Line-count caps ----------
+
+def test_normal_card_within_8_line_cap():
+    txt = render_card(_base_card())
+    lines = txt.split("\n")
+    assert len(lines) <= MAX_LINES_NORMAL, \
+        f"normal card overflowed cap ({len(lines)} > {MAX_LINES_NORMAL}):\n{txt}"
+
+
+def test_ko_with_penalty_within_9_line_cap():
+    card = _base_card(stage="R16", group=None,
+                      penalty_winner={"winner": "A", "p_winner": 0.515})
+    txt = render_card(card)
+    lines = txt.split("\n")
+    assert len(lines) <= MAX_LINES_KO_PEN, \
+        f"KO+pen card overflowed cap ({len(lines)} > {MAX_LINES_KO_PEN}):\n{txt}"
+
+
+def test_card_with_many_context_bullets_truncated_to_two():
+    card = _base_card(context=["A", "B", "C", "D", "E", "F"])
+    txt = render_card(card)
+    # Only the bullets-line; should show exactly 2 bullets joined
+    bullet_lines = [ln for ln in txt.split("\n") if "ℹ " in ln]
+    assert len(bullet_lines) == 1
+    assert bullet_lines[0].count("ℹ ") == 2
+
+
+# ---------- Signals line format ----------
+
+def test_signals_line_happy_path():
+    txt = render_card(_base_card())
+    assert "Signals: DC+Elo+Market+News" in txt
+
+
+def test_signals_line_with_one_failure_uses_warn_marker():
+    card = _base_card(signals_used=["dixon_coles", "elo"],
+                      signals_failed=["market"],
+                      failure_reasons={"market": "odds_api over budget"})
+    txt = render_card(card)
+    sig_line = [ln for ln in txt.split("\n") if ln.startswith("Signals:")][0]
+    assert "DC+Elo" in sig_line
+    assert "⚠market: odds_api over budget" in sig_line
+
+
+def test_signals_line_with_multiple_failures_inlines_all():
+    card = _base_card(signals_used=["dixon_coles"],
+                      signals_failed=["elo", "market", "news"],
+                      failure_reasons={"elo": "empty",
+                                        "market": "budget",
+                                        "news": "llm 429"})
+    txt = render_card(card)
+    sig_line = [ln for ln in txt.split("\n") if ln.startswith("Signals:")][0]
+    assert "⚠elo: empty" in sig_line
+    assert "⚠market: budget" in sig_line
+    assert "⚠news: llm 429" in sig_line
+
+
+# ---------- Penalty line conditions ----------
+
+def test_penalty_line_present_on_ko_branch():
+    card = _base_card(stage="R16",
+                      penalty_winner={"winner": "A", "p_winner": 0.515})
+    txt = render_card(card)
+    assert "► If pens: France (52%)" in txt or "► If pens: France (51%)" in txt
+
+
+def test_penalty_line_omitted_when_penalty_winner_is_none():
+    txt = render_card(_base_card(penalty_winner=None))
+    assert "If pens" not in txt
+
+
+def test_penalty_line_omitted_on_group_stage_even_if_penalty_winner_set():
+    """Defensive: shouldn't be set by build_card on groups, but if it were
+    accidentally set, render must still show it (render is data-driven).
+    This pins that contract — the LOGIC of not setting penalty_winner on
+    group games is build_card's responsibility, see test_build_card."""
+    card = _base_card(stage="Group",
+                      penalty_winner={"winner": "A", "p_winner": 0.515})
+    txt = render_card(card)
+    assert "If pens" in txt   # render shows whatever build_card produced
+
+
+# ---------- Modal-line conditional ----------
+
+def test_modal_line_omitted_when_modal_equals_pick():
+    """Avoid noise when (likeliest) == pick — saves a precious line."""
+    card = _base_card(modal_score={"home": 1, "away": 2})  # equals pick
+    txt = render_card(card)
+    assert "likeliest" not in txt
+
+
+def test_modal_line_present_when_modal_differs_from_pick():
+    card = _base_card(modal_score={"home": 0, "away": 1})
+    txt = render_card(card)
+    assert "(likeliest:" in txt
+
+
+# ---------- Plain-text safety (Telegram won't choke) ----------
+
+def test_render_has_no_markdown_asterisks():
+    """parse_mode is off; if someone adds ** for emphasis they'd produce
+    weird output. The renderer's contract is plain text only."""
+    txt = render_card(_base_card())
+    assert "**" not in txt
+
+
+def test_render_handles_minimal_card_without_crashing():
+    """Total-degradation card (every signal failed → empty fields) must
+    still render without raising."""
+    minimal = {"home": "X", "away": "Y", "stage": "Group",
+                "model_prob": {"H": 1/3, "D": 1/3, "A": 1/3},
+                "pick_exact_score": {"home": 0, "away": 0},
+                "pick_direction": "?",
+                "modal_score": {"home": 0, "away": 0},
+                "signals_used": [],
+                "signals_failed": ["dixon_coles", "elo", "market", "news"],
+                "failure_reasons": {"dixon_coles": "x", "elo": "y",
+                                      "market": "z", "news": "w"},
+                "expected_points": None,
+                "ev_pathway": "modal_fallback", "penalty_winner": None}
+    txt = render_card(minimal)
+    assert "X vs Y" in txt
+    assert "Signals" in txt

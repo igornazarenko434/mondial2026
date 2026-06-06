@@ -35,7 +35,8 @@ def test_render_card_uses_team_names_not_letters():
     out = render_card(_full_card())
     # team names appear; raw H/D/A codes from pick_direction don't leak.
     assert "Norway" in out and "France" in out
-    assert "► Direction: France win" in out
+    # Day-6 label: "► Pick: <team> win" (was "► Direction:" pre-Day-6).
+    assert "► Pick: France win" in out
     # kickoff included
     assert "2026-06-26 22:00" in out
     # detonator note shown

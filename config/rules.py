@@ -85,3 +85,8 @@ CINDERELLA_PAYOUT = {  # §9
 
 # --- Model blend weights (tune via backtest) -------------------------------
 BLEND_WEIGHTS = {"dixon_coles": 0.30, "elo": 0.20, "market": 0.50}
+
+# Knockout-stage penalty-winner trigger: only show "If pens: <team>" on the
+# card when the model-blended draw probability is at least this. Tunable so
+# we can demand higher confidence later (e.g. mid-tournament after data).
+DRAW_PEN_THRESHOLD = 0.15

@@ -48,7 +48,10 @@ class SchedulerDaemon:
         self._last_ingest: datetime | None = None
 
     def _run_job(self, match: dict, window: str):
-        # each job is fully isolated; failures are handled inside process_match
+        # each job is fully isolated; failures are handled inside process_match.
+        # Stamp the window onto the match dict so build_card knows which window
+        # it's serving without process_match changing signature.
+        match = {**match, "_window": window}
         return process_match(match, window, self.build_card)
 
     def _maybe_ingest(self, now: datetime):
@@ -101,12 +104,12 @@ class SchedulerDaemon:
 
 
 if __name__ == "__main__":
-    # Live wiring: fixtures come from SQLite (refreshed by football_data.ingest),
-    # build_card is the model pipeline (swap demo_card for the real builder Day 6).
-    from orchestrator.run import demo_card
+    # Live wiring (Day 6): fixtures come from SQLite (refreshed by
+    # football_data.refresh), build_card is the REAL Day-6 assembler.
     from store.db import connect, init_db
     from store import repo
     from core.data import football_data
+    from core.decision.build_card import build_card as real_build_card
 
     init_db()
     conn = connect()
@@ -117,4 +120,11 @@ if __name__ == "__main__":
     def ingest():
         football_data.refresh(conn)       # calendar + results + bracket + detonator tags
 
-    SchedulerDaemon(fixtures, lambda m: demo_card(), ingest_fn=ingest).run_forever()
+    def build(match):
+        # Persist to the predictions table on the same connection used for
+        # fixture reads. The window comes from the scheduler dispatch
+        # context (set on the match dict in _run_job — see below).
+        return real_build_card(match, conn=conn,
+                               window=match.get("_window", "T-7m"))
+
+    SchedulerDaemon(fixtures, build, ingest_fn=ingest).run_forever()
