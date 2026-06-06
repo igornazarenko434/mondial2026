@@ -139,15 +139,30 @@ def build_card(match: dict, conn=None, *,
         failure_reasons["market"] = _trim(e)
         scoring_odds = None
 
-    # ───── 4. News-injury deltas (Day 8) ─────
-    # analyze_safe returns NEUTRAL on any failure, so "success" here may still
-    # mean "no shift". That's correct — the signal ran and contributed zero.
+    # ───── 4. News-injury deltas (Day 8 — context-gathering wired) ─────
+    # At T-24h / T-60m / T-15m we gather real context from API-Football +
+    # Brave Search before calling analyze_safe. At T-7m (lock) and any other
+    # window we pass empty context → LLM returns NEUTRAL → news still counted
+    # as "used" but with zero shift. analyze_safe NEVER raises; on total LLM
+    # failure it returns NEUTRAL. The try/except is the outer belt-and-braces.
     try:
-        deltas = news_analyzer(home, away, context_text="")
+        from config.news import should_search
+        if should_search(window):
+            try:
+                from orchestrator.agents.news_agent import gather_context
+                context_text = gather_context({**match, "home": home, "away": away,
+                                                "stage": stage}, window=window)
+            except Exception as e:                   # noqa: BLE001
+                log.warning("gather_context failed for %s vs %s: %s; using empty",
+                            home, away, e)
+                context_text = ""
+        else:
+            context_text = ""                        # T-7m / unknown window
+        deltas = news_analyzer(home, away, context_text=context_text)
         news_deltas = (float(deltas.get("home_goal_delta", 0.0)),
                        float(deltas.get("away_goal_delta", 0.0)))
         signals_used.append("news")
-    except Exception as e:                       # noqa: BLE001
+    except Exception as e:                           # noqa: BLE001
         signals_failed.append("news")
         failure_reasons["news"] = _trim(e)
         news_deltas = (0.0, 0.0)

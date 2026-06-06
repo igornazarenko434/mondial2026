@@ -33,6 +33,8 @@ PROVIDER_LIMITS = {
     # Both are 24h disk-cached in the data layer, so effective rate is ~1/day.
     "eloratings":    {"rate": 6,  "per": 60,   "budget": None,  "budget_period": None},   # eloratings.net/World.tsv
     "martj42":       {"rate": 6,  "per": 60,   "budget": None,  "budget_period": None},   # GitHub raw CSV
+    # Brave Search (Day 8 news agent) — free tier 1 req/sec, 2000 queries/mo
+    "brave_search":  {"rate": 1,  "per": 1,    "budget": 2000,  "budget_period": "month"},
 }
 
 # Rough $/unit for cost ESTIMATES (free providers = 0). Tune to your plan.
@@ -47,6 +49,7 @@ PRICING = {
     "openai":        {"per_1k_tokens": 0.0006}, # gpt-4o-mini-ish input price
     "eloratings":    {"per_call": 0.0},   # free scrape
     "martj42":       {"per_call": 0.0},   # free GitHub raw
+    "brave_search":  {"per_call": 0.0},   # free tier
 }
 
 # Warn when a provider's budget usage crosses this fraction.
