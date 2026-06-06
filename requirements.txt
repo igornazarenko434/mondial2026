@@ -12,10 +12,10 @@ soccerdata>=1.8         # FBref / ClubElo / Understat scrapers
 # Dev
 pytest>=7.4
 
-# LLM providers (install only the ones you use; router degrades gracefully)
-# anthropic
-# google-genai
-# openai
+# LLM providers — Day 8 news agent uses the router (Gemini → Claude → OpenAI)
+google-genai>=1.0       # Gemini Flash 2.5 (free tier) — PRIMARY in router
+anthropic>=0.40         # Claude Haiku 4.5 (PAYG) — fallback when Gemini fails
+# openai>=1.50          # uncomment if you want a 3rd fallback
 
 # Observability (tracing — pulls into core/obs/tracing.py automatically)
 opentelemetry-sdk>=1.42
