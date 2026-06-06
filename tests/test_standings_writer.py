@@ -177,6 +177,105 @@ def test_skip_unfinished_matches():
     assert res["group_points"] == 3.0
 
 
+# ---------- robustness: never crash on bad data ----------
+
+def test_direction_only_correct_gets_base_times_odds():
+    """Predicted 1-0, actual 2-1 (both home wins, different exact). Group
+    base = 1.0, so 1.0 × odds 2.0 = 2.0 points (PDF §12a)."""
+    conn = _schema_conn()
+    _seed_match(conn, 1, "France", "Spain", "Group", 2, 1)
+    _seed_prediction(conn, 1, 1, 0, "H")
+    snapshot_odds(conn, 1, "T-7m", "pinnacle", {"H": 2.0, "D": 2.5, "A": 3.0})
+    res = update_standings(conn)
+    assert res["group_points"] == 2.0
+
+
+def test_wrong_direction_scores_zero():
+    """Pick home win when result was draw → 0 points (PDF wrong-direction rule)."""
+    conn = _schema_conn()
+    _seed_match(conn, 1, "France", "Spain", "Group", 1, 1)
+    _seed_prediction(conn, 1, 2, 1, "H")     # predicted home win
+    snapshot_odds(conn, 1, "T-7m", "pinnacle", {"H": 2.0, "D": 2.5, "A": 3.0})
+    res = update_standings(conn)
+    assert res["group_points"] == 0.0
+
+
+def test_unknown_stage_label_does_not_crash():
+    """If football-data introduces a stage code we don't recognize, score_match
+    raises ValueError — score_one_match must catch and skip with a warning so
+    the daemon stays alive (CLAUDE.md golden rule #8)."""
+    conn = _schema_conn()
+    _seed_match(conn, 1, "France", "Spain", "TOTALLY_NEW_STAGE_FORMAT", 2, 1)
+    _seed_prediction(conn, 1, 2, 1, "H")
+    snapshot_odds(conn, 1, "T-7m", "pinnacle", {"H": 2.0, "D": 2.5, "A": 3.0})
+    # Must NOT raise; problematic match is silently skipped.
+    res = update_standings(conn)
+    assert res["scored_matches"] == 0
+    assert res["group_points"] == 0.0
+
+
+def test_pdf_examples_via_update_standings_end_to_end():
+    """Pin all three PDF worked examples through the full standings_writer
+    path (not just score_match): France 2-1 = 3.000, draw 1-1 = 5.625,
+    Final 2-2 = 12.500."""
+    for stage, ph, pa, ah, aa, odds, expected_bucket in [
+        ("Group", 2, 1, 2, 1, {"H": 2.0, "D": 2.5, "A": 1.5}, ("group_points",  3.0)),
+        ("Group", 1, 1, 1, 1, {"H": 2.0, "D": 2.5, "A": 3.0}, ("group_points",  5.625)),
+        ("Final", 2, 2, 2, 2, {"H": 2.0, "D": 2.5, "A": 2.0}, ("knockout_points", 12.5)),
+    ]:
+        conn = _schema_conn()
+        _seed_match(conn, 1, "X", "Y", stage, ah, aa)
+        _seed_prediction(conn, 1, ph, pa,
+                         "H" if ph > pa else "D" if ph == pa else "A")
+        snapshot_odds(conn, 1, "T-7m", "pinnacle", odds)
+        res = update_standings(conn, apply_reset_after_groups=False)
+        bucket, expected = expected_bucket
+        assert res[bucket] == expected, \
+            f"{stage} {ph}-{pa} actual {ah}-{aa}: expected {expected} got {res[bucket]}"
+
+
+def test_null_detonator_field_treated_as_false():
+    """football-data may not always set the detonator flag; SQLite NULL must
+    not be ambiguously coerced (bool(None) is False — verify it actually is)."""
+    conn = _schema_conn()
+    conn.execute("INSERT INTO matches (match_id, utc_kickoff, stage, grp, home, "
+                 "away, status, home_goals, away_goals, detonator) "
+                 "VALUES (1, '2026-06-11T19:00Z', 'Group', 'A', 'X', 'Y', "
+                 "'FINISHED', 2, 1, NULL)")
+    _seed_prediction(conn, 1, 2, 1, "H")
+    snapshot_odds(conn, 1, "T-7m", "pinnacle", {"H": 2.0, "D": 2.5, "A": 3.0})
+    res = update_standings(conn)
+    assert res["group_points"] == 3.0    # not 6.0 (× detonator)
+
+
+def test_extreme_scoreline_uses_table_cap():
+    """An absurd scoreline (8-7 with no entry in the printed table) must
+    fall back to the per-stage TABLE_CAP, not crash. Confirms the engine's
+    .get((w, l), TABLE_CAP[stype]) fallback is exercised end-to-end."""
+    conn = _schema_conn()
+    _seed_match(conn, 1, "X", "Y", "Group", 8, 7)
+    _seed_prediction(conn, 1, 8, 7, "H")
+    snapshot_odds(conn, 1, "T-7m", "pinnacle", {"H": 100.0, "D": 50.0, "A": 1.5})
+    res = update_standings(conn)
+    # Must score positive (TABLE_CAP * 100) without crashing — actual value
+    # is grid-dependent; just assert reasonable range.
+    assert res["group_points"] > 100   # non-zero & uses big odds
+    assert res["scored_matches"] == 1
+
+
+def test_odds_snapshot_with_null_field_skipped():
+    """A snapshot row with NULL in H/D/A is unusable → score_one_match returns
+    None instead of raising on the arithmetic."""
+    conn = _schema_conn()
+    _seed_match(conn, 1, "X", "Y", "Group", 2, 1)
+    _seed_prediction(conn, 1, 2, 1, "H")
+    conn.execute("INSERT INTO odds_snapshots (match_id, captured_at, book, "
+                 "odds_h, odds_d, odds_a) VALUES (1, 'T-7m', 'pinnacle', "
+                 "NULL, 2.5, 3.0)")
+    res = update_standings(conn)
+    assert res["scored_matches"] == 0
+
+
 # ---------- compute_prize_distribution ----------
 
 def test_prize_distribution_applies_ladder_to_ranked_participants():

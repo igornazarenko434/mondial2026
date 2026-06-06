@@ -29,8 +29,9 @@ log = get_logger("scoring.standings")
 def score_one_match(conn: sqlite3.Connection, match_row,
                     participant: str, window: str = "T-7m") -> float | None:
     """Score one finished match for one participant. Returns points (>=0) or
-    None if no prediction / no usable odds / non-finished status. Pure read
-    over conn — no writes.
+    None if no prediction / no usable odds / unknown stage / non-finished
+    status. Pure read over conn — no writes. NEVER raises (per CLAUDE.md
+    golden rule #8 — the scheduler must keep running on a single bad row).
     """
     pred = conn.execute(
         "SELECT pick_h, pick_a FROM predictions "
@@ -45,12 +46,19 @@ def score_one_match(conn: sqlite3.Connection, match_row,
     if not snap or not all(snap.get(k) for k in ("H", "D", "A")):
         return None    # no usable odds → can't score; skip
     odds = {"H": snap["H"], "D": snap["D"], "A": snap["A"]}
-    return score_match(
-        stage=match_row["stage"],
-        pred_h=int(pred["pick_h"]), pred_a=int(pred["pick_a"]),
-        act_h=int(match_row["home_goals"]), act_a=int(match_row["away_goals"]),
-        odds=odds, detonator=bool(match_row["detonator"]),
-    )
+    try:
+        return score_match(
+            stage=match_row["stage"],
+            pred_h=int(pred["pick_h"]), pred_a=int(pred["pick_a"]),
+            act_h=int(match_row["home_goals"]), act_a=int(match_row["away_goals"]),
+            odds=odds, detonator=bool(match_row["detonator"]),
+        )
+    except ValueError as e:
+        # Unknown stage label (e.g. football-data introduces a new bracket
+        # code we don't have in STAGE_TYPE yet). Skip + log — never crash.
+        log.warning("score_match skipped match %s: %s",
+                    match_row["match_id"], e)
+        return None
 
 
 def update_standings(conn: sqlite3.Connection, participant: str = "me",
