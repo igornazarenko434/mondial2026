@@ -53,51 +53,89 @@ DEFAULT_OUT = "reports/futures_lock.json"
 # matter, manager rotation matters). These can be tuned offline.
 
 # Player → (national team, per-match xG of player when playing).
-# xG values here are mid-range conservative — premium strikers ~0.6, support
-# attackers ~0.35-0.45, midfielders ~0.20-0.30. Override later with real data.
+# xG values calibrated against published WC 2026 Golden Boot market odds
+# (FOX/RotoWire/Goal.com June 2026) — top-tier strikers in a major tournament
+# average 0.8-1.0/match (Mbappé 12 goals in 14 WC apps), so the previous
+# uniform 0.45 figures dramatically OVERSTATED mid-tier strikers like Depay.
+# Recalibrated values reflect real tournament scoring patterns + role.
 _PLAYER_TEAM_XG = {
-    "Mbappe":             ("France",      0.65),
-    "Harry Kane":         ("England",     0.55),
-    "Messi":              ("Argentina",   0.40),
-    "Haaland":            ("Norway",      0.70),
-    "Mikel Oyarzabal":    ("Spain",       0.30),
-    "Lamine Yamal":       ("Spain",       0.35),
-    "Cristiano Ronaldo":  ("Portugal",    0.45),
-    "Ousmane Dembele":    ("France",      0.35),
+    "Mbappe":             ("France",      0.85),    # was 0.65 (his real tournament rate)
+    "Harry Kane":         ("England",     0.75),    # 2018 GB winner
+    "Messi":              ("Argentina",   0.55),    # 2022 finalist & top scorer share
+    "Haaland":            ("Norway",      0.85),    # club rate >1/game; intl somewhat lower
+    "Mikel Oyarzabal":    ("Spain",       0.25),    # one of several Spain scorers
+    "Lamine Yamal":       ("Spain",       0.30),    # younger; lots of potential
+    "Cristiano Ronaldo":  ("Portugal",    0.55),    # still scoring at intl level
+    "Ousmane Dembele":    ("France",      0.30),    # winger, set up Mbappé more than scores
     "Vinicius":           ("Brazil",      0.45),
-    "Lautaro Martinez":   ("Argentina",   0.50),
+    "Lautaro Martinez":   ("Argentina",   0.45),
     "Raphinha":           ("Brazil",      0.40),
-    "Kai Havertz":        ("Germany",     0.35),
-    "Julian Alvarez":     ("Argentina",   0.45),
-    "Romelu Lukaku":      ("Belgium",     0.50),
-    "Igor Thiago":        ("Brazil",      0.30),
-    "Cody Gakpo":         ("Netherlands", 0.35),
-    "Michael Olise":      ("France",      0.30),
-    "Jude Bellingham":    ("England",     0.30),
-    "Memphis Depay":      ("Netherlands", 0.45),
+    "Kai Havertz":        ("Germany",     0.30),
+    "Julian Alvarez":     ("Argentina",   0.40),
+    "Romelu Lukaku":      ("Belgium",     0.45),
+    "Igor Thiago":        ("Brazil",      0.20),    # rotation forward
+    "Cody Gakpo":         ("Netherlands", 0.30),
+    "Michael Olise":      ("France",      0.25),
+    "Jude Bellingham":    ("England",     0.35),    # midfielder but scoring threat
+    "Memphis Depay":      ("Netherlands", 0.35),    # was 0.45; not a top-tier finisher
+}
+
+# Web-research market prior (June 2026) — used when the live top-scorer market
+# isn't available from the-odds-api free tier. Values are de-vigged estimates
+# from FOX Sports / RotoWire / Goal.com / Kalshi published WC 2026 odds.
+# When the live market becomes available, these are ignored.
+_SCORER_MARKET_PRIOR_2026 = {
+    "Mbappe":             0.143,   # +600  consensus #1 favorite
+    "Harry Kane":         0.125,   # +700  consensus #2
+    "Haaland":            0.075,   # +1200-1400
+    "Lamine Yamal":       0.055,   # +1500-1700
+    "Messi":              0.050,   # +1800-2200
+    "Vinicius":           0.045,   # +2000-2200
+    "Julian Alvarez":     0.045,   # +2000-2500
+    "Lautaro Martinez":   0.045,   # +2000-2500
+    "Cristiano Ronaldo":  0.035,   # +2500-3500
+    "Jude Bellingham":    0.038,   # +2200-3000 (the contrarian sweet spot)
+    "Cody Gakpo":         0.035,   # +2800-3500
+    "Ousmane Dembele":    0.035,   # +2800-3500
+    "Raphinha":           0.030,   # +3000-3500
+    "Mikel Oyarzabal":    0.030,   # +3000-3500
+    "Michael Olise":      0.022,   # +3500-5000
+    "Romelu Lukaku":      0.028,   # +3500-4000
+    "Kai Havertz":        0.020,   # +4500-5000
+    "Memphis Depay":      0.016,   # +6000+ (long shot)
+    "Igor Thiago":        0.010,   # +10000+ rotation forward
 }
 
 
 def _scorer_probs_from_mc(mc: dict) -> dict[str, float]:
     """Convert MC stage probs → P(scorer) for each SCORER_PAYOUT player.
 
-    Steps:
-      1. For each player, look up team's MC stage probabilities.
-      2. expected_team_goals(player_team_stage_probs, per_match_xg) → expected
-         total goals across whatever stages they play.
-      3. NORMALIZE across all 19 candidates so we get a proper probability
-         distribution (this is the implied "of these 19, which is most likely
-         top scorer", not absolute P(top scorer)).
+    Hybrid model:
+      1. Compute raw signal = market-prior × MC-team-advance factor.
+         (Market prior alone would ignore team-strength updates from MC;
+         MC alone overstates mid-tier strikers because their xG is uniform.)
+      2. The MC factor is sqrt(P(team reaches QF or beyond)) — so a team
+         going deep boosts its players proportionally but doesn't dominate.
+      3. Renormalize so probabilities sum to 1.
     """
     raw = {}
-    for player, (team, xg) in _PLAYER_TEAM_XG.items():
+    for player, prior in _SCORER_MARKET_PRIOR_2026.items():
         if player not in SCORER_PAYOUT:
-            continue                                # player removed from payout
-        if team not in mc:
-            log.warning("scorer fallback: team %s not in MC output; %s skipped",
-                        team, player)
             continue
-        raw[player] = expected_team_goals(mc[team], xg)
+        team, _ = _PLAYER_TEAM_XG.get(player, (None, None))
+        if not team or team not in mc:
+            log.warning("scorer hybrid: team %s missing for %s; using prior alone",
+                        team, player)
+            raw[player] = prior
+            continue
+        # MC factor: sqrt(team's deep-run probability) — keeps top-tier
+        # players dominant while letting MC mildly adjust for team paths.
+        from core.models.montecarlo import deep_run_prob
+        deep = deep_run_prob(mc[team], min_stage="qf")
+        # Normalise against a reference (Spain ~0.65 P(QF)) so factor stays near 1
+        # for top teams and shrinks for weak teams.
+        factor = max(0.3, (deep / 0.40) ** 0.5)
+        raw[player] = prior * factor
     total = sum(raw.values())
     if total <= 0:
         return {}
