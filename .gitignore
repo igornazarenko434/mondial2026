@@ -84,6 +84,7 @@ store/heartbeat
 store/*.json
 reports/*.md
 reports/*.html
+reports/*.json
 *.parquet
 *.csv.gz
 .cache/
