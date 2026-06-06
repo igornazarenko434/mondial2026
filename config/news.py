@@ -17,24 +17,37 @@ CONTEXT_MAX_CHARS = int(os.environ.get("NEWS_CONTEXT_MAX_CHARS", "1800"))
 PER_QUERY_RESULTS = int(os.environ.get("NEWS_PER_QUERY_RESULTS", "3"))
 
 # Per-window query counts — used by news_agent.search_queries(...)
+# Calibrated to fit in Brave's $5/mo = 1,000-request free credit:
+#   T-24h:  3 × 104 matches = 312
+#   T-60m:  4 × 104 matches = 416  (was 6 — dropped weather + the per-team
+#                                    duplicate lineup queries; the joint
+#                                    "Mexico South Africa lineup <date>"
+#                                    query covers both teams)
+#   T-15m:  2 × 104 matches but ~70% reuse the T-60m result via cache → ~60
+#   Tournament total: ~790, leaves ~21% headroom under 1,000.
 QUERIES_PER_WINDOW = {
     "T-24h": int(os.environ.get("NEWS_QUERIES_T_24H", "3")),
-    "T-60m": int(os.environ.get("NEWS_QUERIES_T_60M", "6")),
+    "T-60m": int(os.environ.get("NEWS_QUERIES_T_60M", "4")),
     "T-15m": int(os.environ.get("NEWS_QUERIES_T_15M", "2")),
 }
 
-# Brave Search free-tier protection (Day 8) — two safeguards layered on top
-# of the monthly 2000-query budget already in config/observability.py.
+# T-15m can REUSE the T-60m news deltas (stored in predictions.payload_json)
+# when the prior result was high-confidence and recent. Skips ALL Brave +
+# LLM calls at T-15m for that match. Set 0 to disable reuse and force a
+# fresh search every T-15m.
+T15M_REUSE_AGE_MIN = int(os.environ.get("NEWS_T15M_REUSE_AGE_MIN", "75"))
+T15M_REUSE_MIN_CONFIDENCE = os.environ.get("NEWS_T15M_REUSE_MIN_CONFIDENCE", "medium")
+
+# Brave Search free-tier protection (Day 8) — layered on top of the monthly
+# 1,000-request budget in config/observability.py.
 #
-# DAILY soft cap: even though the monthly budget is enforced, a runaway run
-# (bad retry loop, debug session) could spend it in one day. This caps the
-# per-rolling-24h call count so we always have at least N days worth of
-# capacity left for the actual tournament. Configurable; 0 disables.
-BRAVE_DAILY_LIMIT = int(os.environ.get("BRAVE_DAILY_LIMIT", "80"))
+# DAILY soft cap: even though monthly budget is enforced, a runaway run could
+# burn it in one day. Per-rolling-24h cap keeps multiple days' worth available.
+BRAVE_DAILY_LIMIT = int(os.environ.get("BRAVE_DAILY_LIMIT", "60"))
 # Hard CIRCUIT BREAKER: stop calling Brave when monthly usage crosses this
-# fraction of budget. Leaves a safety margin so a delivery-spike day at
-# kickoff doesn't kill the rest of the tournament.
-BRAVE_BUDGET_BRAKE_FRACTION = float(os.environ.get("BRAVE_BUDGET_BRAKE_FRACTION", "0.95"))
+# fraction. 0.90 leaves a 100-request buffer for retries near month-end so a
+# delivery-spike day at kickoff doesn't tip into paid territory.
+BRAVE_BUDGET_BRAKE_FRACTION = float(os.environ.get("BRAVE_BUDGET_BRAKE_FRACTION", "0.90"))
 
 
 def should_search(window: str) -> bool:

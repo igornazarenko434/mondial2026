@@ -163,13 +163,17 @@ def search_queries(home: str, away: str, *,
             f"{home} {away} World Cup 2026 starting lineup {d}",
         ]
     else:                                   # T-60m default (the primary)
+        # Trimmed to 4 queries to fit Brave's $5/mo = 1,000-call free credit.
+        # The joint "<home> <away> lineup <date>" query already returns both
+        # teams' lineup articles, so per-team duplicates were dropped. Weather
+        # query removed — the impact on goal expectations is small (-0.10 to
+        # -0.20 for both teams in the rubric, almost a wash) and rarely fires
+        # because outdoor stadium-level forecasts aren't usually that extreme.
         qs = [
-            f"{home} starting XI World Cup 2026 vs {away} {d}",
-            f"{away} starting XI World Cup 2026 vs {home} {d}",
             f"{home} {away} World Cup 2026 lineup {d}",
+            f"{home} {away} World Cup 2026 preview {d}",
             f"{home} injury news today World Cup 2026",
             f"{away} injury news today World Cup 2026",
-            f"{home} {away} World Cup 2026 weather forecast {d}",
         ]
 
     # Honour the per-window override + the global NEWS_MAX_QUERIES safety cap.
@@ -392,3 +396,66 @@ def analyze_safe(home: str, away: str, context_text: str,
         log.warning("news/LLM unavailable for %s vs %s (%s); neutral deltas",
                     home, away, e)
         return dict(NEUTRAL)
+
+
+# ─────────────────── T-15m cache reuse (cost cut) ───────────────────
+
+_CONF_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def read_prior_deltas(conn, match_id: int, max_age_min: int,
+                       min_confidence: str = "medium") -> dict | None:
+    """Look at the most recent prior news_deltas stored on this match's card
+    (predictions.payload_json from T-60m) and reuse them if recent enough +
+    confident enough. Returns the deltas dict in the standard shape, or None
+    if no acceptable prior exists (caller should run a fresh search).
+
+    Saves 1 Brave query × 2 + 1 LLM call per match at T-15m when conditions
+    are met (~70% of matches in a typical tournament).
+    """
+    if not conn or not match_id or max_age_min <= 0:
+        return None
+    try:
+        import json
+        from datetime import datetime, timezone, timedelta
+        row = conn.execute(
+            "SELECT created_at, payload_json FROM predictions "
+            "WHERE match_id=? AND window='T-60m' "
+            "ORDER BY created_at DESC LIMIT 1",
+            (match_id,)).fetchone()
+        if not row:
+            return None
+        created_at, payload = row["created_at"], row["payload_json"]
+        if not payload:
+            return None
+        # Age check
+        try:
+            t = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+        except (ValueError, AttributeError):
+            return None
+        if (datetime.now(timezone.utc) - t) > timedelta(minutes=max_age_min):
+            return None
+        card = json.loads(payload)
+        prior = {
+            "home_goal_delta": card.get("news_home_delta"),
+            "away_goal_delta": card.get("news_away_delta"),
+            "confidence": card.get("news_confidence", "low"),
+            "notes": card.get("news_notes") or [],
+            "discarded_sources": card.get("news_discarded") or [],
+        }
+        # Older cards may not have news_* fields broken out — fall back to
+        # the nested news block if present.
+        if prior["home_goal_delta"] is None:
+            nb = card.get("news") or {}
+            prior["home_goal_delta"] = nb.get("home_goal_delta", 0.0)
+            prior["away_goal_delta"] = nb.get("away_goal_delta", 0.0)
+            prior["confidence"] = nb.get("confidence", "low")
+        # Confidence floor
+        if _CONF_ORDER.get(prior["confidence"], 0) < _CONF_ORDER.get(min_confidence, 1):
+            return None
+        return _validate_and_clamp(prior)
+    except Exception as e:                            # noqa: BLE001
+        log.debug("read_prior_deltas failed for match %s: %s", match_id, e)
+        return None

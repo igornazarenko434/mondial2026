@@ -282,3 +282,85 @@ def test_build_card_uses_gather_context_at_search_windows():
 
     assert seen["contexts"] == [""], \
         "T-7m must pass empty context — no news search at lock"
+
+
+# ─────────────────── T-15m cache reuse (Brave cost cut) ───────────────────
+
+def test_read_prior_deltas_reuses_recent_high_confidence(tmp_path):
+    """T-15m must skip the LLM + Brave call when T-60m's stored deltas are
+    fresh enough and confident enough — saves 1 LLM call + 4 Brave queries
+    per match."""
+    import sqlite3
+    import json
+    from datetime import datetime, timezone
+    db = tmp_path / "p.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    with open("store/schema.sql") as f:
+        conn.executescript(f.read())
+    payload = json.dumps({
+        "news_home_delta": -0.30, "news_away_delta": +0.15,
+        "news_confidence": "high",
+        "news_notes": ["Norway rotates", "Mbappé starts"]})
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("INSERT INTO predictions (match_id, created_at, window, pick_dir, "
+                  "pick_h, pick_a, modal_h, modal_a, expected_points, payload_json) "
+                  "VALUES (1, ?, 'T-60m', 'A', 1, 2, 1, 2, 1.9, ?)",
+                  (now, payload))
+    conn.commit()
+
+    prior = na.read_prior_deltas(conn, match_id=1,
+                                   max_age_min=75, min_confidence="medium")
+    assert prior is not None
+    assert prior["home_goal_delta"] == -0.30
+    assert prior["away_goal_delta"] == 0.15
+    assert prior["confidence"] == "high"
+
+
+def test_read_prior_deltas_rejects_stale(tmp_path):
+    """A T-60m card older than max_age_min must not be reused."""
+    import sqlite3, json
+    from datetime import datetime, timezone, timedelta
+    db = tmp_path / "p.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    with open("store/schema.sql") as f:
+        conn.executescript(f.read())
+    old = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+    payload = json.dumps({"news_home_delta": -0.3, "news_away_delta": 0.15,
+                           "news_confidence": "high", "news_notes": []})
+    conn.execute("INSERT INTO predictions (match_id, created_at, window, pick_dir, "
+                  "pick_h, pick_a, modal_h, modal_a, expected_points, payload_json) "
+                  "VALUES (1, ?, 'T-60m', 'A', 1, 2, 1, 2, 1.9, ?)",
+                  (old, payload))
+    conn.commit()
+    assert na.read_prior_deltas(conn, match_id=1, max_age_min=75) is None
+
+
+def test_read_prior_deltas_rejects_low_confidence(tmp_path):
+    """Even if recent, a low-confidence T-60m deserves a fresh T-15m scan."""
+    import sqlite3, json
+    from datetime import datetime, timezone
+    db = tmp_path / "p.db"
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    with open("store/schema.sql") as f:
+        conn.executescript(f.read())
+    now = datetime.now(timezone.utc).isoformat()
+    payload = json.dumps({"news_home_delta": 0.0, "news_away_delta": 0.0,
+                           "news_confidence": "low", "news_notes": []})
+    conn.execute("INSERT INTO predictions (match_id, created_at, window, pick_dir, "
+                  "pick_h, pick_a, modal_h, modal_a, expected_points, payload_json) "
+                  "VALUES (1, ?, 'T-60m', 'A', 0, 0, 0, 0, 0.0, ?)",
+                  (now, payload))
+    conn.commit()
+    assert na.read_prior_deltas(conn, match_id=1, max_age_min=75,
+                                  min_confidence="medium") is None
+
+
+def test_t60m_queries_trimmed_to_four_to_fit_brave_credit():
+    """Regression: the T-60m query count MUST stay at 4. Higher = over Brave's
+    1,000-call/month free credit (4 × 104 matches = 416). Lower = lose info."""
+    qs = na.search_queries("Mexico", "South Africa", window="T-60m",
+                             kickoff_utc="2026-06-11T19:00:00Z")
+    assert len(qs) == 4

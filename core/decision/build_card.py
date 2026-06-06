@@ -140,32 +140,59 @@ def build_card(match: dict, conn=None, *,
         scoring_odds = None
 
     # ───── 4. News-injury deltas (Day 8 — context-gathering wired) ─────
-    # At T-24h / T-60m / T-15m we gather real context from API-Football +
-    # Brave Search before calling analyze_safe. At T-7m (lock) and any other
-    # window we pass empty context → LLM returns NEUTRAL → news still counted
-    # as "used" but with zero shift. analyze_safe NEVER raises; on total LLM
-    # failure it returns NEUTRAL. The try/except is the outer belt-and-braces.
+    # At T-24h / T-60m we gather real context from API-Football + Brave Search
+    # before calling analyze_safe. At T-15m we FIRST try to reuse T-60m's
+    # high-confidence result from the predictions table (saves 1 LLM call + 6
+    # Brave calls per match when the XI is already confirmed). At T-7m (lock)
+    # and any other window we pass empty context → LLM returns NEUTRAL → news
+    # still counted as "used" but with zero shift. analyze_safe NEVER raises;
+    # on total LLM failure it returns NEUTRAL.
     try:
-        from config.news import should_search
-        if should_search(window):
-            try:
-                from orchestrator.agents.news_agent import gather_context
-                context_text = gather_context({**match, "home": home, "away": away,
-                                                "stage": stage}, window=window)
-            except Exception as e:                   # noqa: BLE001
-                log.warning("gather_context failed for %s vs %s: %s; using empty",
-                            home, away, e)
-                context_text = ""
-        else:
-            context_text = ""                        # T-7m / unknown window
-        deltas = news_analyzer(home, away, context_text=context_text)
+        from config.news import (should_search, T15M_REUSE_AGE_MIN,
+                                   T15M_REUSE_MIN_CONFIDENCE)
+        from orchestrator.agents.news_agent import (
+            gather_context, read_prior_deltas
+        )
+
+        # T-15m cache: reuse if T-60m was recent and confident enough
+        deltas = None
+        if window == "T-15m" and conn is not None:
+            prior = read_prior_deltas(conn, match.get("match_id"),
+                                       max_age_min=T15M_REUSE_AGE_MIN,
+                                       min_confidence=T15M_REUSE_MIN_CONFIDENCE)
+            if prior is not None:
+                deltas = prior
+                log.info("news/T-15m reused T-60m deltas for match %s "
+                          "(saved 1 LLM + Brave calls)", match.get("match_id"))
+
+        if deltas is None:                            # cache miss → run fresh
+            if should_search(window):
+                try:
+                    context_text = gather_context(
+                        {**match, "home": home, "away": away, "stage": stage},
+                        window=window)
+                except Exception as e:               # noqa: BLE001
+                    log.warning("gather_context failed for %s vs %s: %s; "
+                                "using empty", home, away, e)
+                    context_text = ""
+            else:
+                context_text = ""                    # T-7m / unknown window
+            deltas = news_analyzer(home, away, context_text=context_text)
+
         news_deltas = (float(deltas.get("home_goal_delta", 0.0)),
                        float(deltas.get("away_goal_delta", 0.0)))
+        # Stash for audit / future reuse by next-window's read_prior_deltas
+        news_meta = {
+            "home": news_deltas[0], "away": news_deltas[1],
+            "confidence": deltas.get("confidence", "low"),
+            "notes": deltas.get("notes") or [],
+        }
         signals_used.append("news")
     except Exception as e:                           # noqa: BLE001
         signals_failed.append("news")
         failure_reasons["news"] = _trim(e)
         news_deltas = (0.0, 0.0)
+        news_meta = {"home": 0.0, "away": 0.0, "confidence": "low", "notes": []}
 
     # ───── 5. Run the model assembler ─────
     try:
@@ -207,6 +234,12 @@ def build_card(match: dict, conn=None, *,
     card["signals_used"]    = signals_used
     card["signals_failed"]  = signals_failed
     card["failure_reasons"] = failure_reasons
+    # News-deltas detail (flat fields = direct queryable from SQL; also picked
+    # up by next-window's read_prior_deltas for the T-15m reuse).
+    card["news_home_delta"] = news_meta.get("home", 0.0)
+    card["news_away_delta"] = news_meta.get("away", 0.0)
+    card["news_confidence"] = news_meta.get("confidence", "low")
+    card["news_notes"]      = news_meta.get("notes", [])
 
     # Golden auditability rule: every signal must appear somewhere. The
     # production path enforces this by construction (we visit every signal

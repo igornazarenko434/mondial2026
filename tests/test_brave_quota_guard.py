@@ -25,14 +25,14 @@ def test_no_key_returns_empty_without_calling_brave(monkeypatch):
     g.assert_not_called()
 
 
-def test_monthly_brake_at_95pct_blocks_call(monkeypatch):
-    """L1 monthly-fraction brake: at 95% used, web_search returns [] without
-    hitting the API even though the key IS configured."""
+def test_monthly_brake_at_90pct_blocks_call(monkeypatch):
+    """L1 monthly-fraction brake: at >=90% used, web_search returns [] without
+    hitting the API even though the key IS configured. (Budget is 1000 to match
+    Brave's $5/mo free credit = 1,000 requests.)"""
     _set_brave_key(monkeypatch)
-    # Simulate quota_status returning a high usage
     monkeypatch.setattr(ws, "_day_count", lambda: 0)
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 1900, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 950, "budget": 1000}  # 95%
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     with patch("core.data.web_search.requests.get") as g:
         out = ws.web_search("anything")
@@ -41,11 +41,11 @@ def test_monthly_brake_at_95pct_blocks_call(monkeypatch):
 
 
 def test_below_monthly_brake_allows_call(monkeypatch):
-    """At 80% used (under the 95% brake) the call is allowed."""
+    """At 70% used (under the 90% brake) the call is allowed."""
     _set_brave_key(monkeypatch)
     monkeypatch.setattr(ws, "_day_count", lambda: 0)
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 1600, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 700, "budget": 1000}  # 70%
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     # Patch the actual HTTP so the test stays offline
     fake_resp = MagicMock(ok=True, status_code=200)
@@ -58,13 +58,15 @@ def test_below_monthly_brake_allows_call(monkeypatch):
 
 
 def test_daily_soft_cap_blocks_call(monkeypatch):
-    """L2 daily soft-cap: even with monthly headroom, rolling-24h cap blocks."""
+    """L2 daily soft-cap: even with monthly headroom, rolling-24h cap blocks.
+    Default daily limit is 60 (matches 60 × 30d ≈ 1800 monthly budget, but the
+    monthly budget itself is 1,000 → effective ~33/day average over month)."""
     _set_brave_key(monkeypatch)
-    monkeypatch.setattr("config.news.BRAVE_DAILY_LIMIT", 80)
-    monkeypatch.setattr(ws, "BRAVE_DAILY_LIMIT", 80)
-    monkeypatch.setattr(ws, "_day_count", lambda: 80)   # at the cap
+    monkeypatch.setattr("config.news.BRAVE_DAILY_LIMIT", 60)
+    monkeypatch.setattr(ws, "BRAVE_DAILY_LIMIT", 60)
+    monkeypatch.setattr(ws, "_day_count", lambda: 60)   # at the cap
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 100, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 100, "budget": 1000}
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     with patch("core.data.web_search.requests.get") as g:
         out = ws.web_search("anything")
@@ -78,7 +80,7 @@ def test_daily_soft_cap_disabled_when_zero(monkeypatch):
     monkeypatch.setattr(ws, "BRAVE_DAILY_LIMIT", 0)
     monkeypatch.setattr(ws, "_day_count", lambda: 999)   # would normally block
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 100, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 100, "budget": 1000}
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     fake_resp = MagicMock(ok=True, status_code=200)
     fake_resp.json.return_value = {"web": {"results": []}}
@@ -94,12 +96,13 @@ def test_quota_status_returns_complete_shape(monkeypatch):
     _set_brave_key(monkeypatch)
     monkeypatch.setattr(ws, "_day_count", lambda: 12)
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 200, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 200, "budget": 1000}
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     q = ws.quota_status()
     assert set(q.keys()) >= {"month_used", "month_budget", "month_fraction",
                               "day_used", "day_limit", "ok", "key_set"}
     assert q["month_used"] == 200
+    assert q["month_budget"] == 1000
     assert q["day_used"] == 12
     assert q["key_set"] is True
     assert q["ok"] is True
@@ -109,8 +112,8 @@ def test_quota_status_signals_blocked_when_over_brake(monkeypatch):
     _set_brave_key(monkeypatch)
     monkeypatch.setattr(ws, "_day_count", lambda: 0)
     fake_ledger = MagicMock()
-    fake_ledger.quota_status.return_value = {"used": 1950, "budget": 2000}
+    fake_ledger.quota_status.return_value = {"used": 950, "budget": 1000}  # 95%
     monkeypatch.setattr("core.obs.cost.ledger", lambda: fake_ledger)
     q = ws.quota_status()
-    assert q["month_fraction"] >= 0.95
+    assert q["month_fraction"] >= 0.90
     assert q["ok"] is False
