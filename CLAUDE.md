@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (171 tests should stay green).
+11. Run `pytest tests/ -q` after every change (237 tests should stay green).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -131,44 +131,54 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       (100% incl. Bosnia after alias fix), 70 Pinnacle + 2 Betfair, Mexico v
       South Africa devig = 67/21/12 (textbook heavy-favorite), round-trip OK.
       Re-run the audit script if `the-odds-api` adds new team-name spellings.
-- [ ] **Day 5 — scoring at scale.** Wire actual results → `score_match` →
-      `standings` table; implement the -15% reset and prize split end-to-end.
-      NEW: **penalty winner prediction for knockout draws** —
-      `core/scoring/penalties.py::predict_shootout(elo_h, elo_a) -> {"winner":
-      "H"|"A", "p_winner": float}`. Use small Elo edge (penalties are ~50/50
-      ± weak skill differential — bound `|p_winner - 0.5| <= 0.05` per literature).
-      Carry through to card on KO+draw branch. Add unit tests pinning the bound.
-- [ ] **Day 6 — card + delivery (with FULL AUDIT TRAIL).** Persist `recommend()`
-      to `predictions`, route through `orchestrator.pipeline.process_match`,
-      deliver via `core/delivery`, record run-status. Wire `daily_summary()` and
-      schedule `tools/dashboard.py`. Strategy tilt as opt-in post-step (default 0).
-      NEW: **audit-trail fields on every card**, compact one-line format on the
-      Telegram message:
-        - `signals_used`:   list[str] — actually fed into the matrix
-                            (e.g. ["dixon_coles","elo","market","news"])
-        - `signals_failed`: list[str] — attempted but degraded out
-        - `failure_reasons`: dict[str, str] — why each failed, ≤80 chars each
-                            (e.g. {"market":"odds_api over budget",
-                                   "news":"news_agent: gemini 429, claude empty"})
-        - `ev_pathway`: "ev_optimized" | "modal_fallback"  — which decision branch
-        - `penalty_winner` (KO only): {"winner": "H"|"A", "p_winner": float}
-                                      — set ONLY if stage != Group AND model_prob
-                                      gives draw >= 15%; None otherwise.
-      TELEGRAM RENDER (compact, ≤8 lines including header):
-        ⚽ <home> vs <away> — <kickoff> (<stage> <group>)  ⚡DETONATOR x2
-        Locked odds: <home> <H> / Draw <D> / <away> <A>
-        Model: <home> 22% / Draw 26% / <away> 52%
-        ► Pick: France win, exact <home> 1 — <away> 2   (likeliest 0-1)
-        ► If pens: France  (51%)             ← only on KO+draw branch
-        Expected points ≈ 1.90  → ×2 detonator ≈ 3.80
-        Signals: DC+Elo+Market+News   ← or with failures: "DC+Elo  ⚠market: over_budget"
-        ℹ <up to 2 context bullets, ≤60 chars each>
-      Update render_card to enforce ≤8 lines, truncate context >2 bullets, fail
-      gracefully on missing fields. Add render tests pinning each line shape and
-      the failure-message variant.
-      AUDITABILITY GOLDEN RULE: every signal MUST be reflected either in
-      signals_used OR signals_failed+failure_reasons — never both absent (silent
-      bypass = bug). Add a regression test enforcing this on build_card output.
+- [x] **Day 5 — scoring at scale (DONE).** `core/scoring/standings_writer.py`
+      with `update_standings()` (idempotent; -15% group reset on first KO
+      match scored; preserves futures_points for Day 7), `score_one_match()`
+      (returns None on missing data; catches unknown stage labels), and
+      `compute_prize_distribution()` (§5 prize ladder).
+      `core/scoring/penalties.py::predict_shootout(elo_h, elo_a)` — bounded
+      ±0.05 from 50/50 per literature (tanh edge).
+      LIVE-VERIFIED Jun 2026: Mexico 2-0 exact + detonator → 12.025 pts
+      (matches PDF §12). R16 finish triggers -15% reset → 10.221 / 4.5 / 14.721.
+      Penalty predictions: Spain v Brazil 52.0%, Argentina v Curacao 54.7%,
+      equal Elo exact 50.0%.
+      BUG FIXED in `latest_snapshot`: was using `ORDER BY captured_at DESC`
+      on string labels (`"T-pre-tourney" > "T-7m"` in ASCII), picked stale
+      pre-tournament snapshot over the T-7m lock. Now walks `WINDOW_PREFERENCE`
+      in order. 3 regression tests pin the fix.
+- [x] **Day 6 — card + delivery with full audit trail (DONE).**
+      `core/decision/build_card.py` — central glue: loads four signals
+      (`dixon_coles`/`elo`/`market`/`news`) each wrapped in try/except, stamps
+      audit fields (`signals_used`, `signals_failed`, `failure_reasons`,
+      `ev_pathway`), predicts `penalty_winner` on KO+draw, persists to
+      `predictions` via upsert. NEVER RAISES (golden rule #10).
+      `core/delivery/base.render_card` — compact ≤8 lines normal / ≤9 KO+pen;
+      `Signals:` line with inline `⚠signal: reason`; modal-line collapse when
+      modal==pick; strict cap enforced (log warning runtime, asserted in tests).
+      `schedule/runner.py.__main__` now uses real `build_card` (was `demo_card`).
+      `config/rules.DRAW_PEN_THRESHOLD = 0.15`.
+      LIVE-VERIFIED Jun 2026 across 5 scenarios:
+        - All 4 signals (Mexico v South Africa): pick = Draw 0-0 EV 3.42 →
+          6.84 with detonator (EV ≠ modal — exactly the system's edge).
+        - KO synthetic (R16): penalty_winner = Mexico (54%), render shows
+          "► If pens: Mexico (54%)", 8 lines total.
+        - Market-failed: ev_pathway=modal_fallback, render shows
+          "Signals: DC+Elo+News  ⚠market: odds_api over budget or no event".
+        - All 4 signals fail: render still works with all 4 ⚠ markers.
+        - Real Telegram delivery: card landed on phone (✓).
+      AUDITABILITY GOLDEN RULE pinned via parametrized test across 6 scenarios
+      (`test_auditability_golden_rule[...]`) — every signal must appear in
+      `signals_used` OR `signals_failed`; silent bypass is impossible by
+      construction.
+      CARRIED OVER TO DAY 9: `events_cache` parameter is BUILT into
+      build_card but the SchedulerDaemon doesn't batch yet — each match
+      currently re-fetches odds. Wire daemon to fetch ONE per window and
+      pass `events_cache=` to every dispatched match in that window (cuts
+      tournament-wide credits from ~300 → ~12).
+      CARRIED OVER TO DAY 8: when news_agent.search_queries is wired to
+      web-search/API-Football, build_card will start counting "news" as a
+      meaningful contributor (currently analyze_safe returns NEUTRAL → news
+      is in signals_used but contributes 0 delta).
 - [ ] **Day 7 — futures (pre-tournament bets).** The EV ranker is BUILT
       (`core/decision/futures.py`). Feed it probabilities — simplest/sharpest is
       **de-vigged market futures odds** via `futures.implied_probs(odds)` →
@@ -180,13 +190,20 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       Wire search_queries() to web-search / API-Football lineup+injury tools, pass
       results as context_text, apply returned deltas to DC expected goals in
       build_card. Always call analyze_safe; only search when should_search(window).
-- [ ] **Day 9 — orchestrate.** Wire `schedule/runner.py` fixtures to read upcoming
-      matches from SQLite, and `build_card` to the real model pipeline. The daemon
-      (ThreadPoolExecutor) already runs simultaneous kickoffs concurrently and runs
-      the watchdog/heartbeat each tick. Put it under systemd/launchd (see
-      docs/SCHEDULING.md). Optionally wrap the workers as Claude Agent SDK
-      subagents. Dry-run on day-1 fixtures; confirm `python -m tools.metrics` shows
-      per-game data.
+- [ ] **Day 9 — orchestrate.** The daemon's fixture source + real
+      `build_card` are ALREADY WIRED in `schedule/runner.py.__main__`
+      (Day 6); the ThreadPoolExecutor + watchdog already work. Remaining
+      Day-9 work:
+      (a) **CARRIED FROM DAY 6: events_cache batching.** Before dispatching
+          jobs in a tick where any `T-60m`/`T-15m`/`T-7m` window has matches
+          due, the daemon should call `fetch_all_odds()` ONCE and pass the
+          result as `events_cache=` to every match's `build_card`. Saves
+          ~95% of odds_api credits. Suggested: thread a `WindowContext`
+          object (with `events`, `now`, etc.) through `_run_job`.
+      (b) Put the daemon under launchd (see docs/SCHEDULING.md).
+      (c) Dry-run on day-1 fixtures; confirm `python -m tools.metrics`
+          shows per-game data.
+      (d) Optional: wrap workers as Claude Agent SDK subagents.
 - [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** — two paths:
       (a) PRE-TOURNAMENT WARM-START (~50 credits, optional). the-odds-api
           DOES expose a historical-odds endpoint on the free tier (corrected
