@@ -89,3 +89,145 @@ WATCHDOG_STUCK_MIN=20     WATCHDOG_HEARTBEAT_MAX_AGE=180
 `APScheduler` can replace the poll-loop with exact-time triggers and missed-job
 handling. It's a clean swap (the daemon's `tick`/job functions don't change), but
 the dependency-free poll-loop is enough for this single-user system.
+
+## Day-9: always-on hosting on Hetzner
+
+Why hosted: your Mac sleeps / closes lid / loses Wi-Fi — none of those are
+allowed during a T-7m window. A €5 cloud VM removes the risk class.
+
+Decision: **Hetzner CX22** (€4.51/mo, 2 vCPU, 4 GB RAM, Ubuntu 24.04). Order at
+console.hetzner.cloud, location Falkenstein (de-falkenstein) — geographically
+closest to the football-data.org and Brave Search endpoints (lower latency
+than US-East), and Hetzner's network has no surprises with Honeycomb's
+OTLP HTTPS endpoint.
+
+### One-time provisioning (~5 min)
+1. **Buy the VM** in Hetzner Cloud Console → "+ Add Server" → Ubuntu 24.04 →
+   CX22 → SSH-key auth (do NOT use password). Note the public IP.
+2. **First SSH** to verify access:
+   ```bash
+   ssh root@<vm-ip>
+   ```
+3. **Run the bootstrap** (one line):
+   ```bash
+   wget https://raw.githubusercontent.com/<your-gh-user>/mondial2026/main/infra/bootstrap.sh
+   bash bootstrap.sh
+   ```
+   The script installs Python 3.13, clones the repo into
+   `/home/mondial/mondial2026`, creates the venv, installs deps, drops a
+   `.env` template, and STOPS — prompting you to fill in the keys.
+4. **Fill the .env** with the same secrets from your Mac's `.env`:
+   ```bash
+   vi /home/mondial/mondial2026/.env
+   chmod 600 /home/mondial/mondial2026/.env
+   ```
+5. **Re-run the bootstrap** to install + enable the systemd unit + nightly
+   backup cron:
+   ```bash
+   bash bootstrap.sh
+   ```
+   You'll see live JSON logs scrolling — that's the daemon running. Ctrl-C
+   exits the tail; the daemon keeps going.
+
+### Day-to-day operations on the VM
+
+| Need | Command |
+|---|---|
+| Tail live logs | `journalctl -u mondial2026 -f` |
+| Service status | `systemctl status mondial2026` |
+| Restart after `.env` change | `systemctl restart mondial2026` |
+| Stop (e.g. before backup restore) | `systemctl stop mondial2026` |
+| Brave/odds_api budget | `PYTHONPATH=. .venv/bin/python tools/brave_quota.py` |
+| Full obs audit | `PYTHONPATH=. .venv/bin/python tools/obs_audit.py` |
+| Force a backup now | `bash infra/backup.sh` |
+| Find the latest backup | `ls -lh store/backup/` |
+
+### After the tournament
+```bash
+# Delete the VM from Hetzner Cloud Console (or hcloud server delete <id>).
+# Total cost: 32 tournament days × €4.51/30 ≈ €4.80 for the whole event.
+```
+
+### Why this beats the obvious alternatives
+
+| Option | Verdict | Reason |
+|---|---|---|
+| Mac under launchd | ⛔ | Sleep/close lid kills the daemon — single biggest miss risk. |
+| GitHub Actions cron | ⛔ | 5-min minimum races the 6-min T-7m window; SQLite state has no persistent home on a public-repo runner. |
+| Render/Railway free | ⛔ | Free background workers idle out (15 min) — defeats "always-on". |
+| Oracle Always-Free | 🟡 | Truly free forever but signup is fussy. Fall-back if you don't want to pay anything. |
+| **Hetzner CX22** | ✅ | Bulletproof for ~€5 total. Destroy after tournament. |
+
+## Day-9: what the daemon does each tick (Jun-2026 final wiring)
+
+Each `SCHED_POLL_SECONDS` (default 60s) one tick runs the full loop:
+
+1. `_maybe_ingest(now)` — every 30 min, `football_data.refresh()` upserts the
+   calendar + tags detonators. Updates utc_kickoff if a game's time changed,
+   sets status=FINISHED + scores when a game ends, fills in `home`/`away` for
+   knockout TBD rows once the bracket resolves.
+2. `_maybe_update_standings()` — every tick, `update_standings(participant="me")`
+   re-scores every finished match against your stored predictions. Idempotent
+   (Day-5 design); takes a few ms.
+3. `_maybe_daily_summary(now)` — at 09:00 Asia/Jerusalem, push a Telegram
+   summary (today's games + recent results + your score + Brave/odds budget).
+   Tracked via a synthetic match_id `-1` so it never duplicates.
+4. `fixtures_fn()` → `upcoming_matches(within_hours=26)` reads SQLite.
+5. `due_jobs(matches, now)` returns the (match_id, window) pairs whose trigger
+   time has arrived. Catch-up cap 120 min; persistent idempotency via
+   `runs.was_handled`.
+6. **events_cache batching (Day-9 new)** — if any due job is in
+   `{T-60m, T-15m, T-7m}`, call `fetch_all_odds()` ONCE and inject the result
+   into every dispatched match. Cuts tournament-wide odds_api credits from
+   ~300 → ~120. Fetch failures degrade to per-match (build_card's existing path).
+7. Dispatch each due job to the ThreadPoolExecutor (6 workers by default).
+   `_dispatched` set + the runs ledger prevent double-firing.
+8. `watchdog.beat()` writes the heartbeat file; `watchdog.run_checks()` alerts
+   via Telegram if any in-flight run has been stuck > 20 min.
+
+Every external call inside the dispatched pipeline goes through
+`obs.external_call(...)` (rate-limit token bucket + Honeycomb span + cost
+ledger). The shared bucket means N concurrent matches collectively stay
+under each free-tier limit.
+
+## Day-9: Telegram messages you'll receive (the full alert taxonomy)
+
+| Trigger | Title prefix | Source | When |
+|---|---|---|---|
+| **Card** (the pick itself) | none — formatted card | `core/delivery/base.render_card` via `pipeline.deliver_card` | Each successful match-window: T-24h, T-60m, T-15m, T-7m |
+| **Pipeline failure** | `⚠ Pipeline FAILED — <home> vs <away>` | `pipeline.process_match` after all retries | A match build_card raised + retries exhausted. Body: `[stage: <which>] <error>` so you see where it broke. |
+| **Delivery failure** | `⚠ Delivery FAILED — <home> vs <away>` | `pipeline.process_match` | Card was computed but no channel accepted it (Telegram down, file write blocked). |
+| **Scheduler DOWN** | `⚠ Scheduler DOWN` | `watchdog.check_heartbeat` (called every tick) | Heartbeat file >180s stale → the daemon died and was watching itself? No — this comes from an external cron OR from the next tick if the daemon eventually restarts; mostly the systemd auto-restart kicks in first. |
+| **Stuck jobs** | `⚠ Stuck jobs` | `watchdog.check_stuck` (called every tick) | A run started but never finished after 20 min. Body lists match_id + window + started_at. Usually means a hung HTTP call slipped past obs.external_call's rate_timeout. |
+| **Daily summary** ☀️ | `☀️ Daily summary — YYYY-MM-DD` | `schedule.daily_summary.send_if_due` | 09:00 Asia/Jerusalem, once per day. Today's games + recent results + your score + budget status. Doubles as a positive heartbeat — if you don't see it, the daemon is dead even when alerts are also broken. |
+
+All go to the **same** `TELEGRAM_CHAT_ID`. They're visually distinct:
+- Cards start with `⚽` and are 7-9 lines.
+- Alerts start with `⚠` and are 1-3 lines.
+- Daily summary starts with `☀️` and is 4-7 lines.
+
+### What it does NOT alert on (and why that's OK)
+
+- **Brave Search / odds_api / api_football single failures** — they're
+  swallowed inside `analyze_safe` / `build_card`'s degradation ladder (the
+  signal moves to `signals_failed` and the card lands with `⚠news: ...` in
+  the Signals line). The CARD itself is the alert.
+- **Per-provider rate-limit waits** — the token bucket blocks for up to 30 s;
+  beyond that we log + degrade. No Telegram.
+- **Ingest failures** — logged + retried next cycle. The watchdog catches it
+  via the daily summary going stale (no upcoming-games line will appear).
+- **Honeycomb OTLP export failures** — logged only; tracing is observability,
+  not a critical path.
+
+### If you stop receiving messages
+
+In priority order:
+1. No daily summary at 09:00 → SSH to the VM, `systemctl status mondial2026`.
+   If `Active: failed` see `journalctl -u mondial2026 -n 100` for the last
+   error. Restart with `systemctl restart mondial2026`.
+2. Cards stop landing but daily summary arrives → check `Telegram bot →
+   Settings → block`, then `tools/obs_audit.py` to see which provider failed.
+3. Random spikes of `⚠ Pipeline FAILED` → check the `failure_reasons` field
+   in the most recent rows of `store/mondial.db: predictions`; usually a
+   provider rate-limit you can ride out.
+

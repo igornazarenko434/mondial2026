@@ -1,0 +1,163 @@
+"""Day-9: 09:00-local daily summary (positive heartbeat + day-at-a-glance).
+
+Each morning the daemon pushes a Telegram message:
+  📅 today's games
+  ✓ recent results
+  Your score (from standings)
+  Budget headline (Brave + odds_api free-tier consumption)
+
+Why this exists, even though watchdog already alerts on failure:
+  • Watchdog alerts only when something is broken — a quiet day looks
+    identical to a dead daemon. The 09:00 message proves the system is
+    alive every morning.
+  • Same Telegram chat as cards/alerts (one place to monitor).
+  • Idempotent — the (synthetic) match_id -1 + day-stamped window in the
+    runs ledger means we never send twice per day, even across restarts.
+"""
+from __future__ import annotations
+import sqlite3
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from core import delivery
+from core.obs.runs import RunLedger
+from core.obs.cost import ledger as cost_ledger
+from core.obs.logging import get_logger
+
+log = get_logger("daily_summary")
+
+# Synthetic match_id reserved for daily-summary idempotency. Real match_ids
+# from football-data.org are positive integers; -1 cannot collide.
+DAILY_SUMMARY_MATCH_ID = -1
+
+
+def _local_today_label(now_utc: datetime, tz: str = "Asia/Jerusalem") -> str:
+    return now_utc.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
+
+
+def already_sent_today(led: RunLedger, now_utc: datetime,
+                       tz: str = "Asia/Jerusalem") -> bool:
+    """True if today's summary has already been recorded in the runs ledger."""
+    window = f"daily-summary-{_local_today_label(now_utc, tz)}"
+    return led.was_handled(DAILY_SUMMARY_MATCH_ID, window)
+
+
+def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
+                       tz: str = "Asia/Jerusalem") -> str:
+    """Plain-text Telegram-safe summary. Never raises — failures degrade to
+    sections being omitted rather than the whole summary failing."""
+    tz_obj = ZoneInfo(tz)
+    today_local = now_utc.astimezone(tz_obj).date()
+
+    # Today's games — query the matches table directly using the injected
+    # `now_utc` so the summary is reproducible and testable (repo.upcoming_
+    # matches reads the real wall clock and would skip future-dated test
+    # fixtures during unit tests).
+    today_games: list[str] = []
+    try:
+        # local-day window: midnight-to-midnight Jerusalem, expressed in UTC
+        local_midnight = datetime.combine(today_local,
+                                          datetime.min.time(), tzinfo=tz_obj)
+        day_start_utc = local_midnight.astimezone(timezone.utc).isoformat()
+        day_end_utc = (local_midnight.replace(hour=23, minute=59, second=59)
+                       .astimezone(timezone.utc).isoformat())
+        rows = conn.execute(
+            "SELECT match_id, utc_kickoff, stage, home, away FROM matches "
+            "WHERE status IN ('SCHEDULED','TIMED') AND utc_kickoff IS NOT NULL "
+            "AND utc_kickoff BETWEEN ? AND ? "
+            "AND home IS NOT NULL AND away IS NOT NULL "
+            "ORDER BY utc_kickoff",
+            (day_start_utc, day_end_utc)).fetchall()
+        for m in rows:
+            ko = datetime.fromisoformat(m["utc_kickoff"]).astimezone(tz_obj)
+            today_games.append(
+                f"{ko.strftime('%H:%M')} {m['home']} vs {m['away']} "
+                f"({m['stage']})")
+    except Exception as e:                          # noqa: BLE001
+        log.warning("today's-games read failed: %s", e)
+
+    # Recently finished — last 30h relative to the injected `now_utc`.
+    results: list[str] = []
+    try:
+        from datetime import timedelta
+        since = (now_utc - timedelta(hours=30)).isoformat()
+        rows = conn.execute(
+            "SELECT match_id, home, away, home_goals, away_goals "
+            "FROM matches WHERE status='FINISHED' AND utc_kickoff >= ? "
+            "ORDER BY utc_kickoff DESC", (since,)).fetchall()
+        for m in rows:
+            results.append(
+                f"{m['home']} {m['home_goals']}-{m['away_goals']} {m['away']}")
+    except Exception as e:                          # noqa: BLE001
+        log.warning("recent-finished read failed: %s", e)
+
+    # Standings
+    stand = None
+    try:
+        stand = conn.execute(
+            "SELECT group_points, knockout_points, futures_points, "
+            "(group_points + knockout_points + futures_points) AS total "
+            "FROM standings WHERE participant='me'"
+        ).fetchone()
+    except Exception as e:                          # noqa: BLE001
+        log.warning("standings read failed: %s", e)
+
+    # Budget headline — only providers with a real budget contribute a number
+    L = cost_ledger()
+    brave = L.quota_status("brave_search")
+    odds = L.quota_status("odds_api")
+
+    lines = [f"📅 Mondial 2026 — {today_local.isoformat()}"]
+    if today_games:
+        n = len(today_games)
+        lines.append(f"Today ({n} game{'s' if n != 1 else ''}):")
+        for g in today_games[:5]:
+            lines.append(f"  • {g}")
+    else:
+        lines.append("No games today.")
+    if results:
+        lines.append(f"Recent ({len(results)}):")
+        for r in results[:4]:
+            lines.append(f"  ✓ {r}")
+    if stand:
+        lines.append(
+            f"Your score: {stand['total']:.1f} pts "
+            f"(group {stand['group_points']:.1f} / KO {stand['knockout_points']:.1f} / "
+            f"futures {stand['futures_points']:.1f})")
+    lines.append(
+        f"Budget: Brave {brave.get('used', 0):.0f}/{brave.get('budget') or '∞'}  "
+        f"odds {odds.get('used', 0):.0f}/{odds.get('budget') or '∞'}")
+    return "\n".join(lines)
+
+
+def send_if_due(conn: sqlite3.Connection, led: RunLedger, *,
+                now: datetime | None = None,
+                hour_local: int = 9, tz: str = "Asia/Jerusalem") -> bool:
+    """If `now` is past `hour_local` in `tz` and today's summary hasn't been
+    sent, build + send via delivery.alert. Returns True if SENT this call.
+
+    The runs-ledger row is created BEFORE the send so a delivery failure
+    doesn't retry-storm us — better to miss one summary than to flood the
+    chat. The next morning's call picks up cleanly (different day label).
+    """
+    now = now or datetime.now(timezone.utc)
+    local_now = now.astimezone(ZoneInfo(tz))
+    if local_now.hour < hour_local:
+        return False
+    if already_sent_today(led, now, tz):
+        return False
+    day_label = _local_today_label(now, tz)
+    window_label = f"daily-summary-{day_label}"
+    run_id = led.start(DAILY_SUMMARY_MATCH_ID, window_label,
+                        correlation_id=window_label)
+    try:
+        body = build_summary_text(conn, now, tz)
+        ok = delivery.alert(f"☀️ Daily summary — {day_label}", body)
+        led.finish(run_id, "ok" if ok else "failed",
+                    detail=None if ok else "delivery returned False",
+                    card_delivered=bool(ok))
+        log.info("daily summary sent for %s (ok=%s)", day_label, ok)
+        return bool(ok)
+    except Exception as e:                          # noqa: BLE001
+        led.finish(run_id, "failed", detail=str(e))
+        log.error("daily summary failed: %s", e)
+        return False

@@ -1,0 +1,53 @@
+# systemd unit for the Mondial 2026 scheduler daemon.
+#
+# Install (as root, on the Hetzner / Oracle VM):
+#   1. Drop this file at /etc/systemd/system/mondial2026.service
+#      (adjust the four CHANGEME paths below to match the VM layout — see
+#      infra/bootstrap.sh which does this automatically).
+#   2. systemctl daemon-reload
+#   3. systemctl enable --now mondial2026.service
+#
+# What you get:
+#   • Restart=always — if the daemon crashes, systemd restarts it in 10 s.
+#   • EnvironmentFile= — secrets stay in .env on disk, NEVER in git.
+#   • Hardening — runs as a non-root user, no new privileges, /tmp isolated.
+#   • Journal — `journalctl -u mondial2026 -f` tails live logs (structured
+#     JSON from core.obs.logging — searchable with `jq`).
+
+[Unit]
+Description=Mondial 2026 scheduler daemon (World Cup picks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mondial
+Group=mondial
+WorkingDirectory=/home/mondial/mondial2026
+EnvironmentFile=/home/mondial/mondial2026/.env
+ExecStart=/home/mondial/mondial2026/.venv/bin/python -m schedule.runner
+Restart=always
+RestartSec=10
+# Restart even when ExecStart returns a non-zero exit (e.g. preflight blew up
+# because the API key briefly went missing). On-failure-only would leave us
+# offline if the daemon ran for an hour then died cleanly.
+RestartPreventExitStatus=
+# Tighten the security envelope: the daemon does not need root.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/mondial/mondial2026/store /home/mondial/mondial2026/cache
+PrivateTmp=true
+# Keep logs in the journal (default), tagged so `journalctl -t mondial2026`
+# filters quickly.
+SyslogIdentifier=mondial2026
+# Memory ceiling: the daemon's resident set is ~80 MB; 256 MB is generous.
+MemoryMax=256M
+# Stop trying after 5 successive restarts in 60 s — at that point page the
+# user instead of looping forever. The OS supervisor catches REAL crashes;
+# this catches "configuration broke beyond recovery".
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Install]
+WantedBy=multi-user.target

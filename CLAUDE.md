@@ -249,20 +249,51 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       `/fixtures` returns rows for WC2026 (`league=1&season=2026` was empty
       as of 2026-06-06; expected to populate ~24h before kickoff). Code
       degrades gracefully to Brave-only context if API-Football is empty.
-- [ ] **Day 9 — orchestrate.** The daemon's fixture source + real
-      `build_card` are ALREADY WIRED in `schedule/runner.py.__main__`
-      (Day 6); the ThreadPoolExecutor + watchdog already work. Remaining
-      Day-9 work:
-      (a) **CARRIED FROM DAY 6: events_cache batching.** Before dispatching
-          jobs in a tick where any `T-60m`/`T-15m`/`T-7m` window has matches
-          due, the daemon should call `fetch_all_odds()` ONCE and pass the
-          result as `events_cache=` to every match's `build_card`. Saves
-          ~95% of odds_api credits. Suggested: thread a `WindowContext`
-          object (with `events`, `now`, etc.) through `_run_job`.
-      (b) Put the daemon under launchd (see docs/SCHEDULING.md).
-      (c) Dry-run on day-1 fixtures; confirm `python -m tools.metrics`
-          shows per-game data.
-      (d) Optional: wrap workers as Claude Agent SDK subagents.
+- [x] **Day 9 — orchestrate (DONE — 24-Day-9 tests, 337 total green).**
+      The daemon now runs four hooks per tick, all idempotent + fail-safe:
+      `_maybe_ingest` (30 min cadence) → `_maybe_update_standings` (each
+      tick, idempotent) → `_maybe_daily_summary` (09:00 Asia/Jerusalem) →
+      `_fetch_events_cache_if_needed` (one fetch_all_odds shared across all
+      matches in odds-windows) → dispatch → watchdog beat.
+      Deliverables:
+      - `schedule/runner.py` — added 3 hook callbacks (events_cache_fn,
+        standings_update_fn, daily_summary_fn). `_run_job` stamps both
+        `_window` and `_events_cache` onto the match dict; `__main__` wires
+        all four hooks against the live SQLite+APIs. Default workers
+        bumped 4→6 to cover up to 4 simultaneous group-stage kickoffs.
+      - `schedule/daily_summary.py` — NEW module: 09:00 Asia/Jerusalem
+        Telegram summary (today's games + recent results + standings +
+        Brave/odds budget). Idempotent via synthetic match_id=-1 and a
+        day-stamped window in the runs ledger. Degrades section-by-section
+        on partial failures; never raises.
+      - `infra/mondial2026.service` — systemd unit. `Restart=always`,
+        `RestartSec=10`, security hardening, `MemoryMax=256M`.
+      - `infra/bootstrap.sh` — one-line Ubuntu 24.04 provision: apt + venv
+        + clone + .env prompt + systemd enable + cron. Idempotent.
+      - `infra/backup.sh` — nightly `sqlite3 .backup` (online, safe under
+        concurrent writes) + 7-day rotation. Cron-scheduled by bootstrap.
+      - `docs/SCHEDULING.md` — Hetzner CX22 §, day-to-day ops table, full
+        Telegram alert taxonomy (cards / pipeline / delivery / scheduler /
+        stuck / daily summary), "if you stop receiving messages" runbook.
+      Host: **Hetzner CX22, Falkenstein, Ubuntu 24.04, ~€5 for the
+      tournament**. Mac-can-be-closed risk eliminated. Public-repo design:
+      secrets stay in `/home/mondial/.env` (chmod 600), NEVER committed.
+      Edge cases tested (24 new tests, all offline — zero API calls):
+        - events_cache fired ONCE per tick (not per match)
+        - events_cache skipped at T-24h (saves a credit)
+        - events_cache_fn raising → per-match fallback (build_card unaffected)
+        - events_cache_fn None → backwards-compat (existing behaviour)
+        - standings_update_fn raising → tick still dispatches
+        - standings_update_fn None → no-op (backwards-compat)
+        - daily_summary timing gate (before/at/after 09:00 local)
+        - daily_summary idempotency within day, sends again next day
+        - daily_summary delivery failure recorded once, no retry storm
+        - daily_summary alert raising → swallowed, daemon loop survives
+        - daily_summary on empty DB → header + budget line, no crash
+        - workers default = 6 (regression pin)
+        - ODDS_WINDOWS regression pin (T-24h excluded)
+      Not done (explicitly optional per spec): Claude Agent SDK subagent
+      wrap — adds complexity for no functional gain.
 - [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** — two paths:
       (a) PRE-TOURNAMENT WARM-START (~50 credits, optional). the-odds-api
           DOES expose a historical-odds endpoint on the free tier (corrected
