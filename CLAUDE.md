@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (237 tests should stay green).
+11. Run `pytest tests/ -q` after every change (263 tests should stay green).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -179,12 +179,26 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       web-search/API-Football, build_card will start counting "news" as a
       meaningful contributor (currently analyze_safe returns NEUTRAL → news
       is in signals_used but contributes 0 delta).
-- [ ] **Day 7 — futures (pre-tournament bets).** The EV ranker is BUILT
-      (`core/decision/futures.py`). Feed it probabilities — simplest/sharpest is
-      **de-vigged market futures odds** via `futures.implied_probs(odds)` →
-      `recommend_futures({"winner":..,"scorer":..,"cinderella":..,"fighter":..})`.
-      Optionally build `montecarlo.py` for model-based probs instead. Lock the 4
-      picks before 11.06 21:59.
+- [x] **Day 7 — futures lock (DONE — pre-deadline).** Three EV-optimal picks
+      computed via live data + Monte Carlo (fighter is intentionally manual).
+      Deliverables:
+      - `core/models/montecarlo.py` — 20k tournament-bracket simulator
+        (Poisson goals from DC fit + Elo-edge penalty shootouts; snake-seeded
+        R32 with intra-group rematch avoidance).
+      - `core/data/futures_odds.py` — outright market fetchers (winner +
+        topscorer with auto-detect; budget-guarded; canonical name normalize).
+      - `tools/futures_lock.py` — orchestrator: load data → MC → market → EV
+        tables → JSON + Telegram-able pretty-print. Uses **market-prior ×
+        sqrt(MC team factor) hybrid** for scorer fallback when no live market.
+      - `docs/FUTURES_LOCK_2026.md` — picks + reasoning + pool-win analysis.
+      Live picks (cross-checked against ESPN/SI/FOX/RotoWire/Goal.com Jun 2026):
+        - WINNER: **Portugal** (EV 3.04, +0.14 margin, market-driven)
+        - CINDERELLA: **Uzbekistan** (EV 0.99, +0.62 margin, MC-driven)
+        - SCORER: **Mbappé** (EV 3.39, +0.42 margin); contrarian alt **Bellingham** (2.88)
+        - FIGHTER: manual per user
+      Bug fix bundled: Qatar missing `cinderella_listed` flag in groups CSV.
+      Tests: +26 (12 MC + 7 odds + 7 audit). User must enter picks in the
+      Toto app before **11.06 21:59 Israel**.
 - [ ] **Day 8 — news agent.** Rubric, query builder, window/budget config and
       clamping are DONE (news_agent.py, config/news.py, docs/NEWS_AGENT_PLAYBOOK.md).
       Wire search_queries() to web-search / API-Football lineup+injury tools, pass
