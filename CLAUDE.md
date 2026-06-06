@@ -86,7 +86,8 @@ the MVP — keep it a clean, optional post-step.
 | `core/data/cache.py` (daily disk cache) | ✅ | nothing |
 | `core/data/soccerdata_io.py` (Elo/FBref loaders: cache+normalize+lookup) | ✅ logic; live `_fetch_eloratings`/`_read_fbref` 🟡 | wire the scrapes (Day 2) |
 | `core/data/oddsapi.py` (devig, resolve_wc_key) | ✅ ; `fetch_match_odds` 🟡 | finish event→fixture matching (Day 4) |
-| `core/data/api_football.py` (lineups/injuries/backup) | 🟡 stub | implement (Day 8 / fallback) |
+| `core/data/api_football.py` (lineups/injuries/backup) | ✅ Day-8 | live-verify lineup payload + aliases once `/fixtures` populates (~24h pre-kickoff) |
+| `core/data/web_search.py` (Brave Search, Day-8 news) | ✅ Day-8 | nothing; 3-layer budget brake keeps us at $0 |
 | `core/data/teams.py` (normalize) | ✅ | extend aliases if a name slips through |
 | `core/obs/*`, `core/reliability.py`, `core/delivery/*` | ✅ | set Telegram creds (optional) |
 | `orchestrator/pipeline.py` (run+retry+deliver+strategy) | ✅ | nothing |
@@ -199,11 +200,55 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       Bug fix bundled: Qatar missing `cinderella_listed` flag in groups CSV.
       Tests: +26 (12 MC + 7 odds + 7 audit). User must enter picks in the
       Toto app before **11.06 21:59 Israel**.
-- [ ] **Day 8 — news agent.** Rubric, query builder, window/budget config and
-      clamping are DONE (news_agent.py, config/news.py, docs/NEWS_AGENT_PLAYBOOK.md).
-      Wire search_queries() to web-search / API-Football lineup+injury tools, pass
-      results as context_text, apply returned deltas to DC expected goals in
-      build_card. Always call analyze_safe; only search when should_search(window).
+- [x] **Day 8 — news agent (DONE — full wire + observability).**
+      Live-verified Jun 2026: end-to-end build_card with real Gemini call
+      returned `Signals: DC+Elo+Market+News(gemini)`; trace
+      `4664ef0e…`/`7fc52e5d…` visible in Honeycomb with all child spans
+      (gemini.complete, brave_search.web, api_football.fixtures/teams,
+      football_data.wc_matches).
+      Deliverables:
+      - `core/data/web_search.py` — Brave Search adapter with 3-layer
+        budget brake (key check → 90% monthly brake → 60/day cap).
+      - `core/data/api_football.py` — real `find_fixture_id` / `fetch_lineups`
+        / `fetch_injuries` / `find_team_id` (with global fallback).
+      - `orchestrator/agents/news_agent.py` — 5-layer guardrails (L1 dated
+        WC2026-anchored queries → L2 source-side freshness filter → L3 capped
+        context with dated headers → L4 SYSTEM prompt with 2 worked examples
+        → L5 strict→regex→NEUTRAL parse + ±0.6 clamp). `analyze()` returns
+        provider/fallbacks_used; `analyze_safe()` adds failure on degraded
+        path. `read_prior_deltas()` reuses T-60m's stored deltas at T-15m
+        (saves ~70% of T-15m LLM+Brave calls when XI is confirmed).
+      - `core/decision/build_card.py` — gather_context wired at T-24h/T-60m/
+        T-15m; news_deltas flow to `match_card` → shift DC expected goals
+        (`lh + news_deltas[0]`, `la + news_deltas[1]`). Card carries flat
+        `news_provider` / `news_fallbacks_used` / `news_failure` fields
+        (queryable from `predictions.payload_json`).
+      - `core/delivery/base.py::render_card` — Signals line shows
+        `News(gemini)` on success, `⚠news: <reason>` on failure.
+      - `core/llm/router.py` — every LLM call wrapped in
+        `obs.external_call(provider, "complete")`; `last_provider` +
+        `last_fallbacks` stamped on success so callers know which model
+        answered.
+      - `tools/obs_audit.py` — end-to-end CLI that fires one live probe per
+        provider, prints config matrix vs. each provider's published free-
+        tier ceiling, verifies spans + ledger rows. Run with
+        `OTEL_TRACES_EXPORTER=console` to inspect spans locally.
+      Budget math (live, Jun 2026): Brave free credit = 1000 req/mo;
+      104 matches × (3 T-24h + 4 T-60m + 2 T-15m worst case) = 936 reqs →
+      fits in 1000 with 6% headroom. T-15m cache reuse drops it further.
+      Current usage: 4/1000 ($0.02 cost, $0.00 OOP).
+      Telegram bot + odds_api `/sports` (free) gaps closed in commit
+      `07e9ee7` — every `requests.get/post` in non-test code is now
+      inside `obs.external_call(...)`. PROVIDER_LIMITS + PRICING in
+      `config/observability.py` cover all 10 providers.
+      Tests: +28 over Day-7 baseline (313 total green): per-window query
+      counts, gather_context assembly, JSON parse tiers, ±0.6 clamp,
+      T-15m cache reuse, router provider stamping, render audit visibility.
+      CARRIED OVER (cannot verify pre-tournament, by design): API-Football
+      lineup payloads and team-name aliases will only be live-testable when
+      `/fixtures` returns rows for WC2026 (`league=1&season=2026` was empty
+      as of 2026-06-06; expected to populate ~24h before kickoff). Code
+      degrades gracefully to Brave-only context if API-Football is empty.
 - [ ] **Day 9 — orchestrate.** The daemon's fixture source + real
       `build_card` are ALREADY WIRED in `schedule/runner.py.__main__`
       (Day 6); the ThreadPoolExecutor + watchdog already work. Remaining
@@ -254,7 +299,10 @@ Side bets work today via `sidebets`. Everything else is enhancement.
    - the-odds-api: "Bosnia & Herzegovina" (with `&`), "Czech Republic"
    - eloratings.net: 2-letter codes via `eloratings_codes.py`
    - martj42 CSV: "Korea Republic", "Cabo Verde", "Cote d'Ivoire"
-   - api-football: empty until tournament starts — audit at Day 8
+   - api-football: empty until tournament starts — re-audit ~24h pre-kickoff
+     when `/fixtures?league=1&season=2026` first returns rows. Day-8 wired
+     the client + graceful degradation; live payload-level alias check is
+     the only remaining piece.
    After any new source addition, run the audit:
    `for n in {api_names}: assert normalize(n) in groups_truth`.
 2. **Cost-ledger reconciliation.** `obs.cost.ledger().quota_status(provider)`
