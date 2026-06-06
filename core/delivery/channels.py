@@ -48,13 +48,17 @@ class TelegramNotifier(Notifier):
         return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
     def send(self, title, body):
         import requests
+        from core import obs
         token = os.environ["TELEGRAM_BOT_TOKEN"]
         chat = os.environ["TELEGRAM_CHAT_ID"]
         text = f"{title}\n{body}"
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                          json={"chat_id": chat, "text": text},
-                          timeout=15)
-        r.raise_for_status()
+        # Telegram bot API: 1 msg/sec per chat, 30/sec global; wrap so the
+        # delivery shows up in Honeycomb (and so a retry storm can't exceed it).
+        with obs.external_call("telegram_bot", "sendMessage", units=1):
+            r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                              json={"chat_id": chat, "text": text},
+                              timeout=15)
+            r.raise_for_status()
 
 
 REGISTRY = {n.name: n for n in (FileReport(), TelegramNotifier(), ConsoleNotifier())}

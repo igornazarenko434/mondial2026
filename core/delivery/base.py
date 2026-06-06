@@ -52,14 +52,26 @@ _SIGNAL_LABEL = {"dixon_coles": "DC", "elo": "Elo",
 
 
 def _signals_line(card: dict) -> str:
-    """Audit-trail line. Compact: 'Signals: DC+Elo+Market+News' on the happy
-    path; with failures: 'Signals: DC+Elo  ⚠market: budget   ⚠news: 429'."""
+    """Audit-trail line. Compact: 'Signals: DC+Elo+Market+News(gemini)' on the
+    happy path; with failures: 'Signals: DC+Elo  ⚠market: budget   ⚠news: 429'.
+
+    The (provider) suffix appears next to News when known (gemini / claude /
+    openai) so the user sees WHICH model produced the news output. On news
+    failure, the ⚠ annotation also shows the failure reason.
+    """
     used = card.get("signals_used") or []
     failed = card.get("signals_failed") or []
     reasons = card.get("failure_reasons") or {}
+    news_provider = card.get("news_provider")
     parts = []
     if used:
-        parts.append("Signals: " + "+".join(_SIGNAL_LABEL.get(s, s) for s in used))
+        labels = []
+        for s in used:
+            label = _SIGNAL_LABEL.get(s, s)
+            if s == "news" and news_provider:
+                label = f"{label}({news_provider})"
+            labels.append(label)
+        parts.append("Signals: " + "+".join(labels))
     else:
         parts.append("Signals: (none)")
     for s in failed:

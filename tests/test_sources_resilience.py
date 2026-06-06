@@ -37,13 +37,21 @@ def test_consensus_probs_averages_books():
 
 # --- news/LLM degradation: never blocks a pick ---
 class _BoomRouter:
+    def complete(self, *a, **k): raise RuntimeError("all providers down")
     def complete_json(self, *a, **k): raise RuntimeError("all providers down")
 
 
 def test_news_analyze_safe_returns_neutral_on_failure():
     out = analyze_safe("Norway", "France", "Mbappé injured?", router=_BoomRouter())
+    # Deltas/notes preserved as NEUTRAL (the pick stays unbiased on failure).
     assert out["home_goal_delta"] == 0.0 and out["away_goal_delta"] == 0.0
-    assert out == {**NEUTRAL}
+    for k in NEUTRAL:
+        assert out[k] == NEUTRAL[k]
+    # Plus the failure-mode + provider audit fields so render_card can show
+    # ⚠news and Honeycomb cross-references the attempted model.
+    assert "failure" in out and "all providers down" in out["failure"]
+    assert "provider" in out
+    assert "fallbacks_used" in out
 
 
 # --- delivery: all channels fail -> returns False, never raises ---

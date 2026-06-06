@@ -36,6 +36,10 @@ PROVIDER_LIMITS = {
     # Brave Search "Search" plan (Day 8 news agent): $5/1,000 requests.
     # Free monthly credit is $5 = 1,000 requests/mo. Stay under to pay $0.
     "brave_search":  {"rate": 1,  "per": 1,    "budget": 1000,  "budget_period": "month"},
+    # Telegram bot — 1 msg/sec per chat, 30/sec global (core.telegram.org/bots/faq).
+    # We only send ~5–10 cards/day, so the per-chat rate is the only one that
+    # could ever bind; cap kept conservative.
+    "telegram_bot":  {"rate": 1,  "per": 1,    "budget": None,  "budget_period": None},
 }
 
 # Rough $/unit for cost ESTIMATES (free providers = 0). Tune to your plan.
@@ -52,6 +56,7 @@ PRICING = {
     "martj42":       {"per_call": 0.0},   # free GitHub raw
     "brave_search":  {"per_call": 0.005}, # $5 / 1,000 requests = $0.005 per call;
                                           # $5/mo free credit covers first 1,000.
+    "telegram_bot":  {"per_call": 0.0},   # free
 }
 
 # Warn when a provider's budget usage crosses this fraction.

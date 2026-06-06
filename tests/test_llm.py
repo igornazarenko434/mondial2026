@@ -39,3 +39,48 @@ def test_raises_when_all_fail():
     r = make([("claude", False, True), ("gemini", False, True)])
     with pytest.raises(AllProvidersFailed):
         r.complete("s", "hi")
+
+
+# ─────────────── Day-8 audit-trail: which model answered? ───────────────
+
+def test_last_provider_stamped_after_successful_call():
+    """After complete() succeeds, last_provider names the model that answered
+    and last_fallbacks lists any providers attempted before it. This is what
+    feeds the 'Signals: …+News(gemini)' annotation on the card."""
+    r = make([("claude", True, True), ("gemini", True, True)])
+    r.complete("s", "hi")
+    assert r.last_provider == "claude"
+    assert r.last_fallbacks == []
+
+
+def test_last_provider_records_fallbacks_after_chain_walk():
+    r = make([("claude", False, True), ("gemini", True, True)])
+    r.complete("s", "hi")
+    assert r.last_provider == "gemini"
+    assert r.last_fallbacks == ["claude"]
+
+
+def test_last_provider_cleared_when_all_fail():
+    r = make([("claude", False, True), ("gemini", False, True)])
+    with pytest.raises(AllProvidersFailed):
+        r.complete("s", "hi")
+    assert r.last_provider is None
+    assert r.last_fallbacks == ["claude", "gemini"]
+
+
+def test_llm_calls_wrapped_in_obs_external_call(monkeypatch):
+    """Every router call MUST go through obs.external_call so Honeycomb
+    receives the span + the cost-ledger gets the rate-limit token. If this
+    wrap regresses, LLM calls vanish from traces."""
+    from core import obs
+    calls: list[tuple[str, str]] = []
+    real_ec = obs.external_call
+
+    def spy_ec(provider, endpoint, *args, **kw):
+        calls.append((provider, endpoint))
+        return real_ec(provider, endpoint, *args, **kw)
+    monkeypatch.setattr(obs, "external_call", spy_ec)
+
+    r = make([("claude", True, True), ("gemini", True, True)])
+    r.complete("s", "hi")
+    assert ("claude", "complete") in calls

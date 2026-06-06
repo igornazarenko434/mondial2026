@@ -186,13 +186,24 @@ def build_card(match: dict, conn=None, *,
             "home": news_deltas[0], "away": news_deltas[1],
             "confidence": deltas.get("confidence", "low"),
             "notes": deltas.get("notes") or [],
+            "provider": deltas.get("provider"),          # which LLM answered
+            "fallbacks_used": deltas.get("fallbacks_used") or [],
+            "failure": deltas.get("failure"),
         }
-        signals_used.append("news")
+        # If the LLM legitimately ran but ALL providers failed, count news as
+        # signals_failed so the audit trail is honest (not silently "used").
+        if news_meta["failure"]:
+            signals_failed.append("news")
+            failure_reasons["news"] = _trim(news_meta["failure"])
+        else:
+            signals_used.append("news")
     except Exception as e:                           # noqa: BLE001
         signals_failed.append("news")
         failure_reasons["news"] = _trim(e)
         news_deltas = (0.0, 0.0)
-        news_meta = {"home": 0.0, "away": 0.0, "confidence": "low", "notes": []}
+        news_meta = {"home": 0.0, "away": 0.0, "confidence": "low",
+                       "notes": [], "provider": None, "fallbacks_used": [],
+                       "failure": _trim(e)}
 
     # ───── 5. Run the model assembler ─────
     try:
@@ -236,10 +247,13 @@ def build_card(match: dict, conn=None, *,
     card["failure_reasons"] = failure_reasons
     # News-deltas detail (flat fields = direct queryable from SQL; also picked
     # up by next-window's read_prior_deltas for the T-15m reuse).
-    card["news_home_delta"] = news_meta.get("home", 0.0)
-    card["news_away_delta"] = news_meta.get("away", 0.0)
-    card["news_confidence"] = news_meta.get("confidence", "low")
-    card["news_notes"]      = news_meta.get("notes", [])
+    card["news_home_delta"]     = news_meta.get("home", 0.0)
+    card["news_away_delta"]     = news_meta.get("away", 0.0)
+    card["news_confidence"]     = news_meta.get("confidence", "low")
+    card["news_notes"]          = news_meta.get("notes", [])
+    card["news_provider"]       = news_meta.get("provider")
+    card["news_fallbacks_used"] = news_meta.get("fallbacks_used", [])
+    card["news_failure"]        = news_meta.get("failure")
 
     # Golden auditability rule: every signal must appear somewhere. The
     # production path enforces this by construction (we visit every signal

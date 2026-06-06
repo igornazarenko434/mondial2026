@@ -119,6 +119,46 @@ def test_news_failure_marks_signal_failed_with_reason():
     assert card["ev_pathway"] == "ev_optimized"  # other signals still good
 
 
+def test_news_provider_stamped_on_card_when_analyzer_returns_one():
+    """Day-8 audit visibility: when the LLM router answered (with a provider
+    name), build_card propagates it to the flat news_provider field on the
+    card so render_card can show 'News(gemini)' and the persisted prediction
+    row carries the model identity for later cross-reference."""
+    def good_with_provider(*a, **k):
+        return {"home_goal_delta": -0.20, "away_goal_delta": +0.05,
+                "confidence": "high", "notes": ["Mbappé starts"],
+                "discarded_sources": [], "provider": "gemini",
+                "fallbacks_used": []}
+    card = build_card(_match(),
+                      strengths_loader=lambda _r: _good_strengths(),
+                      elo_loader=lambda: _good_elo(),
+                      odds_fetcher=lambda h, a, **k: _good_odds(),
+                      news_analyzer=good_with_provider,
+                      results_loader=lambda: [])
+    assert card["news_provider"] == "gemini"
+    assert card["news_fallbacks_used"] == []
+    assert card["news_failure"] is None
+    assert "news" in card["signals_used"]
+
+
+def test_news_provider_records_fallback_chain():
+    """When gemini fails and claude takes over, fallbacks_used must show the
+    chain walk so the audit trail is complete."""
+    def good_with_fallback(*a, **k):
+        return {"home_goal_delta": 0.10, "away_goal_delta": 0.0,
+                "confidence": "medium", "notes": [],
+                "discarded_sources": [], "provider": "claude",
+                "fallbacks_used": ["gemini"]}
+    card = build_card(_match(),
+                      strengths_loader=lambda _r: _good_strengths(),
+                      elo_loader=lambda: _good_elo(),
+                      odds_fetcher=lambda h, a, **k: _good_odds(),
+                      news_analyzer=good_with_fallback,
+                      results_loader=lambda: [])
+    assert card["news_provider"] == "claude"
+    assert card["news_fallbacks_used"] == ["gemini"]
+
+
 def test_market_failure_falls_back_to_modal():
     """No usable odds → modal_fallback branch in predict.match_card."""
     card = build_card(_match(),

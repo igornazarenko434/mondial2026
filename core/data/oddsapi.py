@@ -30,13 +30,17 @@ DEFAULT_PREFER_BOOKS = ("pinnacle", "betfair_ex_eu", "betfair_ex_uk", "betfair")
 
 def list_sports() -> list[dict]:
     """All active sports/keys from The Odds API (the /sports call is FREE
-    — does NOT count against the 500/mo quota)."""
+    — does NOT count against the 500/mo quota; per the-odds-api.com docs)."""
     key = os.environ.get("ODDS_API_KEY")
     if not key:
         raise RuntimeError("Set ODDS_API_KEY in .env")
-    resp = requests.get(f"{ODDS_API_BASE}/sports", params={"apiKey": key}, timeout=20)
-    resp.raise_for_status()
-    return resp.json()
+    # units=0: the call is metered for trace/rate-limit only; no credit burn.
+    from core import obs
+    with obs.external_call("odds_api", "sports", units=0):
+        resp = requests.get(f"{ODDS_API_BASE}/sports",
+                             params={"apiKey": key}, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
 
 
 def resolve_wc_key() -> str:

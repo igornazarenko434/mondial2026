@@ -250,7 +250,14 @@ def test_analyze_safe_returns_neutral_on_router_exception():
     class Boom:
         def complete(self, *a, **k): raise RuntimeError("LLM down")
     out = na.analyze_safe("A", "B", "ctx", router=Boom())
-    assert out == na.NEUTRAL
+    # Neutral deltas/notes preserved.
+    for k in na.NEUTRAL:
+        assert out[k] == na.NEUTRAL[k]
+    # Failure + provider audit fields stamped so render_card can show
+    # ⚠news and we know which model was attempted (for Honeycomb cross-ref).
+    assert "failure" in out and "LLM down" in out["failure"]
+    assert "provider" in out          # may be None when router fully crashed
+    assert "fallbacks_used" in out
 
 
 # ─────────────────── End-to-end via build_card ───────────────────

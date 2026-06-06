@@ -371,7 +371,12 @@ def _validate_and_clamp(data: dict | None) -> dict:
 
 def analyze(home: str, away: str, context_text: str,
             router: LLMRouter | None = None) -> dict:
-    """LLM-driven analysis. May raise; use analyze_safe in production."""
+    """LLM-driven analysis. May raise; use analyze_safe in production.
+
+    The returned dict has a new field `provider` set to the LLM name that
+    actually answered (e.g. "gemini" / "claude" / "openai") so the card
+    audit trail can show which model produced the news output.
+    """
     llm = router or LLMRouter()
     prompt = (f"Fixture: {home} (home) vs {away} (away).\n\n"
               f"Pre-match context:\n{context_text}\n\n"
@@ -382,20 +387,34 @@ def analyze(home: str, away: str, context_text: str,
     except Exception:
         raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=500)
     parsed = _parse_json_lenient(raw)
-    return _validate_and_clamp(parsed)
+    out = _validate_and_clamp(parsed)
+    # Stamp which provider answered + any providers tried before falling
+    # through — surface this on the card so the user knows which model
+    # was authoritative for THIS news delta.
+    out["provider"] = getattr(llm, "last_provider", None)
+    out["fallbacks_used"] = list(getattr(llm, "last_fallbacks", []) or [])
+    return out
 
 
 def analyze_safe(home: str, away: str, context_text: str,
                  router: LLMRouter | None = None) -> dict:
     """Graceful-degradation wrapper: on ANY failure, return NEUTRAL deltas so
     the pick still goes out (model-only). The pipeline MUST call this.
+
+    On failure, the returned dict's `provider` field is None and `failure`
+    holds a short reason — both surface on the card so the user knows why
+    news contributed zero (vs. legitimately neutral input data).
     """
     try:
         return analyze(home, away, context_text, router)
     except Exception as e:                            # noqa: BLE001
         log.warning("news/LLM unavailable for %s vs %s (%s); neutral deltas",
                     home, away, e)
-        return dict(NEUTRAL)
+        out = dict(NEUTRAL)
+        out["provider"] = None
+        out["fallbacks_used"] = []
+        out["failure"] = str(e)[:120]
+        return out
 
 
 # ─────────────────── T-15m cache reuse (cost cut) ───────────────────

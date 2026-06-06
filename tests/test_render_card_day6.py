@@ -74,6 +74,38 @@ def test_signals_line_with_one_failure_uses_warn_marker():
     assert "⚠market: odds_api over budget" in sig_line
 
 
+def test_signals_line_shows_news_provider_when_known():
+    """Day-8 audit visibility: when news_provider is stamped on the card,
+    render shows e.g. 'News(gemini)' so the user sees WHICH model produced
+    the news output (cross-references the Honeycomb gemini.complete span)."""
+    card = _base_card(news_provider="gemini")
+    txt = render_card(card)
+    sig_line = [ln for ln in txt.split("\n") if ln.startswith("Signals:")][0]
+    assert "News(gemini)" in sig_line
+
+
+def test_signals_line_omits_provider_suffix_when_unknown():
+    """No provider stamped (e.g. cached path) → fall back to plain 'News'."""
+    card = _base_card(news_provider=None)
+    txt = render_card(card)
+    sig_line = [ln for ln in txt.split("\n") if ln.startswith("Signals:")][0]
+    assert "+News" in sig_line and "News(" not in sig_line
+
+
+def test_signals_line_news_failure_shows_warn_marker_not_provider():
+    """When news failed, the ⚠ marker carries the reason; we don't append a
+    provider suffix because news is in signals_failed, not signals_used."""
+    card = _base_card(signals_used=["dixon_coles", "elo", "market"],
+                      signals_failed=["news"],
+                      failure_reasons={"news": "llm 429"},
+                      news_provider=None,           # router returned no successful provider
+                      news_failure="all providers down")
+    txt = render_card(card)
+    sig_line = [ln for ln in txt.split("\n") if ln.startswith("Signals:")][0]
+    assert "+News" not in sig_line             # not in signals_used
+    assert "⚠news: llm 429" in sig_line
+
+
 def test_signals_line_with_multiple_failures_inlines_all():
     card = _base_card(signals_used=["dixon_coles"],
                       signals_failed=["elo", "market", "news"],
