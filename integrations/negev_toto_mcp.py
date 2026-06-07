@@ -317,6 +317,30 @@ def toto_list_tournaments() -> list[dict]:
     return sorted(out, key=lambda x: -(x.get("prize_pool") or 0))
 
 
+def _is_bot(u: dict) -> bool:
+    """Triple-redundant bot detection. The Negev Toto app currently has 3 bots
+    (The Chinchilla, The Monkey, The Owl) — each carries ALL three signals:
+
+      * role == "bot"
+      * isBot == True
+      * uid starts with "bot_"
+
+    We OR all three so future bots that drop one signal (e.g. forget the
+    role field) are still caught. Bots are pure entertainment in the app —
+    they auto-pick and their position is decorative. Excluding them from
+    OUR standings is required for the strategy layer's leader_gap math
+    to be correct.
+    """
+    if u.get("role") == "bot":
+        return True
+    if u.get("isBot") is True:
+        return True
+    uid = u.get("uid") or ""
+    if isinstance(uid, str) and uid.startswith("bot_"):
+        return True
+    return False
+
+
 @mcp.tool()
 def toto_get_standings(tournament_id: str | None = None,
                        extended: bool = False,
@@ -324,15 +348,17 @@ def toto_get_standings(tournament_id: str | None = None,
     """Sorted leaderboard for a tournament: [{rank, player, total, direction,
     broad, exactCount, role, uid}]. Filters users whose tournaments[] contains
     the tid. Ties broken by exactScoreCount desc (per PDF §19). extended=True
-    keeps the full user doc on each row. include_bots=True keeps role='bot'
-    rows; default False excludes them so the tracker matches what humans see."""
+    keeps the full user doc on each row. include_bots=True keeps the 3 known
+    bots (Chinchilla / Monkey / Owl); default False excludes them so the
+    tracker matches what HUMAN players see and the strategy layer's
+    leader_points - your_points math compares only to humans."""
     tid = _tid(tournament_id)
     users = _read_all("users")
     rows = []
     for u in users:
         if tid not in (u.get("tournaments") or []):
             continue
-        if not include_bots and (u.get("role") == "bot" or u.get("isBot")):
+        if not include_bots and _is_bot(u):
             continue
         rows.append({
             "player": u.get("displayName") or u.get("uid", "?"),

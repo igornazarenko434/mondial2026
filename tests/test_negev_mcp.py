@@ -329,6 +329,74 @@ def test_update_preferences_passes_only_explicit_fields(fake_firestore, monkeypa
 
 # ─────────────────────────── _read_all pagination ───────────────────────────
 
+# ─────────────────────── _is_bot detection (triple-redundant) ───────────────────────
+
+def test_is_bot_catches_role_field():
+    assert ntm._is_bot({"uid": "abc", "role": "bot"}) is True
+
+
+def test_is_bot_catches_isBot_field():
+    assert ntm._is_bot({"uid": "abc", "isBot": True}) is True
+
+
+def test_is_bot_catches_uid_prefix():
+    """Even if a bot is missing the role/isBot fields, the uid prefix saves us."""
+    assert ntm._is_bot({"uid": "bot_chinchilla"}) is True
+
+
+def test_is_bot_returns_false_for_human():
+    assert ntm._is_bot({"uid": "abc123", "role": "player", "isBot": False}) is False
+    assert ntm._is_bot({"uid": "abc123"}) is False           # no fields at all
+    assert ntm._is_bot({}) is False                          # totally empty
+
+
+def test_is_bot_doesnt_match_human_uid_containing_bot():
+    """Word 'bot' inside a uid (not as a prefix) is fine — only the 'bot_'
+    prefix is the convention. 'cabotagecorp' → human."""
+    assert ntm._is_bot({"uid": "cabotagecorp123", "role": "player"}) is False
+
+
+def test_get_standings_excludes_all_three_known_negev_bots(fake_firestore):
+    """Live: Negev Toto 2026 has 3 known bots — Chinchilla, Monkey, Owl. Each
+    carries all 3 bot signals. They MUST NOT appear in our standings when
+    include_bots=False (the default). Pins the live-discovered behavior."""
+    tid = "tid-x"
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/bot_chinchilla", "fields": {
+            "uid": "bot_chinchilla", "displayName": "The Chinchilla",
+            "role": "bot", "isBot": True, "tournaments": [tid],
+            "pointsTotal": 4.3, "directionPoints": 2, "broadBetPoints": 0,
+            "exactScoreCount": 1}},
+        {"path": "users/bot_monkey", "fields": {
+            "uid": "bot_monkey", "displayName": "The Monkey",
+            "role": "bot", "isBot": True, "tournaments": [tid],
+            "pointsTotal": 0, "directionPoints": 0, "broadBetPoints": 0,
+            "exactScoreCount": 0}},
+        {"path": "users/bot_owl", "fields": {
+            "uid": "bot_owl", "displayName": "The Owl",
+            "role": "bot", "isBot": True, "tournaments": [tid],
+            "pointsTotal": 0, "directionPoints": 0, "broadBetPoints": 0,
+            "exactScoreCount": 0}},
+        {"path": "users/u-igor", "fields": {
+            "uid": "uid-igor", "displayName": "Igor",
+            "role": "player", "tournaments": [tid],
+            "pointsTotal": 0, "directionPoints": 0, "broadBetPoints": 0,
+            "exactScoreCount": 0}},
+    ]
+    # Default: bots excluded
+    rows = ntm.toto_get_standings(tid)
+    names = {r["player"] for r in rows}
+    assert names == {"Igor"}                                 # only the human
+    # Critically: Chinchilla's 4.3 pts must NOT be reflected as a "leader" —
+    # if it leaked through, Igor's gap would be 4.3 instead of 0, and the
+    # strategy layer would tilt for variance when there's no actual leader
+    assert rows[0]["total"] == 0
+    # Explicit opt-in: bots included
+    rows_with_bots = ntm.toto_get_standings(tid, include_bots=True)
+    names_with_bots = {r["player"] for r in rows_with_bots}
+    assert names_with_bots == {"Igor", "The Chinchilla", "The Monkey", "The Owl"}
+
+
 # ─────────────────────── toto_get_scoring_grids ───────────────────────
 
 def test_get_scoring_grids_returns_three_named_grids(fake_firestore):

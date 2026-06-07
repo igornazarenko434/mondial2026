@@ -203,6 +203,28 @@ payout per option (matches our rules: "Spain 20 ... USA 170" pattern).
 }
 ```
 
+### Bot accounts (3 known, must be excluded)
+
+The Negev Toto app has 3 bot players for entertainment — their position is
+decorative and MUST NOT count in our standings tracker (otherwise the
+strategy layer's leader-gap math would be wrong).
+
+| displayName | uid | role | isBot | pointsTotal (2026-06-07) |
+|---|---|---|---|---|
+| The Chinchilla | `bot_chinchilla` | `bot` | `true` | 4.3 |
+| The Monkey | `bot_monkey` | `bot` | `true` | 0 |
+| The Owl | `bot_owl` | `bot` | `true` | 0 |
+
+Triple-redundant detection (`integrations/negev_toto_mcp.py::_is_bot`):
+- `role == "bot"`
+- `isBot == True`
+- `uid.startswith("bot_")`
+
+OR'd together so a bot missing one signal is still caught.
+`toto_get_standings()` excludes bots by default (set `include_bots=True`
+to see them — useful for the audit tool that wants to verify count
+math: 66 app participants = 63 humans + 3 bots).
+
 ### `tournaments/<tid>/settings/managerTables` (the EXACT-SCORE GRIDS)
 
 The exact-score multiplier table, per stage bracket. Grid keys: `groupStage`,

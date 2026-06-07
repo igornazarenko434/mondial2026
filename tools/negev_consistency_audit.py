@@ -159,6 +159,31 @@ def audit_scoring_grids(tid: str) -> None:
 
 # ─────────────────────── §3 MY_PARTICIPANT vs roster ───────────────────────
 
+def audit_bots(tid: str) -> None:
+    """Surface the known bots and verify our standings excludes them."""
+    hdr("§2.5  Bot accounts — must be excluded from standings")
+    # Read all users + count bots vs humans for this tournament
+    users = ntm._read_all("users")
+    in_tournament = [u for u in users if tid in (u.get("tournaments") or [])]
+    bots = [u for u in in_tournament if ntm._is_bot(u)]
+    humans = [u for u in in_tournament if not ntm._is_bot(u)]
+    ok(f"{len(in_tournament)} total in tournament  =  "
+       f"{len(humans)} humans  +  {len(bots)} bots")
+    if bots:
+        print("\n  Bots (excluded from our standings, role+isBot+uid-prefix all match):")
+        for b in sorted(bots, key=lambda x: -float(x.get("pointsTotal") or 0)):
+            print(f"    {b.get('displayName','?'):<22} uid={b.get('uid','?'):<20}"
+                  f" role={b.get('role','?'):<8} isBot={b.get('isBot')!s:<6}"
+                  f" pointsTotal={b.get('pointsTotal')}")
+    # Sanity: run toto_get_standings and confirm zero bots in the result
+    rows = ntm.toto_get_standings(tid)
+    leaked = [r for r in rows if r["uid"] and r["uid"].startswith("bot_")]
+    if leaked:
+        err(f"{len(leaked)} bot row(s) leaked into toto_get_standings — fix _is_bot")
+    else:
+        ok("toto_get_standings correctly returns 0 bot rows by default")
+
+
 def audit_me(tid: str) -> None:
     hdr("§3. MY_PARTICIPANT vs Negev roster")
     me = os.environ.get("MY_PARTICIPANT", "").strip()
@@ -241,6 +266,7 @@ def main():
 
     audit_tournament(tid)
     audit_scoring_grids(tid)
+    audit_bots(tid)
     audit_me(tid)
     audit_match_catalog(tid)
 

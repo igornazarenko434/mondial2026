@@ -126,6 +126,25 @@ To re-capture the refresh token:
    firebaseLocalStorage → expand the value → `stsTokenManager.refreshToken`
 3. Copy the full string (starts with `AMf-`) into `.env::NEGEV_REFRESH_TOKEN`
 
+## Bots — auto-excluded from our standings
+
+The Negev app has 3 bot accounts (`The Chinchilla`, `The Monkey`, `The Owl`)
+for entertainment. They count in the app's visible roster (66 = 63 humans +
+3 bots) but **MUST be excluded from our standings tracker** — otherwise
+the strategy layer's "gap to leader" math would chase a phantom leader.
+
+Detection (triple-redundant OR — all 3 fields are present today, but
+ANY one of them triggers exclusion):
+
+| Signal | Example |
+|---|---|
+| `role == "bot"` | All 3 bots |
+| `isBot == True` | All 3 bots |
+| `uid.startswith("bot_")` | `bot_chinchilla` / `bot_monkey` / `bot_owl` |
+
+`toto_get_standings()` excludes them by default. Pass `include_bots=True`
+explicitly to see them (useful only for audit / sanity-checks).
+
 ## Schema reference
 
 Full schema in `integrations/SCHEMA_negev.md`. Highlights:
@@ -133,7 +152,7 @@ Full schema in `integrations/SCHEMA_negev.md`. Highlights:
 - Sub-collections per tournament: `broadBets`, `sideBets`,
   `settings/{managerTables, broadBets, checklist, syncLock}`
 - 36 distinct tournament IDs referenced across users; 3 accessible to my account
-- 63 approved players in Negev Toto 2026 as of 2026-06-07
+- **73 total users in DB; 66 in Negev Toto 2026 (63 humans + 3 bots — bots filtered out by default)**
 
 ## Telegram messages — full taxonomy after Day-9.6
 
