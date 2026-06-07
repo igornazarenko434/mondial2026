@@ -3,25 +3,28 @@
 # any Debian-family host) into a running Mondial 2026 scheduler daemon.
 #
 # Run as root on the VM, once:
-#   curl -fsSL https://raw.githubusercontent.com/<YOUR_USER>/mondial2026/main/infra/bootstrap.sh | bash
-#
-# Or interactively (recommended on first run):
-#   ssh root@<vm-ip>
-#   wget https://raw.githubusercontent.com/<YOUR_USER>/mondial2026/main/infra/bootstrap.sh
+#   wget https://raw.githubusercontent.com/igornazarenko434/mondial2026/main/infra/bootstrap.sh
 #   bash bootstrap.sh
 #
 # What it does, in order (idempotent — safe to re-run):
-#   1. apt-update + install python 3.13, git, sqlite3, curl, tzdata
+#   1. apt-update + install python3.12 (Ubuntu 24.04 stock), git, sqlite3, curl, tzdata
 #   2. create a non-root `mondial` user
 #   3. git clone the repo into /home/mondial/mondial2026
 #   4. create venv + pip install -r requirements.txt
-#   5. WAIT for you to populate .env (cat the template, prompt to edit)
+#   5. WAIT for you to populate .env (cat the template, prompt to copy)
 #   6. install + enable the systemd unit
 #   7. install the nightly backup cron
 #   8. tail the journal so you can confirm the daemon comes up clean
 #
 # After it finishes, you should see structured-JSON logs scrolling. Ctrl-C to
 # exit the tail; the daemon keeps running.
+#
+# Why we use the stock Python: Ubuntu 24.04 LTS ships Python 3.12, which is
+# more than modern enough for our code (we only need ZoneInfo + 3.10 union
+# syntax, both of which work under `from __future__ import annotations`).
+# Avoiding the deadsnakes PPA dependency keeps this bootstrap one apt-get
+# call from the system repos — no third-party trust, no PPA-not-yet-for-this-
+# release surprises.
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/igornazarenko434/mondial2026.git}"
@@ -30,23 +33,29 @@ INSTALL_DIR="/home/${INSTALL_USER}/mondial2026"
 TZ_NAME="${TZ_NAME:-Asia/Jerusalem}"
 
 bold() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
+warn() { printf '\033[1;33m   warning: %s\033[0m\n' "$*"; }
+fail() { printf '\n\033[1;31m== FAILED: %s ==\033[0m\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || { echo "run as root"; exit 1; }
+[ "$(id -u)" -eq 0 ] || fail "run as root (try: sudo -i)"
 
 bold "1. system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# All from Ubuntu's main repos — no PPA needed. python3 on 24.04 = 3.12.
 apt-get install -y -qq \
-    python3.13 python3.13-venv python3-pip \
+    python3 python3-venv python3-pip \
     git sqlite3 curl tzdata ca-certificates
-# Default Python on 24.04 is 3.12; we install 3.13 alongside via deadsnakes if missing.
-if ! command -v python3.13 > /dev/null; then
-    apt-get install -y -qq software-properties-common
-    add-apt-repository -y ppa:deadsnakes/ppa
-    apt-get update -qq
-    apt-get install -y -qq python3.13 python3.13-venv
+# Set the local TZ for log timestamps. timedatectl can fail if dbus isn't up
+# yet on a brand-new VM — that's harmless, log timestamps still work.
+timedatectl set-timezone "$TZ_NAME" || warn "could not set timezone to $TZ_NAME (continuing)"
+
+# Sanity check: confirm Python is recent enough for our code (need 3.10+ for
+# the union-type syntax we use under `from __future__ import annotations`).
+PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; then
+    fail "python3 is $PY_VER — need 3.10 or newer"
 fi
-timedatectl set-timezone "$TZ_NAME"
+echo "   python3 version: $PY_VER"
 
 bold "2. service user '${INSTALL_USER}'"
 id -u "$INSTALL_USER" > /dev/null 2>&1 || useradd -m -s /bin/bash "$INSTALL_USER"
@@ -60,21 +69,31 @@ fi
 
 bold "4. venv + dependencies"
 sudo -u "$INSTALL_USER" bash -c "
+    set -e
     cd '$INSTALL_DIR'
-    python3.13 -m venv .venv
+    if [ ! -d .venv ]; then
+        python3 -m venv .venv
+    fi
     .venv/bin/pip install --quiet --upgrade pip
     .venv/bin/pip install --quiet -r requirements.txt
 "
 
 bold "5. .env (secrets — NEVER committed)"
-if [ ! -f "$INSTALL_DIR/.env" ]; then
-    cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
-    chown "$INSTALL_USER:$INSTALL_USER" "$INSTALL_DIR/.env"
-    chmod 600 "$INSTALL_DIR/.env"
-    cat <<'EOF'
+# -s = file exists AND non-empty. If user only copied the template and didn't
+# fill anything, the template is non-empty placeholder strings — we proceed
+# (the preflight check at startup catches missing real values loudly).
+if [ ! -s "$INSTALL_DIR/.env" ]; then
+    if [ -f "$INSTALL_DIR/.env.example" ]; then
+        cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
+        chown "$INSTALL_USER:$INSTALL_USER" "$INSTALL_DIR/.env"
+        chmod 600 "$INSTALL_DIR/.env"
+    fi
+    VM_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────
-ACTION REQUIRED — edit /home/mondial/mondial2026/.env with these keys:
+ACTION REQUIRED — populate ${INSTALL_DIR}/.env with real values:
+
   FOOTBALL_DATA_API_KEY=
   ODDS_API_KEY=
   API_FOOTBALL_KEY=
@@ -86,7 +105,15 @@ ACTION REQUIRED — edit /home/mondial/mondial2026/.env with these keys:
   OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
   OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=YOUR_HONEYCOMB_KEY
 
-Save, then re-run this script — it will skip to step 6.
+Easiest path — from your Mac, in a second terminal:
+  scp ~/private_Igor/Mondial_2026/mondial2026/.env root@${VM_IP:-<this-vm-ip>}:/tmp/mondial.env
+
+Then back here on this VM:
+  mv /tmp/mondial.env ${INSTALL_DIR}/.env
+  chown ${INSTALL_USER}:${INSTALL_USER} ${INSTALL_DIR}/.env
+  chmod 600 ${INSTALL_DIR}/.env
+
+Then re-run THIS script — it will skip ahead to step 6 automatically.
 ────────────────────────────────────────────────────────────────────────
 EOF
     exit 0
@@ -103,10 +130,11 @@ sleep 2
 systemctl status --no-pager mondial2026.service || true
 
 bold "7. nightly backup cron"
-crontab -u "$INSTALL_USER" -l 2>/dev/null | grep -v 'mondial2026/infra/backup.sh' > /tmp/_mc || true
-echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> /tmp/_mc
-crontab -u "$INSTALL_USER" /tmp/_mc
-rm -f /tmp/_mc
+TMP_CRON="$(mktemp)"
+crontab -u "$INSTALL_USER" -l 2>/dev/null | grep -v 'mondial2026/infra/backup.sh' > "$TMP_CRON" || true
+echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> "$TMP_CRON"
+crontab -u "$INSTALL_USER" "$TMP_CRON"
+rm -f "$TMP_CRON"
 
 bold "8. live journal — Ctrl-C to exit (the daemon stays up)"
 sleep 1
