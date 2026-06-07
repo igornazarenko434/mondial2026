@@ -44,22 +44,37 @@ def games_left(conn: sqlite3.Connection) -> int:
 
 
 def standings_context(conn: sqlite3.Connection, me: str | None = None) -> dict | None:
-    """Build the strategy context from the `standings` table (which you populate
-    with your group's points) + games-left from the calendar. Returns None if
-    standings aren't populated → strategy layer safely no-ops.
+    """Build the strategy context from the `standings` table + games-left.
 
-    me: your participant name; defaults to the row with the highest futures+... —
-    pass it explicitly for correctness.
+    Returns None (→ strategy layer safely no-ops) when:
+      • standings table empty (pre-tournament, nothing entered yet)
+      • `me` is None (no participant identity supplied — we can't compute
+        "your gap to the leader" without knowing who YOU are)
+      • `me` doesn't appear in standings (typo in MY_PARTICIPANT env var,
+        or your row hasn't been populated yet — safer to no-op than to
+        silently use someone else's totals)
+      • only one row exists (no one to compare against)
+
+    `total` arithmetic mirrors core.scoring.standings_writer: the writer
+    applies the §14 -15 % group-stage reset to `group_points` itself once
+    any KO match has been scored — so this reader just sums the columns
+    straight (NO additional 0.85 multiplier — that was a bug that
+    double-applied the reset post-knockouts).
     """
     rows = conn.execute(
-        "SELECT participant, (group_points*0.85 + knockout_points + futures_points) AS total "
+        "SELECT participant, "
+        "(group_points + knockout_points + futures_points) AS total "
         "FROM standings ORDER BY total DESC").fetchall()
-    if not rows:
+    if not rows or len(rows) < 2:                  # need ≥ 2 to define "leader vs me"
         return None
+    if me is None:
+        return None                                 # can't compute gap without an identity
     totals = {r[0]: r[1] for r in rows}
+    if me not in totals:
+        return None                                 # ME not in standings yet → no-op
     leader_points = rows[0][1]
-    second_points = rows[1][1] if len(rows) > 1 else rows[0][1]
-    your_points = totals.get(me, rows[0][1]) if me else rows[0][1]
+    second_points = rows[1][1]
+    your_points = totals[me]
     return {"your_points": your_points, "leader_points": leader_points,
             "second_points": second_points, "games_left": games_left(conn)}
 

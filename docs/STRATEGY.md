@@ -76,6 +76,73 @@ The layer is **wired into the pipeline but dormant by default**:
   (protect), never forces a reckless pick; it only ever chooses among the top-K EV
   candidates.
 
+## How to actually turn it on (Day-9.5 wiring)
+
+The layer is **wired into the daemon** but defaults to OFF. Three steps to
+activate.
+
+### 1 — Tell the system who you are
+
+In your `.env` on the VM:
+```bash
+MY_PARTICIPANT=Igor          # match the display name in the Negev Toto app
+STRATEGY_TILT=0.4            # 0 = off (default); 0.3–0.6 = position-aware
+```
+
+The daemon will pick these up on its next restart (`systemctl restart mondial2026`).
+
+### 2 — Enter the leaderboard
+
+Friends' standings can't be auto-scraped (Negev Toto needs their Firebase auth
+and we deliberately don't depend on it). Enter them manually with the CLI:
+
+```bash
+# One participant at a time
+cd /home/mondial/mondial2026
+sudo -u mondial .venv/bin/python tools/standings_set.py set "Alice" \
+    --group 32.5 --ko 0 --futures 4.2
+
+# Bulk from a JSON file (easier for 8 friends)
+sudo -u mondial .venv/bin/python tools/standings_set.py import friends.json
+# where friends.json looks like:
+#   [{"participant":"Alice","group_points":32.5,"knockout_points":0,"futures_points":4.2},
+#    {"participant":"Bob",  "group_points":28.0,"knockout_points":0,"futures_points":0},
+#    ...]
+
+# Inspect current standings (your row marked ← you)
+sudo -u mondial .venv/bin/python tools/standings_set.py list
+```
+
+**Cadence**: re-enter after each match day. The reader (`standings_context`)
+re-reads on EVERY dispatched job, so a `set` updates kick in on the next
+window-fire — no daemon restart needed.
+
+### 3 — How to enter group points (the §14 -15 % reset)
+
+- **Group stage in progress**: enter the value the Negev app shows. Simple.
+- **After the group→KO transition**: the Negev app already discounts everyone's
+  group_points by 15%. Enter whatever they show. The reader sums columns raw;
+  it doesn't re-apply the reset.
+- **Your row only**: `update_standings` auto-applies the reset to YOUR
+  group_points based on the matches table. You don't have to do that one
+  manually. Friends' rows you do enter as-displayed.
+
+### Verifying the layer is active
+
+When the strategy tilts a pick, the journal logs it:
+```
+INFO scheduler ... strategy tilt re-picked {'home':3,'away':0} (EV-optimal was {'home':1,'away':0})
+```
+
+And the persisted card has a `strategy` block:
+```bash
+sudo -u mondial sqlite3 /home/mondial/mondial2026/store/mondial.db "
+  SELECT json_extract(payload_json,'\$.strategy') FROM predictions
+  WHERE json_extract(payload_json,'\$.strategy.applied')=1 LIMIT 5"
+```
+
+If `strategy.applied=1` rows appear → the layer is doing its job.
+
 ## Bottom line
 The algorithm is **the right one and a strong edge**: a calibrated, market-anchored
 probability model + a provably-correct expected-points optimizer + an opt-in,

@@ -53,6 +53,8 @@ class SchedulerDaemon:
                  events_cache_fn: Callable[[], list] | None = None,
                  standings_update_fn: Callable[[], None] | None = None,
                  daily_summary_fn: Callable[..., bool] | None = None,
+                 strategy_context_fn: Callable[[], dict | None] | None = None,
+                 strategy_tilt: float | None = None,
                  max_workers: int | None = None, poll_seconds: int | None = None,
                  ingest_every_min: int | None = None):
         self.fixtures_fn = fixtures_fn           # reads upcoming matches (store.repo)
@@ -63,6 +65,11 @@ class SchedulerDaemon:
         self.events_cache_fn = events_cache_fn   # () -> list[event_dict] | raises
         self.standings_update_fn = standings_update_fn   # () -> None (idempotent)
         self.daily_summary_fn = daily_summary_fn          # (*, now) -> bool sent?
+        # Day-9.5 win-the-pool layer — both None by default so the daemon
+        # produces pure-EV picks. Pass both to enable position-aware tilting.
+        # See docs/STRATEGY.md.
+        self.strategy_context_fn = strategy_context_fn    # () -> ctx dict | None
+        self.strategy_tilt = strategy_tilt                # float in [0, 1] or None
         # Workers default bumped from 4 → 6 (CLAUDE.md Day-9 note): the WC
         # group stage has up to 4 simultaneous kickoffs per slot, and at least
         # 2 spare threads cover slow Brave/LLM calls without starving siblings.
@@ -79,7 +86,19 @@ class SchedulerDaemon:
         # Stamp the window AND the per-tick events_cache onto the match dict so
         # build_card can use them without process_match changing signature.
         match = {**match, "_window": window, "_events_cache": events_cache}
-        return process_match(match, window, self.build_card)
+        # Day-9.5: load standings context at DISPATCH time (not at startup),
+        # so any standings_set update during the tournament takes effect on
+        # the next match without restarting the daemon. None ⇒ no tilt.
+        ctx = None
+        if self.strategy_context_fn:
+            try:
+                ctx = self.strategy_context_fn()
+            except Exception as e:                 # noqa: BLE001 — never break a card
+                log.warning("strategy_context_fn failed: %s; using pure-EV", e)
+                ctx = None
+        return process_match(match, window, self.build_card,
+                              strategy_context=ctx,
+                              strategy_tilt=self.strategy_tilt)
 
     def _maybe_ingest(self, now: datetime):
         """Periodically refresh fixtures/results/bracket from the source."""
@@ -187,6 +206,7 @@ if __name__ == "__main__":
     from core.decision.build_card import build_card as real_build_card
     from core.scoring.standings_writer import update_standings
     from schedule.daily_summary import send_if_due as _send_daily_summary
+    from config.strategy import DEFAULT_TILT
 
     init_db()
     conn = connect()
@@ -211,13 +231,29 @@ if __name__ == "__main__":
         # the-odds-api batch endpoint (1 credit per call regardless of N events).
         return fetch_all_odds(regions="eu,uk", markets="h2h")
 
+    # MY_PARTICIPANT defaults to "me" for backwards-compat with the existing
+    # single-row tests + earlier deploys. Set this in .env to match your
+    # display name in the Negev Toto app once you turn the win-the-pool tilt
+    # on. Used by BOTH the writer (so update_standings tags YOUR row) and
+    # the reader (so standings_context computes the right gap).
+    my_participant = os.environ.get("MY_PARTICIPANT", "me")
+
     def standings_updater():
-        update_standings(conn, participant="me")
+        update_standings(conn, participant=my_participant)
 
     def daily_summary_sender(*, now):
         return _send_daily_summary(conn, runs(), now=now)
 
+    def strategy_context_loader():
+        # Re-read on each dispatch. Cheap (two SELECTs). Means a fresh
+        # `tools/standings_set.py set ...` is picked up by the very next
+        # match-window job — no daemon restart needed.
+        from store import repo
+        return repo.standings_context(conn, me=my_participant)
+
     SchedulerDaemon(fixtures, build, ingest_fn=ingest,
                     events_cache_fn=events_cache_fetcher,
                     standings_update_fn=standings_updater,
-                    daily_summary_fn=daily_summary_sender).run_forever()
+                    daily_summary_fn=daily_summary_sender,
+                    strategy_context_fn=strategy_context_loader,
+                    strategy_tilt=DEFAULT_TILT).run_forever()

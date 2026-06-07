@@ -71,11 +71,16 @@ def test_standings_context_none_when_empty():
 
 
 def test_standings_context_built():
+    """Day-9.5 fix: standings_context now sums columns raw — the §14 -15 %
+    reset is the writer's responsibility (core/scoring/standings_writer),
+    not the reader's. So values entered via tools/standings_set.py flow
+    through untouched. This test enters the POST-reset values directly
+    (matching what the Negev app displays after the group→KO transition)."""
     conn = _db()
     conn.execute("INSERT INTO matches VALUES (1,'FINISHED')")
     conn.execute("INSERT INTO matches VALUES (2,'TIMED')")
-    conn.execute("INSERT INTO standings VALUES ('Igor', 100, 0, 0)")   # 85 after reset
-    conn.execute("INSERT INTO standings VALUES ('Dana', 200, 0, 0)")   # 170
+    conn.execute("INSERT INTO standings VALUES ('Igor',  85, 0, 0)")   # post-reset Igor
+    conn.execute("INSERT INTO standings VALUES ('Dana', 170, 0, 0)")   # post-reset Dana
     conn.commit()
     ctx = repo.standings_context(conn, me="Igor")
     assert ctx["games_left"] == 1
