@@ -18,6 +18,13 @@
 Description=Mondial 2026 scheduler daemon (World Cup picks)
 After=network-online.target
 Wants=network-online.target
+# Restart-burst limits live in [Unit] on systemd >= 230. They cap how often
+# systemd will keep restarting if the daemon dies on startup: 5 successive
+# crashes in 60 s and systemd gives up. (The Restart=always + RestartSec=10
+# under [Service] govern the per-crash restart behavior; these cap the
+# crash-loop.)
+StartLimitBurst=5
+StartLimitIntervalSec=60
 
 [Service]
 Type=simple
@@ -36,7 +43,7 @@ RestartPreventExitStatus=
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/mondial/mondial2026/store /home/mondial/mondial2026/cache
+ReadWritePaths=/home/mondial/mondial2026/store /home/mondial/mondial2026/cache /home/mondial/mondial2026/reports
 PrivateTmp=true
 # Keep logs in the journal (default), tagged so `journalctl -t mondial2026`
 # filters quickly.
@@ -45,11 +52,8 @@ SyslogIdentifier=mondial2026
 # pandas parses martj42's 49k-row results CSV: up to ~250 MB. 512 MB gives
 # 2x headroom; CPX22 has 4 GB RAM so this is comfortable.
 MemoryMax=512M
-# Stop trying after 5 successive restarts in 60 s — at that point page the
-# user instead of looping forever. The OS supervisor catches REAL crashes;
-# this catches "configuration broke beyond recovery".
-StartLimitBurst=5
-StartLimitIntervalSec=60
+# NOTE: StartLimitBurst + StartLimitIntervalSec moved to [Unit] section above
+# (where systemd >= 230 expects them). Leaving this comment as a breadcrumb.
 
 [Install]
 WantedBy=multi-user.target
