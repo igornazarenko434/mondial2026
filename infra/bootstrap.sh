@@ -137,7 +137,14 @@ crontab -u "$INSTALL_USER" -l 2>/dev/null \
     > "$TMP_CRON" || true
 # Backup at 03:15 IDT, sync at 07:00 IDT (2h before the 09:00 daily summary)
 echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> "$TMP_CRON"
+# Daily 07:00 IDT: Negev standings + results sync + 📊 Telegram leaderboard
 echo "0 7 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram" >> "$TMP_CRON"
+# Every 2 hours during match-day evenings (16:00-02:00 IDT = 13:00-23:00 UTC):
+# silent Negev sync so points land in our DB within ~2h of a match ending.
+echo "0 16,18,20,22,0,2 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet" >> "$TMP_CRON"
+# 08:00 IDT: post-match audit — compares our score_match() vs Negev's
+# points for finished matches, alerts only on discrepancy > 0.01 pts.
+echo "0 8 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/post_match_audit.py --telegram" >> "$TMP_CRON"
 crontab -u "$INSTALL_USER" "$TMP_CRON"
 rm -f "$TMP_CRON"
 

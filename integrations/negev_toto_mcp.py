@@ -699,6 +699,7 @@ def toto_submit_match_prediction(home: str | None = None,
                                   away: str | None = None,
                                   home_score: int = 0,
                                   away_score: int = 0,
+                                  advances_team: str | None = None,
                                   match_id: str | None = None,
                                   tournament_id: str | None = None) -> dict:
     """Save MY per-match score prediction to Negev (the equivalent of clicking
@@ -758,6 +759,22 @@ def toto_submit_match_prediction(home: str | None = None,
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "isBot": False,
     }
+    # advances_team only meaningful on knockout matches when prediction is a
+    # draw (the team that wins on penalties). Negev's bet schema has the
+    # field; we set it when the caller provides it. For group matches just
+    # omit (server will store null).
+    if advances_team is not None:
+        is_ko = target["stage"] in ("R32", "R16", "QF", "SF", "3rd", "Final")
+        if not is_ko:
+            return {"error": f"advances_team is only valid for knockout matches; "
+                    f"this is {target['stage']}"}
+        if home_score != away_score:
+            return {"error": f"advances_team is only meaningful when the "
+                    f"prediction is a draw (you predicted {home_score}-{away_score})"}
+        if advances_team not in (target["home"], target["away"]):
+            return {"error": f"advances_team={advances_team!r} must be one of "
+                    f"the two teams: {target['home']!r} or {target['away']!r}"}
+        fields["advancesTeam"] = advances_team
     return toto_patch_document(f"bets/{bet_doc_id}", json.dumps(fields))
 
 
