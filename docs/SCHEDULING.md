@@ -142,6 +142,115 @@ OTLP HTTPS endpoint.
 | Force a backup now | `bash infra/backup.sh` |
 | Find the latest backup | `ls -lh store/backup/` |
 
+### Updating the live daemon (safe, atomic, auto-rollback)
+
+You will keep iterating on the code while the daemon runs in production. The
+update procedure is one command on the VM, and it's designed to be safe:
+
+```bash
+# (on the VM, as root)
+/home/mondial/mondial2026/infra/update.sh
+```
+
+What it does, in order — each step gates on the previous one:
+
+1. **Refuses if the VM has uncommitted changes.** If you (or anyone) hand-
+   edited a file directly on the VM, the script bails so you don't silently
+   overwrite work. Investigate, then commit / stash / discard explicitly.
+2. **Records the current commit SHA** to `/home/mondial/mondial2026/.last_good_sha`.
+   This is the rollback target if the new version misbehaves.
+3. **`git fetch` and prints the incoming diff stat** so you can eyeball what's
+   about to deploy before any state changes.
+4. **`git pull --ff-only`** (no merge commits — refuses if the branches
+   diverged, which only happens if someone committed directly on the VM).
+5. **Compares `requirements.txt` SHA before/after.** If it changed, runs
+   `.venv/bin/pip install -r requirements.txt`. If it didn't, skips pip to
+   save the 30-60s install time.
+6. **`systemctl restart mondial2026`**, then waits 10 s and runs
+   `systemctl is-active`. If the daemon came up → tails 30 journal lines for
+   you to eyeball, exits 0.
+7. **If the daemon DID NOT come up** → automatic rollback:
+   - `git reset --hard <previous SHA>`
+   - Restart the daemon
+   - Tail the journal so you can see the rollback log lines
+   - Exit non-zero with a "fix-it-on-your-Mac" message
+
+So **a broken deploy returns you to the previous working version automatically**
+within ~30 seconds. You only have to intervene manually if rollback ALSO fails
+(extremely unlikely — means the previous version is also broken, which would
+require something other than a code change, e.g. infra drift).
+
+### State preservation across updates
+
+Every piece of tournament state is gitignored, so `git pull` cannot touch it:
+
+| Preserved file | What it holds |
+|---|---|
+| `.env` | All API keys |
+| `store/mondial.db` | Fixtures, predictions, standings, odds snapshots |
+| `store/obs.db` | runs ledger (idempotency!), cost ledger |
+| `store/elo.json`, `store/fbref_*.json`, `store/results_history.json` | 24h disk caches |
+| `store/heartbeat` | Watchdog liveness |
+| `store/backup/*.db.gz` | Nightly snapshots |
+
+The runs ledger is what makes restart safe: each `(match_id, window)` pair is
+recorded after the card is delivered, so a restart never re-sends one.
+
+### Manual rollback (if you decide later the new version is bad)
+
+```bash
+/home/mondial/mondial2026/infra/update.sh --rollback
+```
+
+Flips HEAD back to the SHA in `.last_good_sha` and restarts. Use within
+~minutes-hours of a deploy if you notice degraded behaviour in the cards
+that auto-health-check didn't catch.
+
+### Preview a deploy without applying it
+
+```bash
+/home/mondial/mondial2026/infra/update.sh --dry-run
+```
+
+Fetches, prints the incoming commit list + diff stat, exits without
+modifying anything. Good for "should I push this to prod?" sanity-check.
+
+### Typical development cycle
+
+On your Mac:
+```bash
+# 1. Make changes, run tests locally
+pytest tests/ -q
+# (must show 337+ passing — never deploy with red tests)
+
+# 2. Commit + push
+git commit -am "fix: <what>"
+git push
+```
+
+On the VM (in a separate SSH session):
+```bash
+# 3. (Optional) preview what's coming
+/home/mondial/mondial2026/infra/update.sh --dry-run
+
+# 4. Deploy
+/home/mondial/mondial2026/infra/update.sh
+```
+
+If step 4 ends with "✓ UPDATE OK — daemon running latest", you're done. If
+it ends with "FAILED and was rolled back", look at the journal output the
+script printed for the error, fix on your Mac, push, re-run step 4.
+
+### Schema migrations (rare but important)
+
+`store/schema.sql` uses `CREATE TABLE IF NOT EXISTS`, so **adding a new
+table** is automatically picked up on the next `init_db()` call (i.e.
+daemon restart after `update.sh`). **Adding a column to an existing table
+is NOT automatic** — `CREATE TABLE IF NOT EXISTS` silently no-ops on a
+table that already exists. If you change a column, also commit a one-off
+SQL migration script and `sqlite3 store/mondial.db < migration.sql` on the
+VM before running update.sh. None of the current code paths require this.
+
 ### After the tournament
 ```bash
 # Delete the VM from Hetzner Cloud Console (or hcloud server delete <id>).
