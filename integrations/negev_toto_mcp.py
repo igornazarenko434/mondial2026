@@ -1013,5 +1013,206 @@ def toto_update_preferences(pref_results: bool | None = None,
     return toto_patch_document(f"users/{uid}", json.dumps(fields))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# WRITE TOOLS — broad bets + side bets (Day-9.11; gated by NEGEV_ALLOW_WRITES=1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _resolve_option_id(category: str, choice: str, categories: dict) -> str | None:
+    """Match the caller's choice (either a literal option id or a human name)
+    against the options for one category. Returns the matched id or None.
+
+    Lookup order (case-insensitive, whitespace-insensitive):
+      1. Exact `option.id` match (e.g. "team_Portugal")
+      2. Exact `option.name` match (e.g. "Portugal")
+      3. `option.name` after stripping accents / case / spaces
+    """
+    if not choice:
+        return None
+    cats = (categories or {}).get("categories") or []
+    target = next((c for c in cats if c.get("id") == category), None)
+    if not target:
+        return None
+    options = target.get("options") or []
+    needle = str(choice).strip()
+    needle_l = needle.lower()
+    # tier 1: exact id
+    for o in options:
+        if o.get("id") == needle:
+            return o["id"]
+    # tier 2: exact displayName (case-insensitive)
+    for o in options:
+        if (o.get("name") or "").strip().lower() == needle_l:
+            return o["id"]
+    # tier 3: relaxed (strip whitespace + punctuation)
+    import re
+    needle_relaxed = re.sub(r"[^a-z0-9]+", "", needle_l)
+    for o in options:
+        name_relaxed = re.sub(r"[^a-z0-9]+", "", (o.get("name") or "").lower())
+        if name_relaxed and name_relaxed == needle_relaxed:
+            return o["id"]
+    return None
+
+
+@mcp.tool()
+def toto_save_broad_bets(winner: str | None = None,
+                          cinderella: str | None = None,
+                          golden_boot: str | None = None,
+                          best_player: str | None = None,
+                          tournament_id: str | None = None,
+                          dry_run: bool = False) -> dict:
+    """Save MY futures (broad bet) picks to Negev — Tournament Winner,
+    Cinderella, Golden Boot, Best Placed Player. All four parameters are
+    OPTIONAL and accept EITHER the full option id (`"team_Portugal"`) OR the
+    human-readable name shown in the app (`"Portugal"`). Partial updates
+    work — pass only the categories you want to set.
+
+    DISABLED unless NEGEV_ALLOW_WRITES=1 (the env var is the first gate;
+    Negev's Firestore rules are the last).
+
+    `dry_run=True` resolves every name → id, validates against the published
+    options, and returns the planned PATCH WITHOUT calling Firestore. Use
+    this before flipping NEGEV_ALLOW_WRITES=1 to confirm names map to the
+    intended IDs.
+
+    Doc path: `tournaments/{tid}/broadBets/{my_uid}`
+    Field shape (mirrors what the web app's "Save Predictions" button writes):
+      {
+        "userId":     <my_uid>,
+        "updatedAt":  ISO-8601 UTC now,
+        "selections": {
+          "winner":     "team_Portugal",
+          "cinderella": "team_Uzbekistan",
+          "goldenBoot": "1780580161396",
+          "bestPlayer": "<participant_uid>"
+        }
+      }
+    """
+    tid = _tid(tournament_id)
+    # Resolve every passed choice via the published categories doc so the
+    # caller can use display names. bestPlayer is special: its options are
+    # synthesised from the users collection (each option.id is a user UID).
+    cats = toto_get_broad_bet_categories(tournament_id=tid)
+    if "error" in cats:
+        return {"error": f"could not read broadBet categories: {cats['error']}"}
+
+    sel_input = {
+        "winner":     winner,
+        "cinderella": cinderella,
+        "goldenBoot": golden_boot,
+        "bestPlayer": best_player,
+    }
+    resolved: dict[str, str] = {}
+    unresolved: list[dict] = []
+    for cat_id, choice in sel_input.items():
+        if choice is None:
+            continue
+        rid = _resolve_option_id(cat_id, choice, cats)
+        if rid is None:
+            unresolved.append({"category": cat_id, "choice": choice})
+        else:
+            resolved[cat_id] = rid
+
+    if not resolved and not unresolved:
+        return {"error": "nothing to save — pass at least one of winner / "
+                          "cinderella / golden_boot / best_player"}
+    if unresolved:
+        return {"error": "could not resolve some choices against the "
+                          "published options",
+                "unresolved": unresolved,
+                "hint": "Pass a published option name exactly (case-insensitive). "
+                        "For bestPlayer, pass the participant's displayName."}
+
+    uid = _token.get("uid")
+    if not uid:
+        _id_token()
+        uid = _token.get("uid")
+
+    from datetime import datetime, timezone
+    fields = {
+        "userId":     uid,
+        "tournamentId": tid,
+        "selections": resolved,
+        "updatedAt":  datetime.now(timezone.utc).isoformat(),
+    }
+
+    if dry_run:
+        return {"dry_run": True, "would_patch": f"tournaments/{tid}/broadBets/{uid}",
+                "fields": fields, "resolved": resolved}
+
+    if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
+        return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
+                          "Re-run with dry_run=True to see the planned PATCH.",
+                "would_patch": f"tournaments/{tid}/broadBets/{uid}",
+                "resolved": resolved}
+
+    out = toto_patch_document(f"tournaments/{tid}/broadBets/{uid}",
+                                json.dumps(fields))
+    if "error" in out:
+        return out
+    return {"ok": True, "path": f"tournaments/{tid}/broadBets/{uid}",
+            "selections": resolved, "patched": out}
+
+
+@mcp.tool()
+def toto_submit_side_bet_answer(side_bet_id: str,
+                                  answer: bool,
+                                  tournament_id: str | None = None,
+                                  dry_run: bool = False) -> dict:
+    """Submit MY Yes/No answer to one side bet question.
+
+    DISABLED unless NEGEV_ALLOW_WRITES=1.
+
+    **STATUS as of 2026-06-07**: the Negev founder hasn't published any
+    side bets yet — the UI's "Upcoming Side Bets" panel is empty. The doc
+    SHAPE is captured from the schema (see SCHEMA_negev.md side bet section)
+    but the exact answer-submission PATH/shape was never captured from
+    DevTools because no live submission existed to observe. Two likely
+    candidates (best guess, both Firestore PATCH):
+
+      A. `tournaments/{tid}/sideBets/{side_bet_id}/answers/{my_uid}` —
+         a sub-collection per bet
+      B. `bets/{tid}_sb_{side_bet_id}_{my_uid}` — flat layout matching
+         per-match bets
+
+    This tool implements option A (most likely given the parallel with
+    broadBets). When the founder publishes the first real side bet, run
+    once with `dry_run=True`, manually submit Y/N in the web app with
+    DevTools Network tab open, and compare. Update this function if the
+    path differs.
+
+    Args:
+      side_bet_id: the side-bet doc id (e.g. `"sb_2026-06-12"`)
+      answer:      True = Yes, False = No
+      dry_run:     plan-and-return without calling Firestore
+    """
+    tid = _tid(tournament_id)
+    uid = _token.get("uid")
+    if not uid:
+        _id_token()
+        uid = _token.get("uid")
+    from datetime import datetime, timezone
+    fields = {
+        "userId":     uid,
+        "tournamentId": tid,
+        "sideBetId":  side_bet_id,
+        "answer":     bool(answer),
+        "submittedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    path = f"tournaments/{tid}/sideBets/{side_bet_id}/answers/{uid}"
+
+    if dry_run:
+        return {"dry_run": True, "would_patch": path, "fields": fields,
+                "note": "Path is BEST GUESS — verify against DevTools "
+                        "Network capture when first real side bet is "
+                        "submitted, then update this function."}
+
+    if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
+        return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
+                          "Re-run with dry_run=True to see the planned PATCH.",
+                "would_patch": path}
+
+    return toto_patch_document(path, json.dumps(fields))
+
+
 if __name__ == "__main__":
     mcp.run()      # stdio transport
