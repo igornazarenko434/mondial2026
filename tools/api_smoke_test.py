@@ -118,12 +118,27 @@ def _probe_brave() -> str:
     return f"{len(results)} result(s)"
 
 
+def _llm_assert_nonempty(provider: str, txt) -> str:
+    """Day-9.11.c: a successful HTTP round-trip isn't enough — if the model
+    returns an EMPTY text (Gemini does this when max_tokens is too low and
+    internal reasoning consumes the whole budget), the probe must surface
+    that as FAIL, not a green ✓ with reply='None'."""
+    s = "" if txt is None else str(txt).strip()
+    if not s:
+        raise RuntimeError(
+            f"{provider} HTTP 200 but reply text empty — try a larger "
+            "max_tokens (Gemini Flash 2.5 needs ≥32 tokens for internal "
+            "reasoning before producing output)")
+    return f"reply={s[:40]!r}"
+
+
 def _probe_gemini() -> str:
     if not os.environ.get("GEMINI_API_KEY"):
         raise RuntimeError("GEMINI_API_KEY not set")
     from core.llm.providers import GeminiProvider
-    txt = GeminiProvider().complete("You are terse.", "Reply: OK", max_tokens=8)
-    return f"reply={str(txt)[:40]!r}"
+    # max_tokens=64 — leaves >50 tokens after reasoning for the 2-char reply.
+    txt = GeminiProvider().complete("You are terse.", "Reply: OK", max_tokens=64)
+    return _llm_assert_nonempty("gemini", txt)
 
 
 def _probe_claude() -> str:
@@ -131,16 +146,16 @@ def _probe_claude() -> str:
             or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")):
         raise RuntimeError("ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN not set")
     from core.llm.providers import ClaudeProvider
-    txt = ClaudeProvider().complete("You are terse.", "Reply: OK", max_tokens=8)
-    return f"reply={str(txt)[:40]!r}"
+    txt = ClaudeProvider().complete("You are terse.", "Reply: OK", max_tokens=64)
+    return _llm_assert_nonempty("claude", txt)
 
 
 def _probe_openai() -> str:
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
     from core.llm.providers import OpenAIProvider
-    txt = OpenAIProvider().complete("You are terse.", "Reply: OK", max_tokens=8)
-    return f"reply={str(txt)[:40]!r}"
+    txt = OpenAIProvider().complete("You are terse.", "Reply: OK", max_tokens=64)
+    return _llm_assert_nonempty("openai", txt)
 
 
 def _probe_telegram() -> str:
