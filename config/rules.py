@@ -20,8 +20,17 @@ GROUP_RESET_FACTOR = 0.85                                   # §14  (-15% after 
 
 # --- Exact-score multiplier tables -----------------------------------------
 # Built from arrays [loser_goals][winner_goals]; None = impossible (winner<loser).
+# Row 0 (clean-sheet wins): Day-9.7 fix — was [2.75, 2.25, 3.25, 4.5, ...] but
+# Negev's server-side scoring grid (managerTables.grids.groupStage, our source
+# of truth for what actually gets awarded) has 1-0=1.5, 2-0=2.25, 3-0=3.25.
+# Our previous values came from a misread/transcription of the PDF row, off
+# by one column. The pattern Negev uses is internally consistent:
+#   1-0 ↔ 2-1 = 1.5  (same difficulty — low-scoring home win)
+#   2-0 ↔ 3-1 = 2.25
+#   3-0 ↔ 4-1 = 3.25
+# tools/negev_consistency_audit.py verifies all 49 cells in 3 grids agree.
 _GROUP = [  # §12
-    [2.75, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5, 4.5],
+    [2.75, 1.5, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5],
     [None, 2.25, 1.5,  3.25, 4.5, 4.5, 4.5, 4.5],
     [None, None, 2.75, 3.25, 4.5, 4.5, 4.5, 4.5],
     [None, None, None, 4.5,  4.5, 4.5, 4.5, 4.5],

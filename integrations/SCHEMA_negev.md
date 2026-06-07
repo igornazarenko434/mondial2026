@@ -230,23 +230,32 @@ math: 66 app participants = 63 humans + 3 bots).
 The exact-score multiplier table, per stage bracket. Grid keys: `groupStage`,
 `round16AndQuarter`, `semiAndFinal`.
 
-**Cross-verified against our `config/rules.py::SCORE_TABLE` (2026-06-07,
-live `n40ykJlOIA9Mg839hz91`):**
+**Cross-verified against our `config/rules.py::SCORE_TABLE`
+(2026-06-07, live `n40ykJlOIA9Mg839hz91`, post Day-9.7 fix):**
+- `groupStage`: **all 49 cells match** ✓
 - `round16AndQuarter`: **all 49 cells match** ✓
 - `semiAndFinal`: **all 49 cells match** ✓
-- `groupStage`: **3 cells DIFFER** (under investigation):
-  - `1-0`: Negev=**1.5**, our SCORE_TABLE=**2.25**
-  - `2-0`: Negev=**2.25**, our SCORE_TABLE=**3.25**
-  - `3-0`: Negev=**3.25**, our SCORE_TABLE=**4.5** (we use cap)
 
-Negev is the authoritative server-side scorer. If their values are correct,
-our `config/rules.py::_GROUP` row 0 (`loser_goals=0`) needs to change to
-`[2.75, 1.5, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5]` (matching Negev's 0-N values).
+**Day-9.7 fix history**: an initial audit (2026-06-07) caught 3 cells in
+the groupStage table that disagreed with Negev's server-side scorer
+(1-0, 2-0, 3-0 — all "clean-sheet home wins"). Our `_GROUP[0]` was
+`[2.75, 2.25, 3.25, 4.5, ...]` but Negev's authoritative grid uses
+`[2.75, 1.5, 2.25, 3.25, 4.5, ...]`. The previous values came from a
+misread of the PDF row (off by one column). After Day-9.7's commit the
+table reads `[2.75, 1.5, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5]` — verified by
+`tools/negev_consistency_audit.py` showing 0 differences across 147
+cells (3 grids × 49 each).
 
-**Action**: re-read the rules PDF §12 group-stage grid carefully. Confirm
-whether 1-0 / 2-0 / 3-0 multipliers are 2.25/3.25/4.5 (our current) or
-1.5/2.25/3.25 (Negev's). Run `tools/negev_consistency_audit.py` after any
-change to verify.
+Internal consistency Negev uses (a sanity check that the new values are
+right):
+  1-0 ↔ 2-1 = **1.5**   (same difficulty — low-scoring home win)
+  2-0 ↔ 3-1 = **2.25**
+  3-0 ↔ 4-1 = **3.25**
+
+Worked PDF examples still hold:
+  France 2-1, group, odds 2.0 → 1.5 × 2.0 = **3.0**  ✓
+  Draw 1-1, group, odds 2.5  → 2.25 × 2.5 = **5.625** ✓
+  Final 2-2, draw odds 2.5   → 5 × 2.5 = **12.5** ✓
 
 ```jsonc
 {

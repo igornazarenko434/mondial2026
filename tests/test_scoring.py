@@ -30,6 +30,23 @@ def test_group_draw_not_1_1():
     assert score_match("Group", 1, 1, 2, 2, ODDS) == 2.5
 
 
+def test_group_exact_1_0_negev_aligned():
+    """Day-9.7 fix: group-stage 1-0 multiplier = 1.5 (matches Negev's
+    server-side scoring grid). Previously was 2.25 in our table —
+    off-by-one transcription from the PDF clean-sheet row."""
+    assert score_match("Group", 1, 0, 1, 0, ODDS) == 1.5 * 2.0   # = 3.0
+
+
+def test_group_exact_2_0_negev_aligned():
+    """Day-9.7 fix: 2-0 = 2.25 (was 3.25)."""
+    assert score_match("Group", 2, 0, 2, 0, ODDS) == 2.25 * 2.0  # = 4.5
+
+
+def test_group_exact_3_0_negev_aligned():
+    """Day-9.7 fix: 3-0 = 3.25 (was 4.5)."""
+    assert score_match("Group", 3, 0, 3, 0, ODDS) == 3.25 * 2.0  # = 6.5
+
+
 def test_wrong_direction_zero():
     assert score_match("Group", 2, 1, 0, 1, ODDS) == 0.0
 
