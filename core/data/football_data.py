@@ -67,12 +67,20 @@ def fetch_wc_matches() -> list[dict]:
         except (ValueError, AttributeError):
             log.warning("match %s bad utcDate %r; skipped", m.get("id"), utc_raw)
             continue
+        # Football-data.org returns group as "GROUP_A" — strip the prefix so
+        # what we store matches the canonical roster in data/wc2026_groups.csv
+        # (single letters A–L). The card-render also strips defensively in
+        # build_card, but normalising at the data layer makes the DB self-
+        # consistent for audit tools, SQL joins, and any downstream consumer.
+        raw_group = m.get("group")
+        if isinstance(raw_group, str) and raw_group.upper().startswith("GROUP_"):
+            raw_group = raw_group[len("GROUP_"):]
         out.append({
             "match_id": m["id"],
             "utc_kickoff": utc.isoformat(),
             "local_kickoff": _local_iso(utc),
             "stage": to_rules_stage(m.get("stage")),   # store rules stage for scoring
-            "group": m.get("group"),
+            "group": raw_group,
             "home": normalize((m.get("homeTeam") or {}).get("name")),
             "away": normalize((m.get("awayTeam") or {}).get("name")),
             "status": m.get("status"),

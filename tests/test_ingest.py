@@ -106,3 +106,32 @@ def test_fetch_skips_match_without_kickoff(monkeypatch):
                         lambda *a, **k: type("R", (), {"json": lambda s: bad,
                                                        "raise_for_status": lambda s: None})())
     assert fd.fetch_wc_matches() == []                      # skipped, no crash
+
+
+def test_fetch_strips_group_prefix_to_match_canonical_csv(monkeypatch):
+    """football-data.org returns group="GROUP_A"; we store "A" so it matches
+    data/wc2026_groups.csv. Regression pin for the audit-discovered mismatch."""
+    monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy")
+    payload = {"matches": [
+        {"id": 100, "utcDate": "2026-06-11T19:00:00Z", "stage": "GROUP_STAGE",
+         "group": "GROUP_A",
+         "homeTeam": {"name": "Mexico"}, "awayTeam": {"name": "South Africa"},
+         "status": "TIMED", "score": {"fullTime": {}}},
+        {"id": 101, "utcDate": "2026-06-12T19:00:00Z", "stage": "GROUP_STAGE",
+         "group": "GROUP_L",
+         "homeTeam": {"name": "England"}, "awayTeam": {"name": "Croatia"},
+         "status": "TIMED", "score": {"fullTime": {}}},
+        # Defensive: an unusual format (no prefix) should pass through untouched
+        {"id": 102, "utcDate": "2026-06-12T22:00:00Z", "stage": "GROUP_STAGE",
+         "group": "Group A",
+         "homeTeam": {"name": "X"}, "awayTeam": {"name": "Y"},
+         "status": "TIMED", "score": {"fullTime": {}}},
+    ]}
+    monkeypatch.setattr(fd.requests, "get",
+                        lambda *a, **k: type("R", (), {"json": lambda s: payload,
+                                                       "raise_for_status": lambda s: None})())
+    rows = fd.fetch_wc_matches()
+    by_id = {r["match_id"]: r for r in rows}
+    assert by_id[100]["group"] == "A"               # stripped
+    assert by_id[101]["group"] == "L"               # stripped
+    assert by_id[102]["group"] == "Group A"         # left alone (different format)
