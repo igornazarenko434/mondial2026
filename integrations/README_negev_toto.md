@@ -190,11 +190,24 @@ Full schema in `integrations/SCHEMA_negev.md`. Highlights:
 | ☀️ | daemon (daily_summary) | 09:00 IDT | today's games + recent results + your score + budget (uses `delivery.summary()`) |
 | 📊 | cron (sync_negev_standings.py --telegram) | 07:00 IDT | live leaderboard top-5 + Igor's rank + "Around you" window + gap to leader (uses `delivery.summary()`) |
 | 🔍 | cron (post_match_audit.py --telegram) | 08:00 IDT | **silent on Δ=0**; sends per-match table only when our `score_match()` differs from Negev's awarded points by >0.01. Day-9.8 addition; retries 5×30s for Negev `processedAt` race conditions. |
+| ⚠ | both cron jobs (any failure) | on Negev MCP unreachable | **Day-9.9.** `integrations/negev_alerts.py::alert_failure()` classifies the error (config/auth/rules/network/import/unknown), formats a short body with category + remediation hint + log path, and sends via `delivery.alert()` (gets the ⚠️ prefix). Fires regardless of `--telegram` flag so the 6 silent (`--quiet`) cron runs still warn. Suppress with `--no-alert-on-failure`. |
 
 All go to the same `TELEGRAM_CHAT_ID`. Per-chat rate limit is 1/sec —
 2-3 messages/day on quiet days, ~12 on match days, audit silent unless real Δ.
 Note: `delivery.summary()` is used for informational ☀️/📊/🔍 to avoid the
 ⚠️ prefix that `delivery.alert()` prepends.
+
+### Verify the failure-alert path (Day-9.9)
+
+```bash
+# On the VM — sends a synthetic ⚠ message to your Telegram. Exits 0 if the
+# Telegram round-trip worked. Use after any change to NEGEV_*/TELEGRAM_* env
+# vars to confirm the alert wire-up is still live.
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --test-alert'
+# Look for: ⚠️ Negev MCP unreachable — unknown   (with "SYNTHETIC TEST" body)
+```
+
+Both `sync_negev_standings.py` and `post_match_audit.py` support `--test-alert`.
 
 ## Memory + auto-discovery for new sessions
 

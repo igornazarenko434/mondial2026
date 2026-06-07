@@ -211,12 +211,32 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--retries", type=int, default=5)
     p.add_argument("--backoff", type=float, default=30.0)
+    p.add_argument("--no-alert-on-failure", action="store_true",
+                   help="Suppress the ⚠ Negev failure Telegram on connect "
+                        "errors (default: alert ON).")
+    p.add_argument("--test-alert", action="store_true",
+                   help="Send a synthetic 'Negev unreachable' Telegram and "
+                        "exit — useful for verifying the alert path works.")
     args = p.parse_args(argv)
+
+    if args.test_alert:
+        from integrations.negev_alerts import alert_failure
+        ok = alert_failure(
+            source="post_match_audit (--test-alert)",
+            reason="SYNTHETIC TEST — Negev MCP unreachable: this is a manual "
+                   "self-test triggered with --test-alert. If you can read "
+                   "this in Telegram, the failure-alert path is working.")
+        print(f"test alert sent: {ok}")
+        return 0 if ok else 1
 
     with obs.run("post_match_audit"):
         rep = audit(max_retries=args.retries, backoff=args.backoff)
     if not rep.get("ok"):
         print(f"FAILED: {rep.get('error')}", file=sys.stderr)
+        if not args.no_alert_on_failure:
+            from integrations.negev_alerts import alert_failure
+            alert_failure(source="post_match_audit",
+                          reason=rep.get("error") or "unknown")
         return 1
 
     # Pretty print

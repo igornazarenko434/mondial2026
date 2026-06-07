@@ -273,7 +273,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--telegram", action="store_true",
                    help="Send a leaderboard summary to Telegram (uses the same "
                         "TELEGRAM_BOT_TOKEN/CHAT_ID as the daemon's daily summary)")
+    p.add_argument("--no-alert-on-failure", action="store_true",
+                   help="Suppress the ⚠ Negev failure Telegram on connect "
+                        "errors (default: alert ON, so silent crons still warn).")
+    p.add_argument("--test-alert", action="store_true",
+                   help="Send a synthetic 'Negev unreachable' Telegram and "
+                        "exit — useful for verifying the alert path works.")
     args = p.parse_args(argv)
+
+    # Self-test path: prove the failure-alert wire-up is live without
+    # actually breaking Negev. Exits 0 if delivery succeeded.
+    if args.test_alert:
+        from integrations.negev_alerts import alert_failure
+        ok = alert_failure(
+            source="sync_negev_standings (--test-alert)",
+            reason="SYNTHETIC TEST — Negev MCP unreachable: this is a manual "
+                   "self-test triggered with --test-alert. If you can read "
+                   "this in Telegram, the failure-alert path is working.")
+        print(f"test alert sent: {ok}")
+        return 0 if ok else 1
 
     with obs.run("sync_negev_standings"):
         out = sync_standings(tournament_id=args.tournament_id,
@@ -282,6 +300,10 @@ def main(argv: list[str] | None = None) -> int:
                               send_telegram=args.telegram)
     if not out.get("ok"):
         print(f"FAILED: {out.get('error')}", file=sys.stderr)
+        if not args.no_alert_on_failure:
+            from integrations.negev_alerts import alert_failure
+            alert_failure(source="sync_negev_standings",
+                          reason=out.get("error") or "unknown")
         return 1
     if not args.quiet:
         if "my_rank" in out:

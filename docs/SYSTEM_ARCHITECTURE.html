@@ -895,6 +895,13 @@ crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pr
       <td>08:00 IDT</td>
       <td><strong>Silent on Δ=0.</strong> Sends per-match table only when our <code>score_match()</code> differs from Negev's awarded points by >0.01. Day-9.8 addition.</td>
     </tr>
+    <tr>
+      <td><span class="pill err">⚠</span></td>
+      <td>cron (both sync + audit)</td>
+      <td><code>integrations/negev_alerts.alert_failure()</code></td>
+      <td>on Negev MCP unreachable</td>
+      <td><strong>Day-9.9.</strong> Classifies the error (<code>config</code> / <code>auth</code> / <code>rules</code> / <code>network</code> / <code>import</code> / <code>unknown</code>) and sends a short body with the category + remediation hint + log path. Fires regardless of <code>--telegram</code> so the 6 silent (<code>--quiet</code>) cron runs also warn. Verify with <code>--test-alert</code>.</td>
+    </tr>
     </tbody>
   </table>
 
