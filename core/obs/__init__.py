@@ -70,22 +70,82 @@ def run(label: str | None = None):
             correlation_id.reset(token)
 
 
+def _classify_exception(e: BaseException) -> tuple[int | None, str | None, str]:
+    """Extract (status_code, retry_after, error_kind) from a provider-SDK
+    exception so the cost-ledger row can distinguish 401 vs 429 vs 503 vs
+    Cloudflare-HTML vs requests.Timeout vs ConnectionError. Day-9.11."""
+    # status code — surfaces on requests.HTTPError.response.status_code, on
+    # anthropic.APIStatusError.status_code, openai.APIStatusError.status_code,
+    # google.api_core.exceptions.* .code() (callable). Be defensive.
+    sc = None
+    try:
+        resp = getattr(e, "response", None)
+        sc = getattr(resp, "status_code", None) if resp is not None else None
+        if sc is None:
+            sc = getattr(e, "status_code", None)
+        if sc is None and hasattr(e, "code") and callable(e.code):
+            sc = e.code()
+    except Exception:                                  # noqa: BLE001
+        sc = None
+    if not isinstance(sc, int):
+        sc = None
+    # retry-after — only meaningful on 429
+    ra: str | None = None
+    try:
+        resp = getattr(e, "response", None)
+        headers = getattr(resp, "headers", {}) or {}
+        ra = headers.get("Retry-After") if isinstance(headers, dict) else None
+    except Exception:                                  # noqa: BLE001
+        ra = None
+    # error-kind classification
+    name = type(e).__name__.lower()
+    if "timeout" in name:
+        kind = "timeout"
+    elif "connection" in name and "http" not in name:
+        kind = "network"
+    elif sc is not None:
+        kind = "http"
+    else:
+        kind = "other"
+    return sc, ra, kind
+
+
 @contextmanager
 def external_call(provider: str, endpoint: str, tokens: int = 0,
                   units: float = 1, rate_timeout: float | None = 30):
     """Guard one outbound API/LLM call: rate-limit → span → time → cost.
 
-    On exception the cost-ledger row is stamped with `error_class` (e.g.
-    'RateLimitError', 'APIConnectionError', 'AuthenticationError') and
-    `error_message` (first 200 chars of the exception repr) so root-cause
-    is queryable later — no need to grep journalctl to figure out *why*
-    Gemini failed at 14:32 yesterday."""
+    On exception the cost-ledger row is stamped with:
+      - error_class    (type(e).__name__)
+      - error_message  (first 200 chars of str(e))
+      - status_code    (HTTP status if available — 401/429/503)
+      - retry_after    (Retry-After header value if any)
+      - error_kind     ('http' / 'timeout' / 'network' / 'ratelimit_timeout' / 'other')
+
+    Day-9.11: the rate-limit acquire now FAILS CLOSED — if the local token
+    bucket can't be acquired within rate_timeout, we raise RateLimitTimeout
+    BEFORE entering the body (was: log warning + proceed, which produced a
+    downstream 429 indistinguishable from a real upstream one)."""
     if not ratelimit.acquire(provider, n=units, timeout=rate_timeout):
-        log.warning("rate-limit timeout for %s/%s", provider, endpoint)
+        log.warning("rate-limit timeout for %s/%s — failing closed", provider, endpoint)
+        metrics.incr("rate_limit_timeout", 1, provider=provider)
+        # Record the would-be call so the audit shows the local-bucket block.
+        try:
+            ledger().record(provider, endpoint, units=units, tokens=tokens, ok=False,
+                            correlation_id=correlation_id.get(), duration_ms=0,
+                            error_class="RateLimitTimeout",
+                            error_message=f"local token bucket blocked {provider}/{endpoint}",
+                            error_kind="ratelimit_timeout")
+        except Exception:                              # noqa: BLE001
+            pass
+        raise RateLimitTimeout(f"{provider}/{endpoint} blocked by local bucket")
     start = time.monotonic()
     ok = True
     err_class: str | None = None
     err_msg: str | None = None
+    status_code: int | None = None
+    retry_after: str | None = None
+    error_kind: str | None = None
     try:
         with span(f"{provider}.{endpoint}", provider=provider, endpoint=endpoint):
             yield
@@ -93,14 +153,25 @@ def external_call(provider: str, endpoint: str, tokens: int = 0,
         ok = False
         err_class = type(e).__name__
         err_msg = str(e)
+        status_code, retry_after, error_kind = _classify_exception(e)
         raise
     finally:
         dur_ms = (time.monotonic() - start) * 1000
         metrics.observe("external_call_ms", dur_ms, provider=provider, endpoint=endpoint)
         ledger().record(provider, endpoint, units=units, tokens=tokens, ok=ok,
                         correlation_id=correlation_id.get(), duration_ms=dur_ms,
-                        error_class=err_class, error_message=err_msg)
+                        error_class=err_class, error_message=err_msg,
+                        status_code=status_code, retry_after=retry_after,
+                        error_kind=error_kind)
+
+
+class RateLimitTimeout(Exception):
+    """Local token-bucket couldn't be acquired within `rate_timeout`. Raised
+    by `external_call` so the caller (LLMRouter) can attribute the failure
+    to OUR local throttle rather than an upstream rate limit. Day-9.11."""
+    pass
 
 
 __all__ = ["setup", "run", "staged", "stage_of", "current_stage", "external_call",
-           "span", "traced", "metrics", "ratelimit", "ledger", "get_logger", "log"]
+           "span", "traced", "metrics", "ratelimit", "ledger", "get_logger", "log",
+           "RateLimitTimeout"]

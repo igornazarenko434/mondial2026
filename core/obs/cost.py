@@ -38,6 +38,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE api_calls ADD COLUMN error_class TEXT")
     if "error_message" not in cols:
         conn.execute("ALTER TABLE api_calls ADD COLUMN error_message TEXT")
+    # Day-9.11: distinguish 401 vs 429 vs 503 vs Cloudflare-HTML
+    if "status_code" not in cols:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN status_code INTEGER")
+    if "retry_after" not in cols:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN retry_after TEXT")
+    if "error_kind" not in cols:
+        # 'http' / 'timeout' / 'network' / 'ratelimit_timeout' / None
+        conn.execute("ALTER TABLE api_calls ADD COLUMN error_kind TEXT")
 
 
 def _period_start(period: str) -> str:
@@ -75,25 +83,48 @@ class CostLedger:
                tokens: int = 0, ok: bool = True, correlation_id: str = "-",
                duration_ms: float = 0,
                error_class: str | None = None,
-               error_message: str | None = None) -> float:
+               error_message: str | None = None,
+               status_code: int | None = None,
+               retry_after: str | None = None,
+               error_kind: str | None = None) -> float:
         """Append one row to api_calls. On failure (ok=False) callers SHOULD
         pass error_class (e.g. 'RateLimitError' / 'AuthenticationError' /
-        'APITimeoutError') and error_message (~200 chars of the exception
-        repr) so root-cause is queryable later via tools/llm_audit.py."""
+        'APITimeoutError'), error_message (~200 chars of the exception repr),
+        and where the upstream surfaced them: status_code (401/429/503),
+        retry_after (the Retry-After header value, if any), and error_kind
+        ('http' / 'timeout' / 'network' / 'ratelimit_timeout'). All optional
+        — old call sites that pass only the existing args still work."""
         cost = self._est(provider, units, tokens)
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO api_calls (ts,provider,endpoint,units,tokens,"
-                "duration_ms,est_cost,ok,correlation_id,error_class,error_message)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (datetime.now(timezone.utc).isoformat(), provider, endpoint,
-                 units, tokens, duration_ms, cost, int(ok), correlation_id,
-                 error_class, (error_message or "")[:200] or None))
-            self.conn.commit()
+        # Day-9.11: utf-8-safe truncation so a chopped 4-byte codepoint at
+        # byte 199 can't poison downstream readers.
+        em = ((error_message or "")[:200]
+              .encode("utf-8", errors="replace")
+              .decode("utf-8", errors="replace")) or None
+        # Day-9.11: defense-in-depth — a sick ledger must not replace the
+        # real upstream exception. Wrap INSERT in try/except so the caller's
+        # exception always survives.
+        try:
+            with self._lock:
+                self.conn.execute(
+                    "INSERT INTO api_calls (ts,provider,endpoint,units,tokens,"
+                    "duration_ms,est_cost,ok,correlation_id,error_class,"
+                    "error_message,status_code,retry_after,error_kind)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (datetime.now(timezone.utc).isoformat(), provider, endpoint,
+                     units, tokens, duration_ms, cost, int(ok), correlation_id,
+                     error_class, em, status_code, retry_after, error_kind))
+                self.conn.commit()
+        except sqlite3.Error as e:                     # noqa: BLE001
+            log.warning("cost ledger insert failed for %s/%s; dropping row: %s",
+                        provider, endpoint, e)
+            metrics.incr("cost_ledger_insert_failed", 1, provider=provider)
         metrics.incr("api_calls", 1, provider=provider, endpoint=endpoint)
         if tokens:
             metrics.incr("llm_tokens", tokens, provider=provider)
-        self._maybe_warn(provider)
+        try:
+            self._maybe_warn(provider)
+        except Exception:                              # noqa: BLE001 — best-effort
+            pass
         return cost
 
     def metrics_for(self, correlation_id: str) -> dict:

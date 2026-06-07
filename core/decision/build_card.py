@@ -147,11 +147,23 @@ def build_card(match: dict, conn=None, *,
     # and any other window we pass empty context → LLM returns NEUTRAL → news
     # still counted as "used" but with zero shift. analyze_safe NEVER raises;
     # on total LLM failure it returns NEUTRAL.
+    # Day-9.11: wrap the entire news section in obs.staged('news') so api_football
+    # + brave_search + LLM spans become children of `stage:news` in Honeycomb
+    # under the run's correlation_id. Also captures `stage` on any escaping
+    # exception so build_card can stamp news_failure_stage on the card.
     try:
+        from core import obs as _obs
+        _news_stage = _obs.staged("news", match_id=match.get("match_id"),
+                                   window=window)
+    except Exception:                                # noqa: BLE001
+        from contextlib import nullcontext
+        _news_stage = nullcontext()
+    with _news_stage:
+      try:
         from config.news import (should_search, T15M_REUSE_AGE_MIN,
                                    T15M_REUSE_MIN_CONFIDENCE)
         from orchestrator.agents.news_agent import (
-            gather_context, read_prior_deltas
+            gather_context, read_prior_deltas, context_meta
         )
 
         # T-15m cache: reuse if T-60m was recent and confident enough
@@ -165,15 +177,17 @@ def build_card(match: dict, conn=None, *,
                 log.info("news/T-15m reused T-60m deltas for match %s "
                           "(saved 1 LLM + Brave calls)", match.get("match_id"))
 
+        ctx_meta_snapshot = {}
         if deltas is None:                            # cache miss → run fresh
             if should_search(window):
                 try:
                     context_text = gather_context(
                         {**match, "home": home, "away": away, "stage": stage},
                         window=window)
+                    ctx_meta_snapshot = context_meta()   # Day-9.11
                 except Exception as e:               # noqa: BLE001
-                    log.warning("gather_context failed for %s vs %s: %s; "
-                                "using empty", home, away, e)
+                    log.warning("gather_context failed for %s vs %s (%s): %s; "
+                                "using empty", home, away, type(e).__name__, e)
                     context_text = ""
             else:
                 context_text = ""                    # T-7m / unknown window
@@ -193,23 +207,59 @@ def build_card(match: dict, conn=None, *,
             "raw_excerpt": deltas.get("raw_excerpt"),     # Day-9.10
             "failure": deltas.get("failure"),
             "failure_class": deltas.get("failure_class"), # Day-9.10
+            # Day-9.11: per-source context-gathering diagnostics
+            "ctx_failures": ctx_meta_snapshot.get("ctx_failures") or [],
+            "context_sources_ok": ctx_meta_snapshot.get("sources_ok") or [],
+            "context_truncated_chars": ctx_meta_snapshot.get("context_truncated_chars") or 0,
+            "context_chars": ctx_meta_snapshot.get("context_chars") or 0,
+            "brave_gate": ctx_meta_snapshot.get("brave_gate"),    # Day-9.11
         }
+        # Day-9.11: pass through parse+validate provenance fields. These are
+        # only set when there's something interesting to report (clamp,
+        # default, schema error) — None values mean "no anomaly".
+        for k in ("home_delta_raw", "away_delta_raw",
+                  "home_delta_clamped", "away_delta_clamped", "delta_parse_error",
+                  "confidence_was_defaulted", "confidence_raw",
+                  "notes_truncated", "notes_original_count", "notes_format_error",
+                  "schema_error",
+                  "json_mode_fallback_used", "json_mode_error_class"):
+            news_meta[k] = deltas.get(k)
         # If the LLM legitimately ran but ALL providers failed, count news as
         # signals_failed so the audit trail is honest (not silently "used").
-        if news_meta["failure"]:
+        # Day-9.11: news_failure_canonical is the SINGLE source of truth — both
+        # card['news_failure'] and failure_reasons['news'] reference it, so the
+        # two fields are byte-identical across success / partial / exception.
+        news_failure_canonical = _trim(news_meta.get("failure") or "", 80) or None
+        if news_failure_canonical:
             signals_failed.append("news")
-            failure_reasons["news"] = _trim(news_meta["failure"])
+            failure_reasons["news"] = news_failure_canonical
         else:
             signals_used.append("news")
-    except Exception as e:                           # noqa: BLE001
+      except Exception as e:                          # noqa: BLE001
         signals_failed.append("news")
-        failure_reasons["news"] = _trim(e)
+        # Day-9.11: same canonical form in the exception branch — derive from
+        # `e`, then both card['news_failure'] and failure_reasons['news']
+        # share that one value.
+        news_failure_canonical = _trim(e, 80) or None
+        failure_reasons["news"] = news_failure_canonical
         news_deltas = (0.0, 0.0)
+        # Day-9.11: stamp the stage tag captured by obs.staged on the
+        # exception so we can attribute "this card failed in news stage"
+        # even when the exception type alone wouldn't tell us.
+        try:
+            from core import obs as _obs_err
+            _failure_stage = _obs_err.stage_of(e)
+        except Exception:                              # noqa: BLE001
+            _failure_stage = "-"
         news_meta = {"home": 0.0, "away": 0.0, "confidence": "low",
                        "notes": [], "provider": None, "fallbacks_used": [],
                        "fallback_errors": {}, "parse_tier": "never_called",
-                       "raw_excerpt": None, "failure": _trim(e),
-                       "failure_class": type(e).__name__}
+                       "raw_excerpt": None,
+                       "failure": news_failure_canonical,   # canonical, Day-9.11
+                       "failure_class": type(e).__name__,
+                       "failure_stage": _failure_stage,
+                       "ctx_failures": [], "context_sources_ok": [],
+                       "context_truncated_chars": 0, "context_chars": 0}
 
     # ───── 5. Run the model assembler ─────
     try:
@@ -264,6 +314,23 @@ def build_card(match: dict, conn=None, *,
     card["news_raw_excerpt"]    = news_meta.get("raw_excerpt")            # Day-9.10
     card["news_failure"]        = news_meta.get("failure")
     card["news_failure_class"]  = news_meta.get("failure_class")          # Day-9.10
+    # Day-9.11: per-source context diagnostics + stage tag on exception
+    card["news_ctx_failures"]   = news_meta.get("ctx_failures", [])
+    card["news_context_sources_ok"]      = news_meta.get("context_sources_ok", [])
+    card["news_context_truncated_chars"] = news_meta.get("context_truncated_chars", 0)
+    card["news_context_chars"]  = news_meta.get("context_chars", 0)
+    card["news_failure_stage"]  = news_meta.get("failure_stage")
+    card["news_brave_gate"]     = news_meta.get("brave_gate")   # Day-9.11
+    # Day-9.11: parse+validate provenance — every silent default / clamp /
+    # truncation now visible. The full set of optional flags from
+    # _validate_and_clamp passes through `deltas` into news_meta below.
+    for k in ("home_delta_raw", "away_delta_raw",
+              "home_delta_clamped", "away_delta_clamped", "delta_parse_error",
+              "confidence_was_defaulted", "confidence_raw",
+              "notes_truncated", "notes_original_count", "notes_format_error",
+              "schema_error",
+              "json_mode_fallback_used", "json_mode_error_class"):
+        card[f"news_{k}"] = news_meta.get(k)
 
     # Golden auditability rule: every signal must appear somewhere. The
     # production path enforces this by construction (we visit every signal

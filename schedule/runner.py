@@ -26,6 +26,7 @@ Day-9 additions (all idempotent, all fail-safe):
     is down even when alerts also fail.
 """
 from __future__ import annotations
+import contextvars
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -86,19 +87,27 @@ class SchedulerDaemon:
         # Stamp the window AND the per-tick events_cache onto the match dict so
         # build_card can use them without process_match changing signature.
         match = {**match, "_window": window, "_events_cache": events_cache}
-        # Day-9.5: load standings context at DISPATCH time (not at startup),
-        # so any standings_set update during the tournament takes effect on
-        # the next match without restarting the daemon. None ⇒ no tilt.
-        ctx = None
-        if self.strategy_context_fn:
-            try:
-                ctx = self.strategy_context_fn()
-            except Exception as e:                 # noqa: BLE001 — never break a card
-                log.warning("strategy_context_fn failed: %s; using pure-EV", e)
-                ctx = None
-        return process_match(match, window, self.build_card,
-                              strategy_context=ctx,
-                              strategy_tilt=self.strategy_tilt)
+        # Day-9.11: open the obs.run scope INSIDE the worker (not at submit
+        # time) so its correlation_id is visible to strategy_context_fn AND to
+        # every span/log emitted from this job. `match-<id>-<window>` matches
+        # the convention used by tools/llm_audit.py + the docs/Honeycomb
+        # examples — one query `WHERE correlation_id="match-<id>-<window>"`
+        # returns the full tree (run → stage:news → gemini.complete).
+        cid_label = f"match-{match.get('match_id', '?')}-{window}"
+        with obs.run(cid_label):
+            # Day-9.5: load standings context at DISPATCH time (not at startup),
+            # so any standings_set update during the tournament takes effect on
+            # the next match without restarting the daemon. None ⇒ no tilt.
+            ctx = None
+            if self.strategy_context_fn:
+                try:
+                    ctx = self.strategy_context_fn()
+                except Exception as e:             # noqa: BLE001 — never break a card
+                    log.warning("strategy_context_fn failed: %s; using pure-EV", e)
+                    ctx = None
+            return process_match(match, window, self.build_card,
+                                  strategy_context=ctx,
+                                  strategy_tilt=self.strategy_tilt)
 
     def _maybe_ingest(self, now: datetime):
         """Periodically refresh fixtures/results/bracket from the source."""
@@ -169,7 +178,14 @@ class SchedulerDaemon:
             if key in self._dispatched:
                 continue
             self._dispatched.add(key)
-            self.pool.submit(self._run_job, by_id[job["match_id"]],
+            # Day-9.11: snapshot ContextVars at submit time and re-apply in the
+            # worker so the obs.correlation_id (set inside _run_job's obs.run)
+            # propagates to every span/log line emitted from the worker thread.
+            # Without this, ThreadPoolExecutor's default thread reuse means a
+            # worker can inherit a stale correlation_id from a previous job.
+            ctx = contextvars.copy_context()
+            self.pool.submit(ctx.run, self._run_job,
+                             by_id[job["match_id"]],
                              job["window"], events_cache)
             submitted.append(key)
         if submitted:

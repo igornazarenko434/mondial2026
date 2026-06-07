@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (466 tests should stay green as of 0075e7d).
+11. Run `pytest tests/ -q` after every change (482 tests should stay green as of 0075e7d).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -294,6 +294,68 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.11 — LLM news-agent observability — structural attribution (DONE — 482 total).**
+      Closes 10 patches from a fan-out workflow audit. Three structural
+      blockers + seven important quality fixes:
+      - `core/obs/tracing.py::span()` auto-stamps `correlation_id` + `stage`
+        on EVERY span. `schedule/runner.py` snapshots ContextVars at
+        ThreadPoolExecutor submit time and opens `obs.run("match-<id>-<win>")`
+        INSIDE the worker — so a single Honeycomb query
+        `WHERE correlation_id="match-X-T-7m"` now returns the full tree
+        (run → stage:news → gather_context.api_football.lineups → … →
+        gemini.complete → news_agent.parse_validate) instead of just the root.
+      - `core/decision/build_card.py` wraps the news block in
+        `obs.staged("news", match_id=..., window=...)`. Every api_football
+        + brave_search + LLM span becomes a descendant of `stage:news`.
+      - `orchestrator/agents/news_agent.py::gather_context()` wraps each
+        sub-source in its own `obs.span("gather_context.<source>")` and
+        captures structured per-source `ctx_failures` (source, error_class,
+        truncated message) on a ContextVar. `context_meta()` exposes the
+        last call's diagnostics + `brave_gate` reason; build_card stamps
+        them on the card as `news_ctx_failures`, `news_context_sources_ok`,
+        `news_context_truncated_chars`, `news_brave_gate`.
+      - HTTP status_code + retry_after + error_kind columns added to the
+        cost ledger (idempotent ALTER). `obs.external_call` extracts via
+        `getattr(e.response, "status_code")` / `getattr(e, "status_code")`
+        / `e.code()` — distinguishes Gemini 401 vs 429 vs 503 vs
+        Cloudflare-HTML vs requests.Timeout vs ConnectionError.
+      - `RateLimitTimeout` raised by `obs.external_call` when the local
+        token bucket can't be acquired (was: log warning + PROCEED, which
+        produced a downstream 429 indistinguishable from a real one).
+        `LLMRouter` catches it via its existing `except Exception`, records
+        `error_class='RateLimitTimeout'` in `last_fallback_errors`, falls
+        through to the next provider.
+      - `LLMRouter` correctness: `_instrument`'s post-call token row now
+        passes `units=0` (was double-counting Gemini's 1500/day budget).
+        `_ordered_available()` fails CLOSED on over_budget check exception
+        (was silent skip-burn). Skips list (`<name>:no_key` /
+        `:over_budget` / `:over_budget_check_failed`) merged into
+        `last_fallbacks` so the card audit explains BOTH bypassed-up-front
+        and tried-and-failed. `AllProvidersFailed` raised with `from last`
+        to preserve the SDK exception chain.
+      - `_validate_and_clamp` surfaces every silent degradation:
+        `home_delta_clamped`, `home_delta_raw`, `delta_parse_error`,
+        `confidence_was_defaulted`, `confidence_raw`, `notes_truncated`,
+        `notes_original_count`, `notes_format_error`, `schema_error`.
+        `analyze()` stamps `json_mode_fallback_used` +
+        `json_mode_error_class` when the json_mode=True path dies and we
+        retry without it.
+      - `web_search._budget_clear()` now returns `(ok, reason)` —
+        `no_key` / `monthly_brake` / `daily_cap` / `monthly_check_failed`.
+        News-agent picks a SPECIFIC context placeholder and stamps
+        `news_brave_gate` on the card. A sick ledger now fails CLOSED.
+      - `build_card` unifies `card['news_failure']` and
+        `failure_reasons['news']` to a single `news_failure_canonical` so
+        the two fields are byte-identical across success/partial/exception.
+      - `cost.CostLedger.record()` wraps its INSERT in try/except sqlite3
+        (a sick ledger must not replace the real upstream exception) and
+        UTF-8-safe truncates `error_message` (chopped 4-byte codepoint
+        can't poison downstream readers).
+      Tests: 16 new in `tests/test_news_observability_day911.py`.
+      After this commit, the runbook "which step in the news pipeline
+      failed, why, and where" is answerable in under 60 seconds via
+      `tools/llm_audit.py` + one Honeycomb correlation_id query — no
+      journalctl required.
 - [x] **Day 9.10 — LLM news-agent observability hardening (DONE — 466 total).**
       Four targeted fixes so a missed-news incident is debuggable without
       grepping journalctl. Closes the LLM-side gaps audit identified:

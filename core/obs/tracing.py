@@ -47,11 +47,31 @@ def _setup():
 
 @contextmanager
 def span(name: str, **attrs):
+    """Open an OTel span. Day-9.11: auto-stamps `correlation_id` and `stage`
+    on every span so a single Honeycomb query `WHERE correlation_id = X`
+    returns the full tree (run → stage:news → gemini.complete) instead of
+    just the root."""
     _setup()
     if _tracer is None:
         yield None
         return
+    # Read context-var values eagerly so we never crash on an empty stack.
+    try:
+        from core.obs.logging import correlation_id as _cid
+        cid = _cid.get()
+    except Exception:                                  # noqa: BLE001
+        cid = "-"
+    try:
+        from core.obs import current_stage as _stg
+        stg = _stg.get()
+    except Exception:                                  # noqa: BLE001
+        stg = "-"
     with _tracer.start_as_current_span(name) as sp:
+        # Auto-stamp BEFORE caller attrs so the caller can override if needed.
+        if cid and cid != "-":
+            sp.set_attribute("correlation_id", cid)
+        if stg and stg != "-":
+            sp.set_attribute("stage", stg)
         for k, v in attrs.items():
             sp.set_attribute(k, v)
         yield sp

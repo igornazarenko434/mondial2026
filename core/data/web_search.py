@@ -64,12 +64,19 @@ def _day_count() -> int:
         return 0
 
 
-def _budget_clear() -> bool:
+def _budget_clear() -> tuple[bool, str]:
     """Multi-gate guard: short-circuit BEFORE the HTTP request if either the
     monthly fraction or the daily cap would be exceeded.
 
-    Returns True when it's safe to call; logs WARN and returns False otherwise.
-    """
+    Day-9.11: returns (ok, reason) where reason distinguishes the FOUR ways
+    a Brave call gets blocked: 'no_key' / 'monthly_brake' / 'daily_cap' /
+    'monthly_check_failed' / 'ok'. The news_agent reads this to put a
+    SPECIFIC placeholder in the LLM context AND to stamp news_brave_gate
+    on the card. Fails CLOSED on monthly_check exception (was: log.debug +
+    proceed, which made a sick ledger silently burn budget)."""
+    # Gate 0: key set?
+    if not available():
+        return False, "no_key"
     # Gate 1: monthly fraction
     try:
         from core.obs.cost import ledger
@@ -82,9 +89,10 @@ def _budget_clear() -> bool:
                 log.warning("brave_search MONTHLY brake hit: %d/%d (%.0f%%) >= %.0f%% — skipping",
                             used, budget, 100 * used / budget,
                             100 * BRAVE_BUDGET_BRAKE_FRACTION)
-                return False
+                return False, "monthly_brake"
     except Exception as e:                                # noqa: BLE001
-        log.debug("brave_search monthly check failed: %s", e)
+        log.warning("brave_search monthly check failed: %s — failing closed", e)
+        return False, "monthly_check_failed"
 
     # Gate 2: daily soft cap (rolling 24h)
     if BRAVE_DAILY_LIMIT > 0:
@@ -92,8 +100,8 @@ def _budget_clear() -> bool:
         if used_today >= BRAVE_DAILY_LIMIT:
             log.warning("brave_search DAILY cap hit: %d/%d in last 24h — skipping",
                         used_today, BRAVE_DAILY_LIMIT)
-            return False
-    return True
+            return False, "daily_cap"
+    return True, "ok"
 
 
 def quota_status() -> dict:
@@ -110,7 +118,9 @@ def quota_status() -> dict:
         out["month_budget"] = int(st.get("budget") or 2000)
         out["month_fraction"] = round(out["month_used"] / max(1, out["month_budget"]), 3)
         out["day_used"] = _day_count()
-        out["ok"] = _budget_clear()
+        ok, reason = _budget_clear()
+        out["ok"] = ok
+        out["reason"] = reason         # Day-9.11: distinguish blocker
     except Exception as e:                                # noqa: BLE001
         log.debug("quota_status failed: %s", e)
     return out
@@ -161,7 +171,8 @@ def web_search(query: str, n: int = 5, snippet_len: int = 250,
         return []
     # Quota gates BEFORE the HTTP — see module docstring; this never blocks
     # delivery, just returns no web results so API-Football alone drives the LLM.
-    if not _budget_clear():
+    ok, _reason = _budget_clear()
+    if not ok:
         return []
     from core import obs
     params = {"q": query, "count": max(1, min(n, 20)), "freshness": freshness,

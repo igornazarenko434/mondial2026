@@ -218,9 +218,35 @@ def _fmt_web_results(results: list[dict], snippet_len: int) -> str:
     return "\n".join(rows)
 
 
+# Module-level ContextVar so gather_context's per-source failure detail
+# travels back to build_card without changing the function signature
+# (callers/tests that import gather_context still get a string back).
+# Day-9.11 — read with `context_meta()` after each gather_context call.
+from contextvars import ContextVar
+_last_context_meta: ContextVar[dict] = ContextVar("_last_context_meta", default={})
+
+
+def context_meta() -> dict:
+    """Read the per-source diagnostics from the LAST gather_context() call on
+    this thread/task. Always returns a dict; empty if gather_context wasn't
+    called. Shape:
+      {'ctx_failures': [{'source', 'error_class', 'error_message'}, ...],
+       'sources_ok':   ['api_football.lineups', 'brave_search', ...],
+       'context_truncated_chars': int,
+       'context_chars': int}
+    """
+    return dict(_last_context_meta.get() or {})
+
+
 def gather_context(match: dict, window: str = "T-60m",
                    *, api_football=None, web_search_many=None,
                    now_utc: datetime | None = None) -> str:
+    """See module docstring. NOTE on the gate-check: when `web_search_many`
+    is INJECTED by a caller (notably tests), the brave gate-check is
+    bypassed — the caller is taking ownership of when/whether Brave runs.
+    The real production code path (web_search_many=None) still runs the
+    gate-check so we don't burn budget unnecessarily."""
+    _brave_injected = web_search_many is not None
     """Assemble the pre-match context block fed to the LLM.
 
     Sources tried, in priority order (each independently graceful):
@@ -229,6 +255,12 @@ def gather_context(match: dict, window: str = "T-60m",
 
     Returns the assembled context string (≤ CONTEXT_MAX_CHARS). Empty string
     if nothing usable was found (the LLM will then output NEUTRAL).
+
+    Day-9.11: each sub-source is wrapped in its own obs.span so Honeycomb
+    shows them as children of stage:news. Per-source failures are appended
+    to a _last_context_meta ContextVar (read via `context_meta()`) so
+    build_card can stamp ctx_failures / sources_ok / context_truncated_chars
+    on the card without changing this function's return type.
     """
     if api_football is None:
         from core.data import api_football as api_football  # noqa: F811
@@ -243,6 +275,24 @@ def gather_context(match: dict, window: str = "T-60m",
     local_iso = match.get("kickoff_local") or ""
     nowstr = (now_utc or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%MZ")
 
+    ctx_failures: list[dict] = []
+    sources_ok: list[str] = []
+
+    def _record_failure(source: str, e: BaseException) -> None:
+        ctx_failures.append({
+            "source": source,
+            "error_class": type(e).__name__,
+            "error_message": str(e)[:200],
+        })
+
+    # Lazy-import obs.span — keep gather_context cheap when obs isn't loaded
+    try:
+        from core.obs import span as _span
+    except Exception:                                  # noqa: BLE001
+        from contextlib import nullcontext
+        def _span(name, **attrs):                       # type: ignore
+            return nullcontext()
+
     # --- Header (Layer 3 dating)
     parts = [
         f"[MATCH: {home} vs {away}, kickoff {kickoff_utc or local_iso}, "
@@ -252,55 +302,114 @@ def gather_context(match: dict, window: str = "T-60m",
 
     # --- API-Football block (T-60m and T-15m — lineups don't exist at T-24h)
     if window in ("T-60m", "T-15m"):
-        try:
-            fid = api_football.find_fixture_id(home, away, kickoff_utc)
-            if fid:
-                lineups = api_football.fetch_lineups(fid)
-                lineup_txt = _fmt_lineups(lineups)
-                if lineup_txt:
-                    parts.append(f"[SOURCE: API-Football /fixtures/lineups]\n{lineup_txt}")
+        with _span("gather_context.api_football.lineups", source="api_football"):
+            try:
+                fid = api_football.find_fixture_id(home, away, kickoff_utc)
+                if fid:
+                    lineups = api_football.fetch_lineups(fid)
+                    lineup_txt = _fmt_lineups(lineups)
+                    if lineup_txt:
+                        parts.append(f"[SOURCE: API-Football /fixtures/lineups]\n{lineup_txt}")
+                        sources_ok.append("api_football.lineups")
+                    else:
+                        parts.append("[SOURCE: API-Football /fixtures/lineups]\n"
+                                      "lineup not yet published")
+                        sources_ok.append("api_football.lineups:empty")
                 else:
-                    parts.append("[SOURCE: API-Football /fixtures/lineups]\n"
-                                  "lineup not yet published")
-            else:
-                parts.append("[SOURCE: API-Football]\nfixture not found in api-football "
-                              "(WC 2026 season may not be populated yet)")
-        except Exception as e:                       # noqa: BLE001
-            log.warning("gather_context lineups failed: %s", e)
-            parts.append("[SOURCE: API-Football]\nlineups source unavailable")
+                    parts.append("[SOURCE: API-Football]\nfixture not found in api-football "
+                                  "(WC 2026 season may not be populated yet)")
+                    sources_ok.append("api_football.lineups:no_fixture")
+            except Exception as e:                   # noqa: BLE001
+                log.warning("gather_context lineups failed (%s): %s",
+                            type(e).__name__, e)
+                _record_failure("api_football.lineups", e)
+                parts.append("[SOURCE: API-Football]\nlineups source unavailable")
 
         # Injuries per team — best-effort, never blocks
         for side, team_name in [("home", home), ("away", away)]:
-            try:
-                tid = api_football.find_team_id(team_name)
-                if tid:
-                    inj = api_football.fetch_injuries(tid)
-                    parts.append(f"[SOURCE: API-Football /injuries — {team_name}]\n"
-                                  f"{_fmt_injuries(team_name, inj)}")
-            except Exception as e:                   # noqa: BLE001
-                log.warning("gather_context injuries failed for %s: %s",
-                            team_name, e)
+            source_id = f"api_football.injuries.{side}"
+            with _span(f"gather_context.{source_id}", source="api_football",
+                       team=team_name):
+                try:
+                    tid = api_football.find_team_id(team_name)
+                    if tid:
+                        inj = api_football.fetch_injuries(tid)
+                        parts.append(f"[SOURCE: API-Football /injuries — {team_name}]\n"
+                                      f"{_fmt_injuries(team_name, inj)}")
+                        sources_ok.append(source_id)
+                except Exception as e:                 # noqa: BLE001
+                    log.warning("gather_context injuries failed for %s (%s): %s",
+                                team_name, type(e).__name__, e)
+                    _record_failure(source_id, e)
 
     # --- Brave Search block (all windows that should_search)
-    try:
-        qs = search_queries(home, away, kickoff_utc=kickoff_utc,
-                            stage=stage, group=group, window=window)
-        if qs:
-            results = web_search_many(qs, n=PER_QUERY_RESULTS,
-                                       snippet_len=SNIPPET_LEN)
-            web_txt = _fmt_web_results(results, SNIPPET_LEN)
-            if web_txt:
-                parts.append(f"[SOURCE: brave_search × {len(qs)} queries]\n{web_txt}")
+    # Day-9.11: ask Brave's gate WHY it's blocked (if it is) so we can place
+    # a specific placeholder + stamp brave_gate on the meta. The four
+    # blockers were collapsed into one ambiguous "(no key or no results)"
+    # line before; that line lied about no_key vs daily_cap vs ledger error.
+    brave_gate_reason = "ok"
+    if _brave_injected:
+        # Test / explicit-injection path: caller owns Brave.
+        ok_brave = True
+    else:
+        try:
+            from core.data.web_search import _budget_clear as _brave_gate
+            ok_brave, brave_gate_reason = _brave_gate()
+        except Exception as e:                         # noqa: BLE001
+            ok_brave, brave_gate_reason = False, "monthly_check_failed"
+            log.warning("brave gate-check failed (%s): %s", type(e).__name__, e)
+    with _span("gather_context.brave_search", source="brave_search",
+                brave_gate=brave_gate_reason):
+        try:
+            if not ok_brave:
+                # Brave is blocked — be explicit so the LLM context AND the
+                # post-hoc card audit show WHICH gate fired.
+                _placeholder = {
+                    "no_key":             "(BRAVE_SEARCH_API_KEY not configured)",
+                    "monthly_brake":      "(monthly budget brake hit)",
+                    "daily_cap":          "(daily cap hit)",
+                    "monthly_check_failed": "(ledger error — brave check failed closed)",
+                }.get(brave_gate_reason, "(brave blocked: " + brave_gate_reason + ")")
+                parts.append(f"[SOURCE: brave_search]\n{_placeholder}")
+                sources_ok.append(f"brave_search:{brave_gate_reason}")
             else:
-                parts.append("[SOURCE: brave_search]\n"
-                              "(no key configured or no results)")
-    except Exception as e:                           # noqa: BLE001
-        log.warning("gather_context web_search failed: %s", e)
+                qs = search_queries(home, away, kickoff_utc=kickoff_utc,
+                                    stage=stage, group=group, window=window)
+                if qs:
+                    results = web_search_many(qs, n=PER_QUERY_RESULTS,
+                                               snippet_len=SNIPPET_LEN)
+                    web_txt = _fmt_web_results(results, SNIPPET_LEN)
+                    if web_txt:
+                        parts.append(f"[SOURCE: brave_search × {len(qs)} queries]\n{web_txt}")
+                        sources_ok.append("brave_search")
+                    else:
+                        parts.append("[SOURCE: brave_search]\n"
+                                      "(brave returned no results)")
+                        sources_ok.append("brave_search:no_results")
+        except Exception as e:                         # noqa: BLE001
+            log.warning("gather_context web_search failed (%s): %s",
+                        type(e).__name__, e)
+            _record_failure("brave_search", e)
 
     txt = "\n\n".join(parts)
+    context_truncated_chars = 0
     if len(txt) > CONTEXT_MAX_CHARS:
         # Trim from the end — header + API-Football data stays, web tail is cut
+        original_len = len(txt)
         txt = txt[:CONTEXT_MAX_CHARS - 30] + "\n…(truncated)"
+        context_truncated_chars = original_len - len(txt)
+        log.warning("news context truncated %d → %d chars (dropped %d) at window=%s",
+                    original_len, len(txt), context_truncated_chars, window)
+
+    # Stash on the ContextVar — build_card / analyze callers read via
+    # context_meta() to surface on the card without changing our return type.
+    _last_context_meta.set({
+        "ctx_failures": ctx_failures,
+        "sources_ok": sources_ok,
+        "context_truncated_chars": context_truncated_chars,
+        "context_chars": len(txt),
+        "brave_gate": brave_gate_reason,        # Day-9.11
+    })
     return txt
 
 
@@ -311,6 +420,19 @@ def _clamp(x) -> float:
         return max(-DELTA_CLAMP, min(DELTA_CLAMP, float(x)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _clamp_with_provenance(x) -> tuple[float, bool, bool]:
+    """Day-9.11: like _clamp() but also returns (raw_ok, was_clamped) so
+    `_validate_and_clamp` can surface whether the LLM emitted a junk type
+    (raw_ok=False) or merely a value outside ±DELTA_CLAMP (was_clamped=True).
+    Used for the card's news_home_delta_clamped / news_home_delta_raw fields."""
+    try:
+        fx = float(x)
+    except (TypeError, ValueError):
+        return 0.0, False, False
+    clamped = abs(fx) > DELTA_CLAMP
+    return max(-DELTA_CLAMP, min(DELTA_CLAMP, fx)), True, clamped
 
 
 def _parse_json_lenient(raw: str) -> tuple[dict | None, str]:
@@ -352,31 +474,84 @@ def _validate_and_clamp(data: dict | None) -> dict:
     scenarios exist (e.g. weather hits both teams + one team rotates), so
     we don't second-guess via halving — that was over-aggressive. The
     auditable notes[] field is the human check.
+
+    Day-9.11: every silent degradation now surfaces a *_was_defaulted /
+    *_clamped / *_raw / schema_error flag on the output so the card can
+    distinguish "LLM gave 0.7 → clamped" from "LLM gave 'high' → coerced
+    to numeric default 0.0" from "LLM gave the JSON list instead of dict".
     """
-    if not isinstance(data, dict):
-        return dict(NEUTRAL)
     out = dict(NEUTRAL)
-    hd = _clamp(data.get("home_goal_delta", 0.0))
-    ad = _clamp(data.get("away_goal_delta", 0.0))
-    conf = data.get("confidence", "low")
-    if conf not in ("low", "medium", "high"):
+    if data is None:
+        out["schema_error"] = "none"
+        return out
+    if not isinstance(data, dict):
+        out["schema_error"] = "non_dict_root"
+        out["home_delta_raw"] = repr(data)[:40]
+        return out
+
+    # Deltas with full provenance
+    raw_h = data.get("home_goal_delta", 0.0)
+    raw_a = data.get("away_goal_delta", 0.0)
+    hd, h_ok, h_clamped = _clamp_with_provenance(raw_h)
+    ad, a_ok, a_clamped = _clamp_with_provenance(raw_a)
+    if not h_ok:
+        log.warning("news LLM emitted non-numeric home_goal_delta %r — using 0.0", raw_h)
+    if not a_ok:
+        log.warning("news LLM emitted non-numeric away_goal_delta %r — using 0.0", raw_a)
+
+    # Confidence with default tracking
+    raw_conf = data.get("confidence", None)
+    confidence_defaulted = False
+    if raw_conf not in ("low", "medium", "high"):
+        confidence_defaulted = True
         conf = "low"
+    else:
+        conf = raw_conf
 
-    notes = data.get("notes") or []
-    if not isinstance(notes, list):
+    # Notes — track original count + truncation + format errors
+    raw_notes = data.get("notes")
+    notes_format_error = False
+    notes_original_count = 0
+    if raw_notes is None:
         notes = []
-    notes = [str(n)[:80] for n in notes[:5]]
+    elif not isinstance(raw_notes, list):
+        notes_format_error = True
+        notes = []
+    else:
+        notes_original_count = len(raw_notes)
+        notes = [str(n)[:80] for n in raw_notes[:5]]
+    notes_truncated = notes_original_count > 5
 
-    discarded = data.get("discarded_sources") or []
-    if not isinstance(discarded, list):
+    # discarded_sources — same shape
+    raw_disc = data.get("discarded_sources")
+    if raw_disc is None or not isinstance(raw_disc, list):
         discarded = []
-    discarded = [str(s)[:120] for s in discarded[:5]]
+    else:
+        discarded = [str(s)[:120] for s in raw_disc[:5]]
 
     out["home_goal_delta"] = round(hd, 3)
     out["away_goal_delta"] = round(ad, 3)
     out["confidence"] = conf
     out["notes"] = notes
     out["discarded_sources"] = discarded
+    # Day-9.11 provenance fields — only set the "noisy" ones to avoid
+    # bloating successful cards
+    out["home_delta_raw"] = repr(raw_h)[:40]
+    out["away_delta_raw"] = repr(raw_a)[:40]
+    if h_clamped:
+        out["home_delta_clamped"] = True
+    if a_clamped:
+        out["away_delta_clamped"] = True
+    if not h_ok or not a_ok:
+        out["delta_parse_error"] = True
+    if confidence_defaulted:
+        out["confidence_was_defaulted"] = True
+        out["confidence_raw"] = repr(raw_conf)[:40]
+    if notes_truncated:
+        out["notes_truncated"] = True
+        out["notes_original_count"] = notes_original_count
+    if notes_format_error:
+        out["notes_format_error"] = True
     return out
 
 
@@ -402,25 +577,50 @@ def analyze(home: str, away: str, context_text: str,
     prompt = (f"Fixture: {home} (home) vs {away} (away).\n\n"
               f"Pre-match context:\n{context_text}\n\n"
               f"Return ONLY the JSON adjustment defined in the system prompt.")
-    # Try strict JSON mode first; fall back to plain text + lenient parse
+    # Try strict JSON mode first; fall back to plain text + lenient parse.
+    # Day-9.11: capture the json_mode fallback as observability — if a
+    # provider doesn't support json_mode and we silently re-call without it,
+    # the user can now see WHICH provider needed the fallback and why.
+    json_mode_fallback_used = False
+    json_mode_error_class: str | None = None
     try:
         raw = llm.complete(SYSTEM, prompt, json_mode=True, max_tokens=500)
-    except Exception:
+    except Exception as e_jm:                          # noqa: BLE001
+        json_mode_fallback_used = True
+        json_mode_error_class = type(e_jm).__name__
+        log.warning("json_mode=True failed (%s: %s); retrying plain text",
+                    json_mode_error_class, e_jm)
         raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=500)
-    parsed, tier = _parse_json_lenient(raw)
-    out = _validate_and_clamp(parsed)
+    # Wrap parse+validate in a span — Honeycomb now shows "parse_validate"
+    # under stage:news so the auditor sees WHERE in the agent it landed.
+    try:
+        from core.obs import span as _span
+    except Exception:                                  # noqa: BLE001
+        from contextlib import nullcontext
+        def _span(name, **attrs):                       # type: ignore
+            return nullcontext()
+    with _span("news_agent.parse_validate", raw_len=len(raw or "")):
+        parsed, tier = _parse_json_lenient(raw)
+        out = _validate_and_clamp(parsed)
     out["provider"] = getattr(llm, "last_provider", None)
     out["fallbacks_used"] = list(getattr(llm, "last_fallbacks", []) or [])
     out["fallback_errors"] = dict(getattr(llm, "last_fallback_errors", {}) or {})
     out["parse_tier"] = tier
-    if tier == "failed":
-        # Capture the head of the bad output so we can see why the LLM's
-        # response wasn't parseable. Logged AND stamped on the card.
-        excerpt = str(raw)[:200] if raw else ""
+    # Day-9.11: capture raw excerpt on EITHER failed OR regex_repair — the
+    # regex repair path means the LLM didn't follow the strict-JSON
+    # instruction, which is still a quality signal worth surfacing.
+    # Capacity bumped from 200 → 500 chars so a "JSON with explanation"
+    # output is fully visible.
+    if tier in ("failed", "regex_repair"):
+        excerpt = str(raw)[:500] if raw else ""
         out["raw_excerpt"] = excerpt
-        log.warning("LLM output for %s vs %s could not be parsed (provider=%s); "
-                    "first 200 chars: %r",
-                    home, away, out["provider"], excerpt)
+        if tier == "failed":
+            log.warning("LLM output for %s vs %s could not be parsed (provider=%s); "
+                        "first 500 chars: %r",
+                        home, away, out["provider"], excerpt)
+    if json_mode_fallback_used:
+        out["json_mode_fallback_used"] = True
+        out["json_mode_error_class"] = json_mode_error_class
     return out
 
 

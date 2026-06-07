@@ -41,32 +41,48 @@ class LLMRouter:
         # so the news_agent can stamp the *specific* upstream reason on the
         # card, not just "fallback happened".
         self.last_fallback_errors: dict[str, dict] = {}
+        # Day-9.11: skip-list audit — names suffixed with :no_key /
+        # :over_budget / :over_budget_check_failed that were bypassed
+        # BEFORE the chain even tried them. Merged into last_fallbacks
+        # by complete()/complete_json() so the card's news_fallbacks_used
+        # field shows both bypassed-up-front and tried-and-failed.
+        self._last_skips: list[str] = []
 
     def _ordered_available(self) -> list[LLMProvider]:
         """Providers in chain order, filtered by (a) key configured and
         (b) cost-ledger budget NOT exhausted. Records each skip reason on
-        `last_fallbacks` (suffixed `:no_key` or `:over_budget`) so the
-        audit trail explains WHY a provider was bypassed."""
+        `last_skips` (suffixed `:no_key` or `:over_budget`) so the
+        audit trail explains WHY a provider was bypassed.
+
+        Day-9.11: skip-list audit AND fail-closed over_budget check (if the
+        ledger raises, conservatively skip the provider rather than burning
+        a possibly-over-budget call)."""
         out = []
+        skips: list[str] = []
         for name in self.chain:
             p = self.registry.get(name)
             if not p:
                 continue
             if not p.available():
                 log.info("LLM provider '%s' configured but not available (no key)", name)
+                skips.append(f"{name}:no_key")
                 continue
-            # Day-9.10: pre-flight over-budget check. Otherwise we'd burn the
-            # call, get a 429, log it, fall back — same effect but with one
-            # wasted upstream request and a noisy "fallback" line that doesn't
-            # explain "we already knew Gemini was at 1500/1500".
+            # Day-9.10/9.11: pre-flight over-budget check, fail CLOSED on error.
             try:
                 from core.obs.cost import ledger
                 if ledger().over_budget(name):
                     log.warning("LLM provider '%s' over budget; skipping", name)
+                    skips.append(f"{name}:over_budget")
                     continue
-            except Exception:                              # noqa: BLE001
-                pass
+            except Exception as e:                         # noqa: BLE001
+                log.warning("over_budget check failed for %s (%s); "
+                            "skipping provider conservatively", name, e)
+                skips.append(f"{name}:over_budget_check_failed")
+                continue
             out.append(p)
+        # Stash on the instance so complete()/complete_json() can merge into
+        # last_fallbacks. Tests use this to assert skip attribution.
+        self._last_skips = skips
         return out
 
     def _instrument(self, provider, fn, system, prompt, **kw):
@@ -87,27 +103,35 @@ class LLMRouter:
         # Post-call: re-record an estimated token count via the cost ledger
         # so quota tracking reflects real usage (external_call records on
         # exit but defaults to 0 tokens since we didn't know yet).
+        # Day-9.11: pass units=0 explicitly — the first ledger.record call
+        # (inside external_call) already counted units=1, so without this
+        # the Gemini daily-1500 budget would tick TWICE per real call.
         try:
             from core.obs.cost import ledger
             from core.obs.logging import correlation_id
             txt = out_holder["text"]
             est = (len(system) + len(prompt) + len(str(txt))) // 4
-            ledger().record(provider.name, "complete:tokens", tokens=est,
+            ledger().record(provider.name, "complete:tokens", units=0,
+                              tokens=est,
                               correlation_id=correlation_id.get())
-        except Exception:                                 # noqa: BLE001
-            pass
+        except Exception as e:                              # noqa: BLE001
+            log.warning("ledger token-update failed for %s: %s", provider.name, e)
         return out_holder["text"]
 
     def complete(self, system: str, prompt: str, **kw) -> str:
         last = None
         tried: list[str] = []
         errors: dict[str, dict] = {}
-        for p in self._ordered_available():
+        available = self._ordered_available()
+        for p in available:
             try:
                 result = self._instrument(p, p.complete, system, prompt, **kw)
                 # Success — stamp which model answered (for card audit trail).
                 self.last_provider = p.name
-                self.last_fallbacks = tried
+                # Day-9.11: include skipped-up-front providers in the audit
+                # trail so a card showing news_fallbacks_used=['gemini:no_key',
+                # 'claude'] explains both bypass reasons end-to-end.
+                self.last_fallbacks = list(self._last_skips) + tried
                 self.last_fallback_errors = errors
                 return result
             except Exception as e:               # noqa: BLE001 - fall back on any error
@@ -118,20 +142,23 @@ class LLMRouter:
                             p.name, type(e).__name__, e)
                 last = e
         self.last_provider = None
-        self.last_fallbacks = tried
+        self.last_fallbacks = list(self._last_skips) + tried
         self.last_fallback_errors = errors
+        # Day-9.11: preserve the SDK exception chain via `from last` so
+        # tracebacks show the upstream provider error, not just the wrapper.
         raise AllProvidersFailed(
-            f"no usable LLM in chain {self.chain}; last error: {last}")
+            f"no usable LLM in chain {self.chain}; last error: {last}") from last
 
     def complete_json(self, system: str, prompt: str, **kw) -> dict:
         last = None
         tried: list[str] = []
         errors: dict[str, dict] = {}
-        for p in self._ordered_available():
+        available = self._ordered_available()
+        for p in available:
             try:
                 result = self._instrument(p, p.complete_json, system, prompt, **kw)
                 self.last_provider = p.name
-                self.last_fallbacks = tried
+                self.last_fallbacks = list(self._last_skips) + tried
                 self.last_fallback_errors = errors
                 return result
             except Exception as e:               # noqa: BLE001
@@ -142,7 +169,7 @@ class LLMRouter:
                             p.name, type(e).__name__, e)
                 last = e
         self.last_provider = None
-        self.last_fallbacks = tried
+        self.last_fallbacks = list(self._last_skips) + tried
         self.last_fallback_errors = errors
         raise AllProvidersFailed(
-            f"no usable LLM in chain {self.chain}; last error: {last}")
+            f"no usable LLM in chain {self.chain}; last error: {last}") from last
