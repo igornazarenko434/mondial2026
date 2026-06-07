@@ -25,7 +25,7 @@ PROVIDER_LIMITS = {
     # ---- API-keyed providers (limits = published free-tier ceilings) ----
     "football_data": {"rate": 10, "per": 60,   "budget": None,  "budget_period": None},   # 10 req/min, no daily cap on WC
     "odds_api":      {"rate": 1,  "per": 2,    "budget": 500,   "budget_period": "month"},# 500 credits/mo (credits = markets x regions)
-    "api_football":  {"rate": 5,  "per": 60,   "budget": 100,   "budget_period": "day"},  # 100 req/day (actual rate 30/min — kept conservative)
+    "api_football":  {"rate": 10, "per": 60,   "budget": 100,   "budget_period": "day"},  # Free plan: 10 req/min, 100/day (verified against dashboard Jun 2026)
     "gemini":        {"rate": 15, "per": 60,   "budget": 1500,  "budget_period": "day"},  # 2.5 Flash free tier: 15 RPM, 1500 RPD
     "claude":        {"rate": 50, "per": 60,   "budget": None,  "budget_period": None},   # Haiku 4.5 PAYG: ~50 RPM tier
     "openai":        {"rate": 60, "per": 60,   "budget": None,  "budget_period": None},   # PAYG; tier-dependent
