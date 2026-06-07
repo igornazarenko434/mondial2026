@@ -131,9 +131,12 @@ systemctl status --no-pager mondial2026.service || true
 
 bold "7. nightly backup cron + daily Negev standings sync"
 TMP_CRON="$(mktemp)"
+# IDEMPOTENT: filter ALL lines we manage so re-running bootstrap doesn't
+# duplicate them. Add new filter lines here whenever we add a new cron.
 crontab -u "$INSTALL_USER" -l 2>/dev/null \
     | grep -v 'mondial2026/infra/backup.sh' \
     | grep -v 'mondial2026/tools/sync_negev_standings.py' \
+    | grep -v 'mondial2026/tools/post_match_audit.py' \
     > "$TMP_CRON" || true
 # Backup at 03:15 IDT, sync at 07:00 IDT (2h before the 09:00 daily summary)
 echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> "$TMP_CRON"
