@@ -541,7 +541,7 @@ To pick up the project:
 
 To make a change:
 
-1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 438+ passing).
+1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 466+ passing).
 2. Commit + push to `main` on GitHub.
 3. On the VM: `/home/mondial/mondial2026/infra/update.sh`.
 4. Verify with `journalctl -u mondial2026 -f` and the queries in §7.

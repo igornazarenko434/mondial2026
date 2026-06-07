@@ -189,7 +189,7 @@ from Negev's server-side numbers every 2 hours during match windows.
    messages without the ⚠️ prefix that `delivery.alert()` prepends. Used by
    ☀️ daily summary, 📊 standings sync, 🔍 audit.
 
-**Test count after Day-9.8**: 438 (was 370 at Day-9.5).
+**Test count progression**: 370 (Day-9.5) → 422 (Day-9.7) → 438 (Day-9.8) → 450 (Day-9.9 Negev failure-alert) → 466 (Day-9.10 LLM observability hardening).
 
 ## (kept for reference) ORIGINAL Step 2 spec
 

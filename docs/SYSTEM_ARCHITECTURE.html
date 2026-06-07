@@ -234,7 +234,7 @@
 
 <header>
   <h1>Mondial 2026 — System Architecture</h1>
-  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07 (Day 9.8: post-match Negev sync workflow + 4-line cron canonical).</div>
+  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07 (Day 9.8 post-match Negev sync + 4-line cron canonical; Day 9.9 ⚠ Negev failure-alert; Day 9.10 LLM error_class + parse_tier + raw_excerpt + over-budget short-circuit + tools/llm_audit.py).</div>
 </header>
 
 <nav class="toc">
@@ -293,7 +293,7 @@
     <tr><td>Delivery</td><td>Telegram Bot API</td><td>Push-to-phone, free, 30 msg/sec global</td></tr>
     <tr><td>Historical results (DC fit)</td><td>github.com/martj42/international_results</td><td>Maintained CSV, ~49k rows back to 1872</td></tr>
     <tr><td>Elo ratings</td><td>eloratings.net/World.tsv</td><td>Standard reference, updated daily</td></tr>
-    <tr><td>Test framework</td><td>pytest</td><td>438 tests, ~17s full suite (after Day-9.7 + Day-9.8 additions)</td></tr>
+    <tr><td>Test framework</td><td>pytest</td><td>466 tests, ~17s full suite (after Day-9.10 LLM observability additions)</td></tr>
     <tr><td>Friends' Toto app</td><td>negev-toto.web.app (Firebase Auth + Firestore)</td><td>22 MCP tools; 3 writes gated by <code>NEGEV_ALLOW_WRITES=1</code> + module check + Firestore rules</td></tr>
     </tbody>
   </table>
@@ -540,11 +540,39 @@ detonator    INTEGER (0/1)   tagged from CSV; preserved on re-ingest</code></pre
     </ol>
     <table>
       <tr><th>Inputs</th><td>Match + window + stage + group</td></tr>
-      <tr><th>Outputs</th><td><code>{home_goal_delta, away_goal_delta, confidence, notes, provider, fallbacks_used, failure}</code></td></tr>
+      <tr><th>Outputs (the news_meta block)</th><td><code>{home_goal_delta, away_goal_delta, confidence, notes, provider, fallbacks_used, fallback_errors, parse_tier, raw_excerpt, failure, failure_class}</code></td></tr>
       <tr><th>Cost per match</th><td>3 Brave (T-24h) + 4 Brave (T-60m) + 0-2 Brave (T-15m, cached) + 1 LLM call per window</td></tr>
       <tr><th>5-layer guardrails</th><td>L1 dated queries + WC2026 anchor → L2 source-side freshness → L3 capped context → L4 SYSTEM prompt with worked examples → L5 strict→regex→NEUTRAL parse + ±0.6 clamp</td></tr>
     </table>
   </div>
+
+  <h3>LLM-side observability (Day-9.10)</h3>
+  <div class="panel ok">
+    <p>Every match card now persists enough state to root-cause a missed-news incident <strong>without journalctl</strong>:</p>
+    <table>
+      <tr><th>Card field</th><th>Possible values</th><th>Answers</th></tr>
+      <tr><td><code>news_provider</code></td><td><code>gemini</code> / <code>claude</code> / <code>openai</code> / <code>null</code></td><td>which LLM actually answered</td></tr>
+      <tr><td><code>news_fallbacks_used</code></td><td><code>["gemini"]</code> (e.g. claude answered after gemini died)</td><td>which providers were tried before success</td></tr>
+      <tr><td><code>news_fallback_errors</code></td><td><code>{"gemini": {"error_class": "RateLimitError", "error_message": "429 Quota exceeded ..."}}</code></td><td>WHY each bypassed provider died</td></tr>
+      <tr><td><code>news_parse_tier</code></td><td><code>strict</code> / <code>regex_repair</code> / <code>empty</code> / <code>failed</code> / <code>never_called</code></td><td>did the LLM produce valid JSON, JSON-in-prose, garbage, or did we never reach parse?</td></tr>
+      <tr><td><code>news_raw_excerpt</code></td><td>first 200 chars of the unparseable output (only when <code>parse_tier == "failed"</code>)</td><td>what the LLM literally returned when we couldn't parse it</td></tr>
+      <tr><td><code>news_failure</code> / <code>news_failure_class</code></td><td>short reason + exception type (<code>AllProvidersFailed</code>, <code>APITimeoutError</code>, …)</td><td>why news contributed zero on a total failure</td></tr>
+    </table>
+    <p>The cost ledger row for every LLM call adds two columns: <code>error_class</code> (e.g. <code>RateLimitError</code>) and <code>error_message</code> (first 200 chars of the exception). Combined with the existing <code>correlation_id</code> + <code>duration_ms</code>, a Honeycomb query <code>WHERE correlation_id = X</code> shows the full span tree (run → provider.complete) and the ledger row pinpoints class + message.</p>
+    <p><code>LLMRouter._ordered_available()</code> now pre-flight-skips a provider when <code>ledger().over_budget(name)</code> is True — no more wasted 429 + noisy fallback line. The skip is logged at <code>WARNING</code> and visible in <code>tools/llm_audit.py</code> §1 (Chain State).</p>
+  </div>
+
+  <h3>The LLM-debug runbook tool: <code>tools/llm_audit.py</code></h3>
+  <p>Read-only; no API calls. Five sections answer the questions you actually have at 2 AM:</p>
+  <pre><code>sudo -u mondial bash -c 'cd /home/mondial/mondial2026 &amp;&amp; set -a &amp;&amp; source .env &amp;&amp; set +a &amp;&amp; PYTHONPATH=. .venv/bin/python tools/llm_audit.py --hours 24'</code></pre>
+  <table>
+    <tr><th>§</th><th>What</th></tr>
+    <tr><td>1. Chain State</td><td>which providers WOULD run right now: <code>✓ available</code> / <code>NO KEY</code> / <code>OVER BUDGET (1500/1500 day)</code></td></tr>
+    <tr><td>2. Per-provider ledger</td><td>per gemini/claude/openai: calls, ok, fail, tokens, est$, failures broken down by error class (e.g. <code>RateLimitError × 3</code>)</td></tr>
+    <tr><td>3. Quota state</td><td>used / budget per provider with % and <code>🛑 OVER</code> flag — same logic the over-budget short-circuit uses</td></tr>
+    <tr><td>4. News card audit</td><td>per recent card: <code>news_provider</code>, <code>parse_tier</code>, <code>fallbacks_used</code>, per-fallback error classes, and the raw 200-char LLM output when <code>parse_tier == failed</code></td></tr>
+    <tr><td>5. Recent failures</td><td>raw failure rows with timestamp + class + message + <strong>correlation_id</strong> (paste into Honeycomb for the full span)</td></tr>
+  </table>
 
   <h3>How the deltas affect the model</h3>
   <pre><code>// inside score_distribution():
@@ -667,6 +695,8 @@ Signals: DC+Elo+Market+News(gemini)
   </table>
 
   <p>Auditability golden rule: <strong>every signal MUST appear in <code>signals_used</code> OR <code>signals_failed</code></strong>. Pinned by parametrized test across 6 scenarios.</p>
+
+  <p>For news specifically the visual <code>⚠news: &lt;reason&gt;</code> on the card is now the <em>shortest</em> view. The <em>full</em> picture is in the persisted card fields (<code>news_parse_tier</code>, <code>news_fallback_errors</code>, <code>news_raw_excerpt</code>, <code>news_failure_class</code>) plus the cost-ledger row (<code>error_class</code> + <code>error_message</code> + <code>correlation_id</code>). Run <code>tools/llm_audit.py</code> to read both together.</p>
 </section>
 
 <!-- =========== STAGE 8: DELIVER =========== -->
@@ -926,7 +956,7 @@ crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pr
   <ol>
     <li><strong>Acquire rate-limit token</strong> from the shared per-provider token bucket (thread-safe; 4 concurrent matches collectively stay under each free-tier rate)</li>
     <li><strong>Open OTel span</strong> named <code>provider.endpoint</code> (e.g. <code>gemini.complete</code>), with <code>provider</code> + <code>endpoint</code> + <code>correlation_id</code> attributes</li>
-    <li><strong>Record in cost ledger</strong> (<code>obs.db::api_calls</code> table) on exit with units consumed + tokens + duration + ok flag</li>
+    <li><strong>Record in cost ledger</strong> (<code>obs.db::api_calls</code> table) on exit with units consumed + tokens + duration + ok flag + <code>error_class</code> + <code>error_message</code> (the last two from <code>type(e).__name__</code> + 200-char <code>str(e)</code>; Day-9.10). A failed call is now queryable by exception class — e.g. <code>SELECT error_class, COUNT(*) FROM api_calls WHERE provider='gemini' AND ok=0 GROUP BY error_class</code>.</li>
   </ol>
 
   <h3>Every provider verified against actual dashboards (June 2026)</h3>
@@ -954,7 +984,14 @@ WHERE correlation_id = "match-537327-T-7m"
 WHERE name = "gemini.complete" SELECT P95(duration_ms), COUNT WHERE error = true
 
 // Daily summary trace
-WHERE correlation_id LIKE "daily-summary-%"</code></pre>
+WHERE correlation_id LIKE "daily-summary-%"
+
+// LLM root-cause for one match-window (Day-9.10)
+// Returns: 1 run span + N child spans (gather_context sub-calls + the
+// gemini/claude.complete that answered). Cross-reference with
+// store/obs.db::api_calls WHERE correlation_id=X for error_class + message.
+WHERE correlation_id = "match-537327-T-7m" AND name LIKE "%.complete"
+SELECT name, status_code, error, duration_ms</code></pre>
 </section>
 
 <!-- =========== FAILURE MODES =========== -->
@@ -971,7 +1008,15 @@ WHERE correlation_id LIKE "daily-summary-%"</code></pre>
   </details>
   <details>
     <summary>All LLMs fail (gemini, claude, openai all return errors)</summary>
-    <p>news_agent's <code>analyze_safe</code> catches → returns NEUTRAL deltas with <code>failure</code> stamped. Card built with DC+Elo+market only. Signal: <code>⚠ news: &lt;reason&gt;</code>.</p>
+    <p>news_agent's <code>analyze_safe</code> catches → returns NEUTRAL deltas with <code>failure</code> + <code>failure_class</code> stamped. Card built with DC+Elo+market only. Signal: <code>⚠ news: &lt;reason&gt;</code>. <strong>Root-cause runbook (Day-9.10)</strong>: run <code>tools/llm_audit.py --hours 1</code> — §5 lists each failure with its <code>error_class</code> + correlation_id; §4 shows the per-card <code>news_fallback_errors</code> map (per-provider exception class); paste the correlation_id into Honeycomb for the span tree.</p>
+  </details>
+  <details>
+    <summary>LLM responds but output is unparseable</summary>
+    <p>Three-tier parser (Day-9.10): strict JSON → regex-repair for prose-wrapped JSON → if both fail, NEUTRAL deltas + <code>news_parse_tier == "failed"</code> + first 200 chars of the raw output preserved as <code>news_raw_excerpt</code>. The signal line shows news as "used" (the agent ran) but the audit fields tell the real story. Inspect with <code>tools/llm_audit.py</code> §4 — it prints the raw excerpt inline under the discrepant row.</p>
+  </details>
+  <details>
+    <summary>Provider over its free-tier budget (e.g. Gemini at 1500/1500 RPD)</summary>
+    <p><code>LLMRouter._ordered_available()</code> pre-flight-checks <code>ledger().over_budget(name)</code> and skips that provider BEFORE the call (Day-9.10). No wasted 429. Visible in <code>tools/llm_audit.py</code> §1 (<code>OVER BUDGET</code> tag) and §3 (used vs budget with <code>🛑 OVER</code> flag). Next free-tier roll-over (midnight Pacific for Gemini RPD; 1st-of-month for Brave) re-enables it automatically.</p>
   </details>
   <details>
     <summary>Brave Search blocked / over budget</summary>
@@ -1047,8 +1092,8 @@ WHERE correlation_id LIKE "daily-summary-%"</code></pre>
 </section>
 
 <div class="footer-note">
-  Updated 2026-06-07 (Day 9.8) · Companion to <code>CLAUDE.md</code>, <code>docs/SERVER.md</code>, <code>docs/SCHEDULING.md</code>, <code>integrations/README_negev_toto.md</code>, and <code>integrations/CLAUDE_CODE_HANDOFF_negev.md</code><br>
-  System state: 438 tests green · 16 Negev MCP tools (3 gated writes) · 4-line canonical crontab · Negev grids 147/147 aligned · Mexico 2-1 opener saved live
+  Updated 2026-06-07 (Day 9.10) · Companion to <code>CLAUDE.md</code>, <code>docs/SERVER.md</code>, <code>docs/SCHEDULING.md</code>, <code>integrations/README_negev_toto.md</code>, and <code>integrations/CLAUDE_CODE_HANDOFF_negev.md</code><br>
+  System state: 466 tests green · 22 Negev MCP tools (3 gated writes) · 4-line canonical crontab · Negev grids 147/147 aligned · LLM observability: error_class + parse_tier + raw_excerpt + over-budget short-circuit + tools/llm_audit.py · ⚠ Negev failure-alert wired · Mexico 2-1 opener saved live
 </div>
 
 </main>

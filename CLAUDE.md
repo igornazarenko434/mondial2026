@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (438 tests should stay green as of 0075e7d).
+11. Run `pytest tests/ -q` after every change (466 tests should stay green as of 0075e7d).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -294,6 +294,50 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.10 — LLM news-agent observability hardening (DONE — 466 total).**
+      Four targeted fixes so a missed-news incident is debuggable without
+      grepping journalctl. Closes the LLM-side gaps audit identified:
+      - `core/obs/cost.py` — `api_calls` table gains `error_class` +
+        `error_message` columns via idempotent migration. `obs.external_call`
+        captures `type(e).__name__` + first 200 chars of `str(e)` on any
+        exception (Gemini's `RateLimitError` is now visually distinct from
+        `APITimeoutError` / `AuthenticationError` / `APIConnectionError`).
+      - `core/llm/router.py::_ordered_available()` now pre-flight-skips a
+        provider when `ledger().over_budget(name)` is True — no more
+        wasted 429 + noisy fallback log. Plus new
+        `router.last_fallback_errors: {name: {error_class, error_message}}`
+        for per-provider chain attribution.
+      - `orchestrator/agents/news_agent.py::_parse_json_lenient(raw)` now
+        returns `(data, tier)` where tier ∈ {strict, regex_repair, empty,
+        failed}. `analyze()` stamps `parse_tier` on the result and (only
+        when `tier == "failed"`) captures the first 200 chars of the raw
+        LLM output as `raw_excerpt`. `analyze_safe()` adds `failure_class`
+        + `fallback_errors` even when the router itself dies.
+      - `core/decision/build_card.py` persists 5 new card fields:
+        `news_fallback_errors`, `news_parse_tier`, `news_raw_excerpt`,
+        `news_failure_class` (+ the pre-existing `news_provider` /
+        `news_fallbacks_used` / `news_failure`).
+      - `tools/llm_audit.py` — five-section runbook tool: live chain state
+        (which provider would run NOW + why others are bypassed),
+        per-provider ledger broken down by error class, quota state with
+        `🛑 OVER` flag, per-card audit with parse_tier + raw_excerpt,
+        recent raw failures with correlation_id (jump to Honeycomb).
+      Tests: 16 new in `tests/test_llm_observability_day910.py`. After a
+      missed-news card, the runbook is now: `tools/llm_audit.py --hours 24`
+      → pinpoint which provider, which error class, which parse tier failed
+      → grab correlation_id → Honeycomb shows the spans. No journalctl.
+- [x] **Day 9.9 — ⚠ Telegram alert on Negev MCP failure (DONE — 450 total).**
+      Standings + audit jobs were silently exiting 1 on Negev connect
+      errors. Added `integrations/negev_alerts.py::alert_failure(source,
+      reason)` shared helper used by both `tools/sync_negev_standings.py`
+      and `tools/post_match_audit.py`. `classify(reason)` heuristically
+      tags errors as `config` / `auth` / `rules` / `network` / `import` /
+      `unknown` and attaches a concrete remediation hint (e.g. auth →
+      "re-capture refreshToken from DevTools"). Fires regardless of
+      `--telegram` flag so the 6 silent (`--quiet`) cron runs also warn.
+      Both scripts gained `--test-alert` (sends a synthetic message + exit
+      0 if Telegram round-trip works) for verification after env changes.
+      12 tests in `tests/test_negev_alerts.py`.
 - [x] **Day 9.8 — full post-match sync workflow (DONE — 438 total).**
       Closes every gap between "match finishes" and "our DB knows + Negev's
       official scoring is reflected". Deliverables:
