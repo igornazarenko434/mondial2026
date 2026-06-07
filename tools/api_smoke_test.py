@@ -45,12 +45,25 @@ def _line(name: str, status: str, detail: str = "") -> None:
 def _probe(name: str, fn) -> str:
     """Run one probe. Returns 'ok' / 'fail' / 'skip'. Always prints a
     result line; never raises."""
+    # Lazy — only import when needed so the smoke test still loads on a
+    # bare venv that doesn't have the LLM SDKs at all.
+    try:
+        from core.llm.base import LLMUnavailable
+    except Exception:                                  # noqa: BLE001
+        LLMUnavailable = ()                            # treat as no-match
     t0 = time.monotonic()
     try:
         detail = fn() or ""
         dur = (time.monotonic() - t0) * 1000
         _line(name, OK, f"{dur:>5.0f}ms  {detail}")
         return "ok"
+    except LLMUnavailable as e:
+        # The provider's env var IS set, but the Python SDK isn't installed
+        # (e.g. requirements.txt intentionally omits `openai`). This is a
+        # config-vs-deps mismatch, NOT a failure of the upstream service.
+        # The message is already actionable ("pip install openai").
+        _skip(name, f"SDK not installed — {e}")
+        return "skip"
     except RuntimeError as e:
         # Convention: probes raise RuntimeError("X not set") when their env
         # var is missing — surface as SKIP not FAIL so the summary line
