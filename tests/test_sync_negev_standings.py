@@ -147,6 +147,81 @@ def test_sync_returns_error_when_zero_rows(conn, fake_ntm, monkeypatch):
     assert "0 rows" in out["error"]
 
 
+def test_telegram_summary_format_contains_top5_and_me(monkeypatch):
+    rows = [
+        {"player": f"P{i}", "rank": i, "total": 100 - i, "direction": 50,
+         "broad": 50, "exactCount": 0, "role": "player"}
+        for i in range(1, 11)
+    ]
+    # Put me at rank 8 (out of top 5) — should trigger the "Around you" block
+    rows[7]["player"] = "Igor"
+    title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid-x")
+    assert "Negev standings" in title
+    assert "P1" in body and "P5" in body                 # top 5
+    assert "Igor" in body and "← you" in body
+    assert "Around you:" in body                          # context window
+    assert "gap to leader" in body
+
+
+def test_telegram_summary_no_around_when_in_top_5(monkeypatch):
+    rows = [{"player": "Igor", "rank": 1, "total": 100, "direction": 50,
+             "broad": 50, "exactCount": 0, "role": "player"}] + [
+        {"player": f"P{i}", "rank": i, "total": 100 - i, "direction": 50,
+         "broad": 50, "exactCount": 0, "role": "player"}
+        for i in range(2, 8)
+    ]
+    title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid-x")
+    assert "← you" in body
+    assert "Around you:" not in body                      # I'm in top 5; no extra block
+
+
+def test_sync_with_send_telegram_calls_delivery_alert(conn, fake_ntm, monkeypatch):
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    sent = {}
+    import core.delivery as d
+    def fake_alert(title, body):
+        sent["title"] = title
+        sent["body"] = body
+        return True
+    monkeypatch.setattr(d, "alert", fake_alert)
+    rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
+             "exactCount": 1, "role": "player"}]
+    out = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows),
+                              send_telegram=True)
+    assert out["ok"] is True
+    assert out["telegram_delivered"] is True
+    assert "Igor" in sent["body"]
+
+
+def test_sync_with_send_telegram_skipped_on_dry_run(conn, fake_ntm, monkeypatch):
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    import core.delivery as d
+    fired = {"n": 0}
+    monkeypatch.setattr(d, "alert", lambda t, b: fired.update(n=fired["n"]+1) or True)
+    rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
+             "exactCount": 1, "role": "player"}]
+    out = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows),
+                              send_telegram=True, dry=True)
+    assert out["ok"] is True
+    assert "telegram_delivered" not in out                # never tried
+    assert fired["n"] == 0
+
+
+def test_sync_telegram_delivery_failure_doesnt_break_sync(conn, fake_ntm, monkeypatch):
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    import core.delivery as d
+    def boom(t, b):
+        raise RuntimeError("telegram down")
+    monkeypatch.setattr(d, "alert", boom)
+    rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
+             "exactCount": 1, "role": "player"}]
+    out = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows),
+                              send_telegram=True)
+    assert out["ok"] is True                              # the standings still wrote
+    assert out["telegram_delivered"] is False
+    assert "telegram down" in out["telegram_error"]
+
+
 def test_main_cli_dry_run_returns_zero(monkeypatch, capsys):
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     monkeypatch.setenv("NEGEV_TOURNAMENT_ID", "tid")

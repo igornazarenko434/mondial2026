@@ -205,10 +205,26 @@ payout per option (matches our rules: "Spain 20 ... USA 170" pattern).
 
 ### `tournaments/<tid>/settings/managerTables` (the EXACT-SCORE GRIDS)
 
-The exact-score multiplier table, per stage bracket. **Cross-verified against
-our `config/rules.py::SCORE_TABLE` and the PDF** — all three grids match our
-rules engine exactly. Grid keys: `groupStage`, `round16AndQuarter`,
-`semiAndFinal`.
+The exact-score multiplier table, per stage bracket. Grid keys: `groupStage`,
+`round16AndQuarter`, `semiAndFinal`.
+
+**Cross-verified against our `config/rules.py::SCORE_TABLE` (2026-06-07,
+live `n40ykJlOIA9Mg839hz91`):**
+- `round16AndQuarter`: **all 49 cells match** ✓
+- `semiAndFinal`: **all 49 cells match** ✓
+- `groupStage`: **3 cells DIFFER** (under investigation):
+  - `1-0`: Negev=**1.5**, our SCORE_TABLE=**2.25**
+  - `2-0`: Negev=**2.25**, our SCORE_TABLE=**3.25**
+  - `3-0`: Negev=**3.25**, our SCORE_TABLE=**4.5** (we use cap)
+
+Negev is the authoritative server-side scorer. If their values are correct,
+our `config/rules.py::_GROUP` row 0 (`loser_goals=0`) needs to change to
+`[2.75, 1.5, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5]` (matching Negev's 0-N values).
+
+**Action**: re-read the rules PDF §12 group-stage grid carefully. Confirm
+whether 1-0 / 2-0 / 3-0 multipliers are 2.25/3.25/4.5 (our current) or
+1.5/2.25/3.25 (Negev's). Run `tools/negev_consistency_audit.py` after any
+change to verify.
 
 ```jsonc
 {

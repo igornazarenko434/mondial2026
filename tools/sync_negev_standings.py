@@ -74,9 +74,57 @@ def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
         (participant, group_pts, ko_pts, futures_pts))
 
 
+def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, str]:
+    """Compose a Telegram-safe plain-text leaderboard summary.
+
+    Returns: (title, body). 8-12 lines body. Highlights:
+      • Top 5 by rank
+      • YOU + the 2 above/below you (context)
+      • Your gap to leader + to 2nd
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    now = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Jerusalem"))
+    title = f"📊 Negev standings — {now:%Y-%m-%d %H:%M IDT}"
+
+    lines: list[str] = []
+    by_name = {r["player"]: r for r in rows}
+    me_row = by_name.get(me)
+    n = len(rows)
+
+    if me_row:
+        gap_leader = rows[0]["total"] - me_row["total"]
+        gap_next = (rows[me_row["rank"] - 2]["total"] - me_row["total"]
+                    if me_row["rank"] > 1 else 0)
+        lines.append(
+            f"You: rank {me_row['rank']}/{n}  •  {me_row['total']:.1f} pts  "
+            f"•  gap to leader: {gap_leader:.1f}")
+    else:
+        lines.append(f"Roster: {n} players  •  YOU not found in standings")
+
+    lines.append("")
+    lines.append("Top 5:")
+    for r in rows[:5]:
+        marker = "  ← you" if r["player"] == me else ""
+        lines.append(f"  {r['rank']:>2}. {r['player']:<16}  {r['total']:>6.1f}{marker}")
+
+    # Context window: 2 above + 2 below me, if I'm out of the top 5
+    if me_row and me_row["rank"] > 7:
+        lines.append("")
+        lines.append(f"Around you:")
+        my_rank = me_row["rank"]
+        window = [r for r in rows if abs(r["rank"] - my_rank) <= 2]
+        for r in window:
+            marker = "  ← you" if r["player"] == me else ""
+            lines.append(f"  {r['rank']:>2}. {r['player']:<16}  {r['total']:>6.1f}{marker}")
+
+    return title, "\n".join(lines)
+
+
 def sync_standings(*, tournament_id: str | None = None,
                    include_bots: bool = False,
                    dry: bool = False,
+                   send_telegram: bool = False,
                    conn: sqlite3.Connection | None = None,
                    ntm=None) -> dict:
     """Pull the leaderboard from Negev → upsert into our standings table.
@@ -126,6 +174,24 @@ def sync_standings(*, tournament_id: str | None = None,
                        "my_gap_to_leader": leader["total"] - my_row["total"]})
     else:
         result["warning"] = f"MY_PARTICIPANT={me!r} not in standings"
+
+    # Telegram delivery — only on real sync (not dry-run) and only when asked.
+    # Failure to deliver is non-fatal; the standings already wrote OK.
+    if send_telegram and not dry:
+        try:
+            from core import delivery
+            title, body = _format_telegram_summary(rows, me, tid)
+            ok = delivery.alert(title, body)
+            result["telegram_delivered"] = bool(ok)
+            if ok:
+                log.info("standings summary sent to Telegram")
+            else:
+                log.warning("Telegram returned False; summary not delivered")
+        except Exception as e:                         # noqa: BLE001
+            log.warning("Telegram delivery error: %s", e)
+            result["telegram_delivered"] = False
+            result["telegram_error"] = str(e)[:120]
+
     log.info("standings sync: %s", result)
     return result
 
@@ -141,12 +207,16 @@ def main(argv: list[str] | None = None) -> int:
                    help="Print what would be upserted; touch no DB")
     p.add_argument("--quiet", action="store_true",
                    help="Suppress final summary line on success")
+    p.add_argument("--telegram", action="store_true",
+                   help="Send a leaderboard summary to Telegram (uses the same "
+                        "TELEGRAM_BOT_TOKEN/CHAT_ID as the daemon's daily summary)")
     args = p.parse_args(argv)
 
     with obs.run("sync_negev_standings"):
         out = sync_standings(tournament_id=args.tournament_id,
                               include_bots=args.include_bots,
-                              dry=args.dry_run)
+                              dry=args.dry_run,
+                              send_telegram=args.telegram)
     if not out.get("ok"):
         print(f"FAILED: {out.get('error')}", file=sys.stderr)
         return 1

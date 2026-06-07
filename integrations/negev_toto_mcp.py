@@ -21,9 +21,30 @@ import json
 import os
 import time
 import requests
-from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("negev-toto")
+# The `mcp` package is only needed when this module is RUN as an MCP server
+# (stdio transport, `python -m integrations.negev_toto_mcp`). When imported
+# as a LIBRARY (e.g. by tools/sync_negev_standings.py or the test suite),
+# we don't need the FastMCP runtime — so make the import optional and
+# stub @mcp.tool() to a passthrough decorator. This keeps the VM venv lean
+# (no `mcp[cli]` dependency required for the cron sync).
+try:
+    from mcp.server.fastmcp import FastMCP   # type: ignore
+    mcp = FastMCP("negev-toto")
+except ImportError:                          # noqa: BLE001
+    class _StubMCP:                          # pragma: no cover (covered by serve mode)
+        """Pass-through stub so @mcp.tool() decorators no-op when MCP isn't
+        installed. The module remains usable as a plain library."""
+        def tool(self, *a, **kw):
+            def deco(fn):
+                return fn
+            return deco
+        def run(self):
+            raise RuntimeError(
+                "Install 'mcp[cli]' to run this as an MCP server "
+                "(`.venv/bin/pip install \"mcp[cli]\"`)."
+            )
+    mcp = _StubMCP()
 
 IDENTITY = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
 REFRESH = "https://securetoken.googleapis.com/v1/token"
@@ -475,6 +496,107 @@ def toto_get_my_preferences() -> dict:
         "pref_broadBets": me.get("pref_broadBets"),
         "pref_sideBets": me.get("pref_sideBets"),
     }
+
+
+@mcp.tool()
+def toto_get_scoring_grids(tournament_id: str | None = None) -> dict:
+    """Negev's per-stage exact-score multiplier tables — the *real* tables used
+    by their server-side scoring. Three grids: `groupStage`, `round16AndQuarter`,
+    `semiAndFinal`. Each cell key is the home-away scoreline ('1-0', '2-1',
+    '6+-3') and the value is the multiplier.
+
+    Use this to verify our config/rules.py::SCORE_TABLE against the source of
+    truth. If a cell disagrees, our scoring engine would compute differently
+    from what the app awards — fix config/rules.py to match.
+    """
+    tid = _tid(tournament_id)
+    doc = toto_get_document(f"tournaments/{tid}/settings/managerTables")
+    if "error" in doc:
+        return doc
+    return {"tournament_id": tid, "grids": doc.get("grids", {})}
+
+
+@mcp.tool()
+def toto_get_broad_bet_categories(tournament_id: str | None = None) -> dict:
+    """The four futures categories with their full option lists:
+      * winner / cinderella  — 48 team options each ({id, name, points, isKilled})
+      * goldenBoot           — striker roster
+      * bestPlayer           — player roster (filled as bets come in)
+
+    `points` is the LIVE futures value per the §7-10 ladder; `isKilled=True`
+    means the option is eliminated (team knocked out, player ineligible). Use
+    to cross-reference broad-bet picks (toto_get_broad_bets returns IDs like
+    'team_Portugal' / '1780696080628' — this resolves them to names + values).
+    """
+    tid = _tid(tournament_id)
+    doc = toto_get_document(f"tournaments/{tid}/settings/broadBets")
+    if "error" in doc:
+        return doc
+    return {
+        "tournament_id": tid,
+        "isPublished": doc.get("isPublished"),
+        "isLocked": doc.get("isLocked"),
+        "categories": doc.get("categories", []),
+    }
+
+
+@mcp.tool()
+def toto_get_match_bets(match_id: str,
+                         tournament_id: str | None = None) -> list[dict]:
+    """All picks (across users) for ONE match in ONE tournament.
+        Returns: [{userId, displayName, homeScore, awayScore, points,
+                   isCorrectDir, isExactScore, breakdown, processedAt}]
+
+    breakdown contains: basePoints, totalPoints, odds, multiplier,
+    detonatorMultiplier, penaltiesBonus — the full scoring breakdown Negev's
+    server computed. Useful for verifying our score_match() against theirs.
+    """
+    tid = _tid(tournament_id)
+    res = toto_query("bets", "matchId", "EQUAL", match_id, limit=500)
+    if "error" in res:
+        return [res]
+    rows = res.get("results", [])
+    # Filter to the tournament (matchIds can recur across pools)
+    rows = [r for r in rows if r.get("tournamentId") == tid]
+    # Join displayName
+    users = _read_all("users")
+    name_by_uid = {u.get("uid"): u.get("displayName") for u in users if u.get("uid")}
+    out = []
+    for r in rows:
+        out.append({
+            "userId": r.get("userId"),
+            "displayName": name_by_uid.get(r.get("userId"), r.get("userId", "?")),
+            "homeScore": r.get("homeScore"),
+            "awayScore": r.get("awayScore"),
+            "points": r.get("points"),
+            "isCorrectDir": r.get("isCorrectDir"),
+            "isExactScore": r.get("isExactScore"),
+            "advancesTeam": r.get("advancesTeam"),
+            "breakdown": r.get("breakdown") or {},
+            "processedAt": r.get("processedAt"),
+            "updatedAt": r.get("updatedAt"),
+            "isBot": r.get("isBot", False),
+        })
+    out.sort(key=lambda r: (-(r["points"] or 0), r["displayName"]))
+    return out
+
+
+@mcp.tool()
+def toto_get_my_bets(tournament_id: str | None = None,
+                      limit: int = 200) -> list[dict]:
+    """All MY picks in a tournament — for verifying our daemon's persisted
+    predictions agree with what landed in the Negev app."""
+    tid = _tid(tournament_id)
+    uid = _token.get("uid")
+    if not uid:
+        _id_token()
+        uid = _token.get("uid")
+    res = toto_query("bets", "userId", "EQUAL", uid, limit=limit)
+    if "error" in res:
+        return [res]
+    rows = [r for r in res.get("results", []) if r.get("tournamentId") == tid]
+    rows.sort(key=lambda r: (r.get("updatedAt") or ""), reverse=True)
+    return rows
 
 
 @mcp.tool()
