@@ -41,8 +41,10 @@ PrivateTmp=true
 # Keep logs in the journal (default), tagged so `journalctl -t mondial2026`
 # filters quickly.
 SyslogIdentifier=mondial2026
-# Memory ceiling: the daemon's resident set is ~80 MB; 256 MB is generous.
-MemoryMax=256M
+# Memory ceiling. Steady-state RSS is ~80 MB. Peaks on FIRST ingest when
+# pandas parses martj42's 49k-row results CSV: up to ~250 MB. 512 MB gives
+# 2x headroom; CPX22 has 4 GB RAM so this is comfortable.
+MemoryMax=512M
 # Stop trying after 5 successive restarts in 60 s — at that point page the
 # user instead of looping forever. The OS supervisor catches REAL crashes;
 # this catches "configuration broke beyond recovery".
