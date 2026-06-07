@@ -242,6 +242,17 @@ sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/b
 sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/brave_quota.py'
 ```
 
+### Calendar & cross-source correlation audit (offline, read-only, ~1 s)
+
+```bash
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/calendar_audit.py'
+# 9 sections: match count + stages, groups A-L vs canonical CSV, team-name
+# normalization, detonators vs canonical, UTC→Israel time spot-check, what's
+# upcoming in 26h, window-firing simulation (when's the FIRST job due?),
+# calendar freshness, status distribution + TBD knockouts. Pure SQL + CSV
+# diff; no external API calls; doesn't burn any quota.
+```
+
 ### Win-the-pool strategy management
 
 ```bash
@@ -406,7 +417,7 @@ To pick up the project:
 
 To make a change:
 
-1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 369+ passing).
+1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 370+ passing).
 2. Commit + push to `main` on GitHub.
 3. On the VM: `/home/mondial/mondial2026/infra/update.sh`.
 4. Verify with `journalctl -u mondial2026 -f` and the queries in §7.

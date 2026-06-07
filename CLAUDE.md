@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (263 tests should stay green).
+11. Run `pytest tests/ -q` after every change (370 tests should stay green as of c461907).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -294,7 +294,7 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
-- [x] **Day 9.5 — win-the-pool layer wired end-to-end (DONE — 32 tests +369 total).**
+- [x] **Day 9.5 — win-the-pool layer wired end-to-end (DONE — 32 tests; 370 total inc. GROUP_-strip regression).**
       Closes the gap between "pure-EV picks" and "position-aware picks":
       - `store/repo.py::standings_context` — fixed TWO bugs: (1) removed
         unconditional `group_points * 0.85` multiplier (was double-applying
@@ -425,7 +425,7 @@ keys (placeholder inputs) so you can always eyeball the pipeline.
 
 The system was deployed to the Hetzner VM on 2026-06-07. Between deploy and
 the first match (2026-06-11 22:00 Israel) the daemon idle-ticks — no jobs
-fire, no cards emit. This is by design. The following are pinned by 369
+fire, no cards emit. This is by design. The following are pinned by 370
 unit/integration tests but will only be confirmed in production from the
 opener onwards:
 

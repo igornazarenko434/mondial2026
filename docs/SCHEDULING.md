@@ -80,7 +80,7 @@ just that in a `ProcessPoolExecutor` — but you don't need it for match-day.
 
 ## Config (env)
 ```
-SCHED_POLL_SECONDS=60     SCHED_MAX_WORKERS=4
+SCHED_POLL_SECONDS=60     SCHED_MAX_WORKERS=6     INGEST_EVERY_MIN=30
 HEARTBEAT_FILE=store/heartbeat
 WATCHDOG_STUCK_MIN=20     WATCHDOG_HEARTBEAT_MAX_AGE=180
 ```
@@ -342,7 +342,7 @@ Each `SCHED_POLL_SECONDS` (default 60s) one tick runs the full loop:
    calendar + tags detonators. Updates utc_kickoff if a game's time changed,
    sets status=FINISHED + scores when a game ends, fills in `home`/`away` for
    knockout TBD rows once the bracket resolves.
-2. `_maybe_update_standings()` — every tick, `update_standings(participant="me")`
+2. `_maybe_update_standings()` — every tick, `update_standings(participant=MY_PARTICIPANT)` (defaults to `"me"` if env var unset; set to your Negev display name to enable Day-9.5 strategy tilt)
    re-scores every finished match against your stored predictions. Idempotent
    (Day-5 design); takes a few ms.
 3. `_maybe_daily_summary(now)` — at 09:00 Asia/Jerusalem, push a Telegram

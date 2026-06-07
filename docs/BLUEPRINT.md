@@ -3,6 +3,22 @@
 
 > Companion files: `Mondial_2026_Prediction_Template.xlsx` (scoring sheet), `data/wc2026_groups.csv`, `data/wc2026_detonator_fixtures.csv`.
 
+> **⚠ HISTORICAL DESIGN DOC.** Written during the build phase. Conceptually
+> accurate (the architecture didn't change), but specific numbers (test
+> counts, day-by-day status, command examples) may be stale. For the
+> **current canonical state of the running system**, read in this order:
+>   1. `CLAUDE.md` — build history + open items + golden rules
+>   2. `docs/SERVER.md` — operational reference for the Hetzner daemon
+>   3. `docs/SYSTEM_ARCHITECTURE.html` — visual 10-stage walkthrough
+>   4. `docs/SCHEDULING.md` — daemon internals + safe-update procedure
+>   5. `docs/STRATEGY.md` — win-the-pool tilt + how to activate
+>
+> Notable updates since this doc was written: 370 tests passing (was 171);
+> system deployed on Hetzner CPX22 at 167.233.66.192; Day-9.5 win-the-pool
+> wired with `MY_PARTICIPANT` env + `tools/standings_set.py` CLI; group_
+> prefix stripped at ingest; api_football rate bumped to 10/min; opener
+> kickoff confirmed at 2026-06-11 22:00 Israel local (= 19:00 UTC).
+
 ---
 
 ## 0. TL;DR — how the whole thing works
@@ -275,7 +291,7 @@ mondial2026/                # the actual repo (built & tested)
 ├── tools/                 # dashboard.py · metrics.py                  [built]
 ├── data/                  # wc2026 groups + detonators (seeded)
 ├── docs/                  # design, user guide, cost, reliability, scheduling, obs
-└── tests/                 # pytest (171 passing)
+└── tests/                 # pytest (370 passing as of c461907)
 ```
 Python 3.11+, threads (`concurrent.futures`), `soccerdata`, `penaltyblog`/`scipy`,
 `pandas`, `numpy`, `requests`, `python-dotenv`; optional `opentelemetry-*`,
