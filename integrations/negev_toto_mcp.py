@@ -892,10 +892,13 @@ def toto_get_broad_bet_categories(tournament_id: str | None = None) -> dict:
               and u.get("status") == "approved"]
     # 5 = the lowest Kod-bonus value per `tournaments/{tid}.settings.kodBonuses`
     # — matches what the Negev UI displays before standings settle.
+    # Day-9.11.d: option id MUST carry the `roster_` prefix so the app's UI
+    # dropdown can match the saved selection (confirmed by inspecting every
+    # other submitter's broadBets doc — all 8 use roster_<uid>).
     DEFAULT_BEST_PLAYER_POINTS = 5
     synth_options = sorted([
         {"name": u.get("displayName") or u.get("uid", "?"),
-         "id": u.get("uid", "?"),
+         "id": f"roster_{u.get('uid', '?')}",
          "points": DEFAULT_BEST_PLAYER_POINTS,
          "isKilled": False}
         for u in humans

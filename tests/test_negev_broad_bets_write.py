@@ -35,9 +35,12 @@ CATEGORIES_FIXTURE = {
             {"id": "1780580161397", "name": "Harry Kane", "points": 21, "isKilled": False},
         ]},
         {"id": "bestPlayer", "title": "Best Placed Player", "options": [
-            {"id": "uid_aharony", "name": "Aharony", "points": 5, "isKilled": False},
-            {"id": "uid_alfi",    "name": "Alfi",    "points": 5, "isKilled": False},
-            {"id": "uid_igor",    "name": "Igor",    "points": 5, "isKilled": False},
+            # Day-9.11.d: the app's UI matches saved values against options
+            # by id; bestPlayer ids carry a "roster_" prefix (confirmed
+            # against every other submitter's broadBets doc).
+            {"id": "roster_uid_aharony", "name": "Aharony", "points": 5, "isKilled": False},
+            {"id": "roster_uid_alfi",    "name": "Alfi",    "points": 5, "isKilled": False},
+            {"id": "roster_uid_igor",    "name": "Igor",    "points": 5, "isKilled": False},
         ], "_synthesized": True},
     ],
 }
@@ -84,7 +87,19 @@ def test_resolve_option_id_unknown_returns_none():
 
 def test_resolve_option_id_best_player_by_displayname():
     rid = ntm._resolve_option_id("bestPlayer", "Aharony", CATEGORIES_FIXTURE)
-    assert rid == "uid_aharony"
+    assert rid == "roster_uid_aharony"
+
+
+def test_best_player_option_id_has_roster_prefix():
+    """Regression-pin (Day-9.11.d): bestPlayer option ids MUST be prefixed
+    `roster_` — the bare UID was rejected by the app UI dropdown matcher
+    even though the Firestore PATCH itself succeeded. Verified against
+    every other submitter's broadBets doc."""
+    bp = next(c for c in CATEGORIES_FIXTURE["categories"]
+              if c["id"] == "bestPlayer")
+    for o in bp["options"]:
+        assert o["id"].startswith("roster_"), \
+            f"bestPlayer option {o['name']!r} id {o['id']!r} missing roster_ prefix"
 
 
 # ──────────────── toto_save_broad_bets — dry-run path ──────────────────────
@@ -99,7 +114,7 @@ def test_save_broad_bets_dry_run_resolves_all_four(categories, fake_uid):
         "winner":     "team_Portugal",
         "cinderella": "team_Uzbekistan",
         "goldenBoot": "1780580161396",
-        "bestPlayer": "uid_igor",
+        "bestPlayer": "roster_uid_igor",  # Day-9.11.d: with roster_ prefix
     }
     assert out["would_patch"] == f"tournaments/{TID}/broadBets/uid_igor"
     # updatedAt is current; userId + tid present
@@ -160,7 +175,7 @@ def test_save_broad_bets_writes_enabled_calls_patch(categories, fake_uid, monkey
         "winner":     "team_Portugal",
         "cinderella": "team_Uzbekistan",
         "goldenBoot": "1780580161396",
-        "bestPlayer": "uid_igor",
+        "bestPlayer": "roster_uid_igor",
     }
     assert calls["fields"]["userId"] == "uid_igor"
     assert calls["fields"]["tournamentId"] == TID
