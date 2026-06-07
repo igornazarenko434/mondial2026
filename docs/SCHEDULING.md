@@ -157,6 +157,14 @@ What it does, in order — each step gates on the previous one:
 1. **Refuses if the VM has uncommitted changes.** If you (or anyone) hand-
    edited a file directly on the VM, the script bails so you don't silently
    overwrite work. Investigate, then commit / stash / discard explicitly.
+
+   **1b. Refuses if any match-window job is currently in flight.** A
+   restart while a worker is running can kill the thread between Telegram
+   delivery and `ledger.finish` — `was_handled` would then return True for
+   a (match_id, window) whose card was never sent. The check queries the
+   runs ledger: any `status='started'` row younger than 5 min = busy. Wait
+   a few minutes for it to clear, or override with `--force` (you accept
+   the missed-card risk).
 2. **Records the current commit SHA** to `/home/mondial/mondial2026/.last_good_sha`.
    This is the rollback target if the new version misbehaves.
 3. **`git fetch` and prints the incoming diff stat** so you can eyeball what's
@@ -166,10 +174,16 @@ What it does, in order — each step gates on the previous one:
 5. **Compares `requirements.txt` SHA before/after.** If it changed, runs
    `.venv/bin/pip install -r requirements.txt`. If it didn't, skips pip to
    save the 30-60s install time.
-6. **`systemctl restart mondial2026`**, then waits 10 s and runs
-   `systemctl is-active`. If the daemon came up → tails 30 journal lines for
-   you to eyeball, exits 0.
-7. **If the daemon DID NOT come up** → automatic rollback:
+6. **`systemctl restart mondial2026`**, then waits 10 s and runs a THREE-
+   level health check:
+   - **`systemctl is-active --quiet`** — process is registered as running
+   - **`journalctl | grep 'scheduler started'`** — the Python process
+     actually got past `obs.setup()` and `preflight.check()`
+   - **`journalctl | grep -c '"level": "ERROR"'`** — zero ERRORs in the
+     last 60 s
+   If all three pass → prints a post-deploy summary (SHA, uptime, last
+   heartbeat, last card delivered) and exits 0.
+7. **If any check fails** → automatic rollback:
    - `git reset --hard <previous SHA>`
    - Restart the daemon
    - Tail the journal so you can see the rollback log lines
@@ -180,9 +194,62 @@ within ~30 seconds. You only have to intervene manually if rollback ALSO fails
 (extremely unlikely — means the previous version is also broken, which would
 require something other than a code change, e.g. infra drift).
 
-### State preservation across updates
+### Why mid-window restart is dangerous (and how the guard prevents it)
 
-Every piece of tournament state is gitignored, so `git pull` cannot touch it:
+The runs ledger marks `(match_id, window)` with `status='started'` BEFORE the
+pipeline calls `build_card → deliver_card → ledger.finish`. So:
+
+| Restart timing | Outcome |
+|---|---|
+| Daemon idle (no due jobs in flight) | ✅ Restart safe, zero risk |
+| Mid-`build_card` (no Telegram POST yet) | ⚠️ `started` row + no card; next tick sees `was_handled=True` and SKIPS. **Card lost.** |
+| Mid-Telegram POST | ⚠️ Telegram may or may not process the request; `started` row + missing `finish`. Could miss OR duplicate. |
+| After `finish` returns | ✅ Restart safe — work is complete and persisted |
+
+The dangerous window per dispatched match is ~5-15 seconds total. Statistically
+narrow but the cost (one missed pick) is high. **Update.sh's pre-flight check
+detects this state and refuses to restart until it clears.**
+
+If you absolutely need to deploy during a window (e.g., a bug is actively
+delivering wrong cards and you'd rather miss one than send three more wrong
+ones), use `--force`. The current `started` run will be killed and lost, but
+no future windows are affected.
+
+### Verifying the daemon is healthy after a deploy
+
+The script gives you four explicit signals in the post-deploy summary, but
+here's what to look at if you want to triple-check on your own:
+
+```bash
+# 1. Process is registered + alive
+systemctl status mondial2026
+
+# 2. The daemon's reaching its tick loop (every 60s)
+tail -f /home/mondial/mondial2026/store/heartbeat
+# (Should show an ISO timestamp updating ~every 60 s.)
+
+# 3. No errors in the last 5 minutes
+journalctl -u mondial2026 --since "5 minutes ago" | grep -i error
+
+# 4. Cost ledger sees recent activity (proves observability layer is working)
+sudo -u mondial sqlite3 /home/mondial/mondial2026/store/obs.db \
+    "SELECT provider, COUNT(*) FROM api_calls WHERE ts > datetime('now','-10 minutes') GROUP BY provider"
+
+# 5. Last card delivered (post-deploy success signal during the tournament)
+sudo -u mondial sqlite3 /home/mondial/mondial2026/store/obs.db \
+    "SELECT match_id, window, started_at FROM runs WHERE card_delivered=1 ORDER BY started_at DESC LIMIT 5"
+
+# 6. Full observability audit (one-shot, ~5 s, hits every provider once)
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/obs_audit.py 2>&1 | tail -30'
+
+# 7. THE definitive end-to-end signal: wait for the next ☀️ Daily summary on
+#    Telegram. If it lands at 09:00 local, the deploy was fully successful.
+```
+
+### What an update CANNOT touch (state preservation)
+
+`git pull` only modifies tracked files. Every piece of tournament state is
+gitignored and physically untouched:
 
 | Preserved file | What it holds |
 |---|---|
