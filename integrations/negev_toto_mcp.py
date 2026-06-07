@@ -377,66 +377,176 @@ def toto_get_standings(tournament_id: str | None = None,
     return rows
 
 
+def _normalize_match_row(m: dict, _norm=None) -> dict:
+    """Shared shape for one Negev match row."""
+    if _norm is None:
+        try:
+            from core.data.teams import normalize as _norm
+        except Exception:                              # noqa: BLE001
+            _norm = lambda x: x
+    ko_iso = m.get("date")
+    mapped_stage = _STAGE_MAP.get(m.get("stage", ""), m.get("stage"))
+    return {
+        "match_id": m.get("_path", "").split("/")[-1],
+        "apiFixtureId": m.get("apiFixtureId"),
+        "tournamentId": m.get("tournamentId"),
+        "home": _norm(m.get("homeTeam")),
+        "away": _norm(m.get("awayTeam")),
+        "homeLogo": m.get("homeLogo"),
+        "awayLogo": m.get("awayLogo"),
+        "kickoff_utc": ko_iso,
+        "stage": mapped_stage,
+        "stage_raw": m.get("stage"),
+        "status": m.get("status"),
+        "scoreFullTimeHome": m.get("scoreFullTimeHome"),
+        "scoreFullTimeAway": m.get("scoreFullTimeAway"),
+        "scorePenaltyHome": m.get("scorePenaltyHome"),
+        "scorePenaltyAway": m.get("scorePenaltyAway"),
+        "oddsHome": m.get("oddsHome"),
+        "oddsDraw": m.get("oddsDraw"),
+        "oddsAway": m.get("oddsAway"),
+        "oddsSource": m.get("oddsSource"),
+        "isDetonator": m.get("isDetonator"),
+        "exactScoreMultiplier": m.get("exactScoreMultiplier"),
+        "winnerTeam": m.get("winnerTeam"),
+    }
+
+
 @mcp.tool()
-def toto_get_matches(date_after: str | None = None,
+def toto_get_matches(tournament_id: str | None = None,
+                     date_after: str | None = None,
                      status: str | None = None,
                      stage: str | None = None,
                      limit: int = 200) -> list[dict]:
-    """Read Negev's match catalog, normalized:
-        {match_id, apiFixtureId, home, away, kickoff_utc, stage,
-         status, scoreFullTimeHome/Away, scorePenaltyHome/Away,
-         oddsHome/Draw/Away, oddsSource, isDetonator,
-         exactScoreMultiplier}
+    """Read Negev's match catalog SCOPED TO ONE TOURNAMENT, normalized.
 
-    Team names pass through core.data.teams.normalize so they join cleanly
-    with our pipeline. Stage strings map through _STAGE_MAP to our
-    RULES_STAGE labels (Group / R32 / R16 / QF / SF / 3rd / Final).
+    Negev's global `matches` collection mixes fixtures across many tournaments
+    (J-League, Allsvenskan, side pools, etc.). This tool filters to one
+    tournament via a Firestore structured query on `tournamentId`, so you
+    only get the 72 WC fixtures (or whichever pool's id you pass).
 
-    Filters:
-      date_after: ISO 8601 date, e.g. '2026-06-11'
-      status:    'NS' (not started) / 'FT' / 'PEN' / etc.
-      stage:     post-normalization label, e.g. 'Group', 'R16'
+    Filters (all optional, all post-query):
+      tournament_id: defaults to NEGEV_TOURNAMENT_ID env var
+      date_after:    ISO 8601 date, e.g. '2026-06-11'
+      status:        'NS' (not started) / 'FT' / 'PEN' / 'IP' (in play)
+      stage:         post-normalization label, e.g. 'Group', 'R16'
     """
-    # Lazy import so the MCP module can run without our repo on the path
+    tid = _tid(tournament_id)
+    res = toto_query("matches", "tournamentId", "EQUAL", tid, limit=300)
+    if "error" in res:
+        return [res]
+    rows = res.get("results", [])
     try:
         from core.data.teams import normalize as _norm
     except Exception:                                  # noqa: BLE001
-        _norm = lambda x: x                           # passthrough
-    raw = _read_all("matches", page_size=200)
+        _norm = lambda x: x
     out = []
-    for m in raw[:limit * 3]:                          # over-fetch for post-filter
-        ko_iso = m.get("date")
-        if date_after and ko_iso and ko_iso < date_after:
+    for m in rows:
+        norm = _normalize_match_row(m, _norm)
+        if date_after and norm["kickoff_utc"] and norm["kickoff_utc"] < date_after:
             continue
-        if status and m.get("status") != status:
+        if status and norm["status"] != status:
             continue
-        mapped_stage = _STAGE_MAP.get(m.get("stage", ""), m.get("stage"))
-        if stage and mapped_stage != stage:
+        if stage and norm["stage"] != stage:
             continue
-        out.append({
-            "match_id": m.get("_path", "").split("/")[-1],
-            "apiFixtureId": m.get("apiFixtureId"),
-            "home": _norm(m.get("homeTeam")),
-            "away": _norm(m.get("awayTeam")),
-            "kickoff_utc": ko_iso,
-            "stage": mapped_stage,
-            "stage_raw": m.get("stage"),
-            "status": m.get("status"),
-            "scoreFullTimeHome": m.get("scoreFullTimeHome"),
-            "scoreFullTimeAway": m.get("scoreFullTimeAway"),
-            "scorePenaltyHome": m.get("scorePenaltyHome"),
-            "scorePenaltyAway": m.get("scorePenaltyAway"),
-            "oddsHome": m.get("oddsHome"),
-            "oddsDraw": m.get("oddsDraw"),
-            "oddsAway": m.get("oddsAway"),
-            "oddsSource": m.get("oddsSource"),
-            "isDetonator": m.get("isDetonator"),
-            "exactScoreMultiplier": m.get("exactScoreMultiplier"),
-        })
+        out.append(norm)
         if len(out) >= limit:
             break
     out.sort(key=lambda x: x.get("kickoff_utc") or "")
     return out
+
+
+@mcp.tool()
+def toto_get_match_details(home: str | None = None,
+                            away: str | None = None,
+                            match_id: str | None = None,
+                            tournament_id: str | None = None) -> dict:
+    """Full per-match view combining everything the Matches tab shows for ONE
+    game: match row + my prediction + friends' picks + the applicable exact-
+    score multiplier grid. Stats/Lineups/Events are NOT included (those come
+    from api-football directly, not Negev's Firestore — our daemon already
+    has core/data/api_football.py for that).
+
+    Lookup by team-name pair (home + away) OR by match_id. team names pass
+    through core.data.teams.normalize so 'Mexico' / 'mexico' / 'Mexico ' all
+    match. Returns:
+      match:        full normalized match row (see toto_get_matches shape)
+      myPrediction: {home, away} score OR None if not submitted
+      friendsPicks: [{displayName, homeScore, awayScore, points, breakdown}]
+                    sorted by points desc
+      exactPtsGrid: the multiplier table for this match's stage type
+                    (groupStage / round16AndQuarter / semiAndFinal)
+      bingoMultiplier: convenience — the exact-PTS multiplier for THIS pick if
+                      myPrediction is set (None otherwise)
+    """
+    tid = _tid(tournament_id)
+    # 1. Find the match
+    matches = toto_get_matches(tournament_id=tid, limit=300)
+    target = None
+    if match_id:
+        target = next((m for m in matches if m["match_id"] == match_id
+                        or str(m.get("apiFixtureId")) == match_id), None)
+    elif home and away:
+        try:
+            from core.data.teams import normalize as _norm
+        except Exception:                              # noqa: BLE001
+            _norm = lambda x: x
+        h_n = _norm(home).lower() if home else None
+        a_n = _norm(away).lower() if away else None
+        target = next((m for m in matches if (m["home"] or "").lower() == h_n
+                        and (m["away"] or "").lower() == a_n), None)
+    if not target:
+        return {"error": f"match not found: home={home!r} away={away!r} "
+                f"match_id={match_id!r} in tournament {tid}"}
+
+    mid = target["match_id"]
+    apifid = target["apiFixtureId"]
+
+    # 2. My prediction — query bets where userId==me and matchId==this
+    my_pred = None
+    uid = _token.get("uid") or _id_token() and _token.get("uid")
+    if not uid:
+        _id_token(); uid = _token.get("uid")
+    my_bets = toto_query("bets", "userId", "EQUAL", uid, limit=200)
+    for b in my_bets.get("results", []):
+        if b.get("tournamentId") != tid:
+            continue
+        # matchId stored as e.g. "n40y..._1489369"; sometimes just apiFixtureId
+        if (b.get("matchId") == mid
+            or b.get("matchId") == str(apifid)
+            or (apifid and str(apifid) in str(b.get("matchId", "")))):
+            my_pred = {"home": b.get("homeScore"), "away": b.get("awayScore")}
+            break
+
+    # 3. Friends' picks
+    friends = toto_get_match_bets(mid, tournament_id=tid)
+
+    # 4. Exact-PTS grid for this stage type
+    grids = toto_get_scoring_grids(tournament_id=tid).get("grids", {})
+    stage_to_grid = {"Group": "groupStage",
+                      "R32": "round16AndQuarter",
+                      "R16": "round16AndQuarter",
+                      "QF":  "round16AndQuarter",
+                      "SF":  "semiAndFinal",
+                      "3rd": "semiAndFinal",
+                      "Final": "semiAndFinal"}
+    grid_key = stage_to_grid.get(target["stage"])
+    pts_grid = grids.get(grid_key, {}) if grid_key else {}
+
+    # 5. If I have a prediction, look up its multiplier value
+    bingo_mult = None
+    if my_pred and my_pred.get("home") is not None and my_pred.get("away") is not None:
+        key = f"{my_pred['home']}-{my_pred['away']}"
+        bingo_mult = pts_grid.get(key)
+
+    return {
+        "match": target,
+        "myPrediction": my_pred,
+        "friendsPicks": friends,
+        "exactPtsGrid": pts_grid,
+        "exactPtsGridName": grid_key,
+        "bingoMultiplier": bingo_mult,
+    }
 
 
 @mcp.tool()
@@ -469,21 +579,33 @@ def toto_get_broad_bets(tournament_id: str | None = None) -> list[dict]:
 
 @mcp.tool()
 def toto_get_side_bets(tournament_id: str | None = None,
-                       active_only: bool = False) -> list[dict]:
-    """All side-bet questions in a tournament:
-        {id, question, points, stage, startTime, isActive, isLocked,
-         isResolved, correctAnswer, matchId}
-    `matchId` may be None for free-form questions. With active_only=True,
-    returns only rows where isActive and not isResolved."""
+                       active_only: bool = False,
+                       published_only: bool = False) -> list[dict]:
+    """All side-bet docs in a tournament. The Negev UI splits them:
+      'Upcoming Side Bets' = has a non-empty question AND not resolved
+      'Past Results'       = isResolved == True
+
+    18 shell docs are pre-created (one per match day, ids 'sb_YYYY-MM-DD'),
+    but `question` is empty until the founder publishes the prompt. Use
+    published_only=True to filter to bets that have actually been announced
+    (matches the UI's visible upcoming list).
+
+    Each row: {id, question, points, stage, startTime, isActive, isLocked,
+               isResolved, correctAnswer, matchId}
+    `matchId` may be None for free-form (joke) questions.
+    """
     tid = _tid(tournament_id)
     raw = _read_all(f"tournaments/{tid}/sideBets")
     out = []
     for s in raw:
+        question = (s.get("question") or "").strip()
         if active_only and (not s.get("isActive") or s.get("isResolved")):
+            continue
+        if published_only and not question:
             continue
         out.append({
             "id": s.get("_path", "").split("/")[-1],
-            "question": s.get("question") or "",
+            "question": question,
             "points": s.get("points"),
             "stage": _STAGE_MAP.get(s.get("stage", ""), s.get("stage")),
             "stage_raw": s.get("stage"),
@@ -496,6 +618,117 @@ def toto_get_side_bets(tournament_id: str | None = None,
         })
     out.sort(key=lambda r: r.get("startTime") or "")
     return out
+
+
+@mcp.tool()
+def toto_get_side_bets_upcoming(tournament_id: str | None = None) -> list[dict]:
+    """Negev UI's 'Upcoming Side Bets' panel — only docs with a published
+    question that hasn't been resolved yet."""
+    return toto_get_side_bets(tournament_id, published_only=True)
+
+
+@mcp.tool()
+def toto_get_side_bets_resolved(tournament_id: str | None = None) -> list[dict]:
+    """Negev UI's 'Past Results' panel — only docs where isResolved==True
+    (the correct answer is filled in)."""
+    return [s for s in toto_get_side_bets(tournament_id) if s["isResolved"]]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WRITE TOOLS — match-result update (gated by NEGEV_ALLOW_WRITES=1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def toto_update_match_result(match_id: str,
+                              home_score: int,
+                              away_score: int,
+                              tournament_id: str | None = None,
+                              status: str = "FT",
+                              penalty_home: int | None = None,
+                              penalty_away: int | None = None,
+                              winner_team: str | None = None) -> dict:
+    """Update one match's final score in Negev (gated by NEGEV_ALLOW_WRITES=1).
+
+    Args:
+      match_id:     Negev doc id ('<tid>_<apiFixtureId>' or just apiFixtureId)
+      home_score:   final-time home goals
+      away_score:   final-time away goals
+      status:       'FT' (full time, default) / 'PEN' (decided on penalties) /
+                    'IP' (in play) / 'NS' (reset to not-started)
+      penalty_home: penalty shootout home score (only for KO + PEN status)
+      penalty_away: penalty shootout away score
+      winner_team:  team name that advances (required on KO when status=PEN)
+
+    For group-stage games: pass only home_score / away_score / status='FT'.
+    For knockouts decided in 90/120 min: same.
+    For knockouts decided on pens: status='PEN', plus penalty_home/away,
+      plus winner_team (the team that advances).
+
+    The fields patched mirror Negev's match-doc schema:
+      scoreFullTimeHome, scoreFullTimeAway, goalsHome, goalsAway, status,
+      scorePenaltyHome, scorePenaltyAway, winnerTeam
+    """
+    if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
+        return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
+                f"Would have updated match_id={match_id} → "
+                f"{home_score}-{away_score} status={status}"}
+    tid = _tid(tournament_id)
+    # Resolve the actual doc path. Negev uses '<tid>_<apiFixtureId>' as the
+    # doc id for some tournaments; if user passes just the apiFixtureId we
+    # construct it.
+    if "_" not in match_id:
+        match_id = f"{tid}_{match_id}"
+    fields = {
+        "scoreFullTimeHome": int(home_score),
+        "scoreFullTimeAway": int(away_score),
+        "goalsHome": int(home_score),
+        "goalsAway": int(away_score),
+        "status": status,
+    }
+    if penalty_home is not None:
+        fields["scorePenaltyHome"] = int(penalty_home)
+    if penalty_away is not None:
+        fields["scorePenaltyAway"] = int(penalty_away)
+    if winner_team is not None:
+        fields["winnerTeam"] = winner_team
+    return toto_patch_document(f"matches/{match_id}", json.dumps(fields))
+
+
+@mcp.tool()
+def toto_next_match(tournament_id: str | None = None) -> dict:
+    """The next un-finished match in time order — what you'd ask before
+    submitting a result via toto_update_match_result. Returns:
+      {match, requires_score, requires_penalties, stage_type,
+       instructions: 'Please give me ...'}
+
+    `requires_penalties` is True only when stage is KO/SF/Final AND a draw
+    in regulation could happen; this is conservative (always True for KO
+    stages), since you'd otherwise have to ask twice if the game ended
+    1-1 after extra time.
+    """
+    tid = _tid(tournament_id)
+    matches = toto_get_matches(tournament_id=tid, limit=300)
+    pending = [m for m in matches if m["status"] in ("NS", "IP")]
+    if not pending:
+        return {"error": "no pending matches in tournament", "tournament_id": tid}
+    next_m = pending[0]
+    stage = next_m["stage"]
+    is_ko = stage in ("R32", "R16", "QF", "SF", "3rd", "Final")
+    instr = (f"Next match: {next_m['home']} vs {next_m['away']} "
+             f"({next_m['kickoff_utc']}, stage={stage}). ")
+    if is_ko:
+        instr += ("This is a KNOCKOUT — give me: home score, away score, "
+                  "AND (only if 1-1/2-2/etc. went to penalties) the penalty "
+                  "shootout score + winner.")
+    else:
+        instr += "Give me: home score, away score."
+    return {
+        "match": next_m,
+        "stage_type": "knockout" if is_ko else "group",
+        "requires_score": True,
+        "requires_penalties": is_ko,
+        "instructions": instr,
+    }
 
 
 @mcp.tool()

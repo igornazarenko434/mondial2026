@@ -181,57 +181,68 @@ def test_get_standings_raises_when_no_tid(fake_firestore, monkeypatch):
 
 # ─────────────────────────── toto_get_matches ───────────────────────────
 
-def _seed_matches(state):
-    state["collections"]["matches"] = [
-        {"path": "matches/855734", "fields": {
-            "apiFixtureId": 855734, "homeTeam": "Korea Republic", "awayTeam": "Cape Verde Islands",
-            "date": "2022-11-21T16:00:00+00:00", "stage": "Group Stage - 1",
-            "status": "FT", "scoreFullTimeHome": 0, "scoreFullTimeAway": 2,
-            "oddsHome": None, "oddsDraw": None, "oddsAway": None,
-            "oddsSource": "api", "isDetonator": False, "exactScoreMultiplier": 1,
-        }},
-        {"path": "matches/999999", "fields": {
-            "apiFixtureId": 999999, "homeTeam": "Mexico", "awayTeam": "South Africa",
-            "date": "2026-06-11T19:00:00+00:00", "stage": "Round of 16",
-            "status": "NS", "scoreFullTimeHome": None, "scoreFullTimeAway": None,
-            "oddsHome": 1.85, "oddsDraw": 3.6, "oddsAway": 4.2,
-            "isDetonator": True, "exactScoreMultiplier": 2,
-        }},
+def _seed_matches(state, tid="tid-x", monkeypatch=None):
+    """Seed mock matches AND wire toto_query to filter by tournamentId."""
+    rows = [
+        {"_path": "matches/855734",
+         "apiFixtureId": 855734, "tournamentId": tid,
+         "homeTeam": "Korea Republic", "awayTeam": "Cape Verde Islands",
+         "date": "2022-11-21T16:00:00+00:00", "stage": "Group Stage - 1",
+         "status": "FT", "scoreFullTimeHome": 0, "scoreFullTimeAway": 2,
+         "oddsHome": None, "oddsDraw": None, "oddsAway": None,
+         "oddsSource": "api", "isDetonator": False, "exactScoreMultiplier": 1},
+        {"_path": "matches/999999",
+         "apiFixtureId": 999999, "tournamentId": tid,
+         "homeTeam": "Mexico", "awayTeam": "South Africa",
+         "date": "2026-06-11T19:00:00+00:00", "stage": "Round of 16",
+         "status": "NS", "scoreFullTimeHome": None, "scoreFullTimeAway": None,
+         "oddsHome": 1.85, "oddsDraw": 3.6, "oddsAway": 4.2,
+         "isDetonator": True, "exactScoreMultiplier": 2},
+        # Different tournament — must be filtered OUT by toto_get_matches
+        {"_path": "matches/777", "apiFixtureId": 777, "tournamentId": "other-tid",
+         "homeTeam": "X", "awayTeam": "Y", "date": "2026-06-11T20:00:00+00:00",
+         "stage": "Group Stage", "status": "NS"},
     ]
+    state["_match_rows"] = rows
+    if monkeypatch:
+        def fake_query(c, field, op, value, limit=200):
+            assert c == "matches" and field == "tournamentId" and op == "EQUAL"
+            return {"results": [r for r in rows if r.get("tournamentId") == value]}
+        monkeypatch.setattr(ntm, "toto_query", fake_query)
 
 
-def test_get_matches_normalizes_team_names(fake_firestore):
-    _seed_matches(fake_firestore)
-    out = ntm.toto_get_matches()
+def test_get_matches_normalizes_team_names(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch)
+    out = ntm.toto_get_matches(tournament_id="tid-x")
     by_apifid = {m["apiFixtureId"]: m for m in out}
     assert by_apifid[855734]["home"] == "South Korea"             # Korea Republic → canonical
     assert by_apifid[855734]["away"] == "Cape Verde"              # Cape Verde Islands → canonical
 
 
-def test_get_matches_maps_stage_labels(fake_firestore):
-    _seed_matches(fake_firestore)
-    out = ntm.toto_get_matches()
+def test_get_matches_maps_stage_labels(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch)
+    out = ntm.toto_get_matches(tournament_id="tid-x")
     by_apifid = {m["apiFixtureId"]: m for m in out}
     assert by_apifid[855734]["stage"] == "Group"                  # "Group Stage - 1" → Group
     assert by_apifid[999999]["stage"] == "R16"                    # "Round of 16" → R16
 
 
-def test_get_matches_date_after_filter(fake_firestore):
-    _seed_matches(fake_firestore)
-    out = ntm.toto_get_matches(date_after="2025-01-01")
+def test_get_matches_date_after_filter(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch)
+    out = ntm.toto_get_matches(tournament_id="tid-x", date_after="2025-01-01")
     apifids = {m["apiFixtureId"] for m in out}
     assert apifids == {999999}                                    # 2022 row excluded
 
 
-def test_get_matches_status_filter(fake_firestore):
-    _seed_matches(fake_firestore)
-    out = ntm.toto_get_matches(status="NS")
+def test_get_matches_status_filter(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch)
+    out = ntm.toto_get_matches(tournament_id="tid-x", status="NS")
     assert len(out) == 1 and out[0]["status"] == "NS"
 
 
-def test_get_matches_stage_filter_uses_mapped_label(fake_firestore):
-    _seed_matches(fake_firestore)
-    out = ntm.toto_get_matches(stage="R16")
+def test_get_matches_stage_filter_uses_mapped_label(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch)
+    out = ntm.toto_get_matches(tournament_id="tid-x", stage="R16")
     assert len(out) == 1 and out[0]["stage"] == "R16"
 
 
@@ -259,6 +270,125 @@ def test_get_broad_bets_joins_displayName_from_users(fake_firestore):
     assert by_name["Alice"]["cinderella"] == "team_CapeVerde"
     # Sorted alphabetical by displayName
     assert [r["displayName"] for r in out] == ["Alice", "Igor"]
+
+
+# ─────────────────────────── toto_get_matches scopes to one tournament ───────────────────────────
+
+def test_get_matches_excludes_rows_from_other_tournaments(fake_firestore, monkeypatch):
+    """Bug fix regression: USED to read the global matches collection and
+    return ALL tournaments mixed (J-League / Allsvenskan etc.). Now structured-
+    queries by tournamentId so only the requested pool's matches come back."""
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch, tid="tid-x")
+    out = ntm.toto_get_matches(tournament_id="tid-x")
+    tids = {m["tournamentId"] for m in out}
+    assert tids == {"tid-x"}                           # NO 'other-tid' leak
+
+
+# ─────────────────────────── toto_get_match_details ───────────────────────────
+
+def test_get_match_details_combines_match_my_pred_friends_pts_grid(fake_firestore, monkeypatch):
+    tid = "tid-x"
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch, tid=tid)
+    monkeypatch.setitem(ntm._token, "uid", "uid-igor")
+    rows = fake_firestore["_match_rows"]
+    def fake_query(c, field, op, value, limit=200):
+        if c == "matches" and field == "tournamentId":
+            return {"results": [r for r in rows if r.get("tournamentId") == value]}
+        if c == "bets":
+            return {"results": [
+                {"userId": "uid-igor", "matchId": "999999", "tournamentId": tid,
+                 "homeScore": 3, "awayScore": 1, "points": 0, "_path": "bets/x"},
+                {"userId": "uid-friend", "matchId": "999999", "tournamentId": tid,
+                 "homeScore": 2, "awayScore": 0, "points": 0, "_path": "bets/y"},
+            ]}
+        return {"results": []}
+    monkeypatch.setattr(ntm, "toto_query", fake_query)
+    fake_firestore["docs"][f"tournaments/{tid}/settings/managerTables"] = {
+        "grids": {"round16AndQuarter": {"3-1": 3.25}, "groupStage": {}, "semiAndFinal": {}}}
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/uid-igor", "fields": {"uid": "uid-igor", "displayName": "Igor"}},
+        {"path": "users/uid-friend", "fields": {"uid": "uid-friend", "displayName": "Alice"}},
+    ]
+    out = ntm.toto_get_match_details(home="Mexico", away="South Africa",
+                                       tournament_id=tid)
+    assert out["match"]["home"] == "Mexico"
+    assert out["myPrediction"] == {"home": 3, "away": 1}
+    assert out["exactPtsGridName"] == "round16AndQuarter"
+    assert out["bingoMultiplier"] == 3.25
+    assert any(f["displayName"] == "Igor" for f in out["friendsPicks"])
+
+
+def test_get_match_details_returns_error_when_not_found(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch, tid="tid-x")
+    out = ntm.toto_get_match_details(home="Ghost", away="Nobody",
+                                       tournament_id="tid-x")
+    assert "error" in out
+
+
+# ─────────────────────────── toto_update_match_result (gated) ───────────────────────────
+
+def test_update_match_result_blocked_without_writes_flag(fake_firestore, monkeypatch):
+    monkeypatch.delenv("NEGEV_ALLOW_WRITES", raising=False)
+    out = ntm.toto_update_match_result("tid-x_999999", 2, 1, tournament_id="tid-x")
+    assert "writes disabled" in (out.get("error") or "")
+
+
+def test_update_match_result_when_writes_enabled_patches_correct_fields(fake_firestore, monkeypatch):
+    monkeypatch.setenv("NEGEV_ALLOW_WRITES", "1")
+    captured = {}
+    def fake_patch(path, fields_json):
+        captured["path"] = path
+        captured["fields"] = json.loads(fields_json)
+        return {"updated": path}
+    monkeypatch.setattr(ntm, "toto_patch_document", fake_patch)
+    ntm.toto_update_match_result(
+        "999999", 2, 1, tournament_id="tid-x", status="FT")
+    assert captured["path"] == "matches/tid-x_999999"
+    assert captured["fields"] == {
+        "scoreFullTimeHome": 2, "scoreFullTimeAway": 1,
+        "goalsHome": 2, "goalsAway": 1, "status": "FT"}
+
+
+def test_update_match_result_knockout_with_penalties(fake_firestore, monkeypatch):
+    monkeypatch.setenv("NEGEV_ALLOW_WRITES", "1")
+    captured = {}
+    def fake_patch(path, fields_json):
+        captured["fields"] = json.loads(fields_json)
+        return {"updated": path}
+    monkeypatch.setattr(ntm, "toto_patch_document", fake_patch)
+    ntm.toto_update_match_result(
+        "tid-x_999", 1, 1, tournament_id="tid-x", status="PEN",
+        penalty_home=5, penalty_away=4, winner_team="Mexico")
+    assert captured["fields"]["status"] == "PEN"
+    assert captured["fields"]["scorePenaltyHome"] == 5
+    assert captured["fields"]["scorePenaltyAway"] == 4
+    assert captured["fields"]["winnerTeam"] == "Mexico"
+
+
+# ─────────────────────────── toto_next_match ───────────────────────────
+
+def test_next_match_returns_first_pending_with_correct_stage_type(fake_firestore, monkeypatch):
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch, tid="tid-x")
+    out = ntm.toto_next_match(tournament_id="tid-x")
+    assert out["match"]["home"] == "Mexico"
+    assert out["stage_type"] == "knockout"
+    assert out["requires_penalties"] is True
+    assert "knockout" in out["instructions"].lower()
+
+
+def test_next_match_for_group_only_asks_for_score(fake_firestore, monkeypatch):
+    state = fake_firestore
+    state["_match_rows"] = [
+        {"_path": "matches/g1", "apiFixtureId": 1, "tournamentId": "tid-x",
+         "homeTeam": "A", "awayTeam": "B", "date": "2026-06-11T10:00:00+00:00",
+         "stage": "Group Stage", "status": "NS",
+         "oddsHome": 1.5, "oddsDraw": 3, "oddsAway": 5},
+    ]
+    monkeypatch.setattr(ntm, "toto_query",
+        lambda c, f, op, v, limit=200: {"results": state["_match_rows"]})
+    out = ntm.toto_next_match(tournament_id="tid-x")
+    assert out["stage_type"] == "group"
+    assert out["requires_penalties"] is False
 
 
 # ─────────────────────────── toto_get_side_bets ───────────────────────────

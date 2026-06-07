@@ -121,6 +121,56 @@ def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, 
     return title, "\n".join(lines)
 
 
+def sync_match_results(tid: str, *, conn: sqlite3.Connection,
+                        ntm, dry: bool = False) -> int:
+    """Pull Negev's match results (status='FT'/'PEN' with non-null goals) for
+    this tournament and UPSERT into our matches table. Returns count updated.
+
+    Why both football-data AND Negev: Negev is the LIVE scorer; if a friend
+    enters a score before football-data publishes, our standings_writer can
+    score against Negev's value. football-data overwrites later (idempotent
+    UPSERT). Day-9.8.
+    """
+    try:
+        with obs.external_call("negev_toto", "get_matches"):
+            wc = ntm.toto_get_matches(tournament_id=tid, limit=300)
+    except Exception as e:                             # noqa: BLE001
+        log.warning("toto_get_matches failed: %s", e)
+        return 0
+    finished = [m for m in wc if m.get("status") in ("FT", "PEN")
+                and m.get("scoreFullTimeHome") is not None
+                and m.get("scoreFullTimeAway") is not None]
+    if dry:
+        log.info("[dry-run] %d FT/PEN matches would sync to local DB", len(finished))
+        return len(finished)
+    n = 0
+    for m in finished:
+        # Our matches table keys on football-data match_id (integer). Negev's
+        # apiFixtureId is the API-Football id; we resolve by team-pair instead.
+        try:
+            ours = conn.execute(
+                "SELECT match_id FROM matches WHERE home=? AND away=?",
+                (m["home"], m["away"])).fetchone()
+        except sqlite3.Error:
+            continue
+        if not ours:
+            log.debug("Negev match %s vs %s not in our matches table — skipping",
+                      m["home"], m["away"])
+            continue
+        try:
+            conn.execute(
+                "UPDATE matches SET status=?, home_goals=?, away_goals=? "
+                "WHERE match_id=?",
+                ("FINISHED", int(m["scoreFullTimeHome"]),
+                 int(m["scoreFullTimeAway"]), ours[0]))
+            n += 1
+        except sqlite3.Error as e:
+            log.warning("results UPSERT for match %s failed: %s", ours[0], e)
+    conn.commit()
+    log.info("synced %d match results from Negev → matches table", n)
+    return n
+
+
 def sync_standings(*, tournament_id: str | None = None,
                    include_bots: bool = False,
                    dry: bool = False,
@@ -174,6 +224,18 @@ def sync_standings(*, tournament_id: str | None = None,
                        "my_gap_to_leader": leader["total"] - my_row["total"]})
     else:
         result["warning"] = f"MY_PARTICIPANT={me!r} not in standings"
+
+    # Day-9.8: also sync Negev's match results into our matches table. This
+    # gives us a second source of truth (football-data is primary, but Negev
+    # is what actually scores us). Run BEFORE the standings sync so when we
+    # later compute standings ourselves from results, both sides agree.
+    try:
+        n_results = sync_match_results(tid, conn=conn, ntm=ntm, dry=dry)
+        result["results_synced"] = n_results
+    except Exception as e:                             # noqa: BLE001
+        log.warning("results sync failed: %s", e)
+        result["results_synced"] = 0
+        result["results_error"] = str(e)[:120]
 
     # Telegram delivery — only on real sync (not dry-run) and only when asked.
     # Failure to deliver is non-fatal; the standings already wrote OK.
