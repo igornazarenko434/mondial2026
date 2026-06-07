@@ -253,6 +253,49 @@ sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/b
 # diff; no external API calls; doesn't burn any quota.
 ```
 
+### Negev Toto standings sync (Day 9.6)
+
+Daily sync from the friends' Toto app → our standings table. Runs
+automatically at 07:00 IDT via mondial's crontab (installed by
+bootstrap). Manual run any time:
+
+```bash
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py'
+# → '✓ 63 players synced. You: rank 26/63 (0 pts; leader Aharony on 0, gap 0)'
+
+# Dry-run (see what would change, write nothing):
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --dry-run'
+```
+
+Output is consumed by the strategy layer (`store/repo.standings_context`)
+and surfaces in the 09:00 daily summary. When the tournament starts, the
+sync brings yesterday's points into the system overnight.
+
+### Ad-hoc Negev queries via the typed MCP tools
+
+If you want to inspect the Negev app directly (futures picks, side-bet
+questions, leaderboard breakdown), the MCP module exposes 12 tools:
+
+```bash
+# Standings for the configured tournament
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python -c "
+from integrations import negev_toto_mcp as m
+import json
+print(json.dumps(m.toto_get_standings()[:10], indent=2))"'
+
+# Every active side-bet question
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python -c "
+from integrations import negev_toto_mcp as m
+import json
+print(json.dumps(m.toto_get_side_bets(active_only=True)[:10], indent=2))"'
+
+# Friends' futures picks (winner/cinderella/scorer)
+sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python -c "
+from integrations import negev_toto_mcp as m
+import json
+print(json.dumps(m.toto_get_broad_bets(), indent=2))"'
+```
+
 ### Win-the-pool strategy management
 
 ```bash

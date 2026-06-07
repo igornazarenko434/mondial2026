@@ -294,6 +294,49 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.6 — Negev Toto MCP typed tools + daily standings sync (DONE — +30 tests, 400 total).**
+      Closes the manual-standings-entry gap: the friends' Negev Toto app is
+      now the live source of truth for participant points; the local
+      standings table sync'd from it daily at 07:00 IDT.
+      Deliverables:
+      - `integrations/negev_toto_mcp.py` — added 7 typed `@mcp.tool()`
+        functions on top of the existing 5 generic ones:
+          * `toto_list_tournaments` — every accessible tournament + prize pool
+          * `toto_get_standings(tid, extended, include_bots)` — ranked roster
+            scoped to one tournament, tie-break by `exactScoreCount`
+          * `toto_get_matches(date_after, status, stage, limit)` — Negev's
+            match catalog with team names passed through `teams.normalize`
+            and stages mapped to our `RULES_STAGE`
+          * `toto_get_broad_bets(tid)` — per-user futures picks joined with
+            `displayName` from the `users` collection
+          * `toto_get_side_bets(tid, active_only)` — daily yes/no shells
+          * `toto_get_my_preferences()` — read my `pref_*` flags
+          * `toto_update_preferences(...)` — patch my prefs (gated by
+            `NEGEV_ALLOW_WRITES=1`)
+        Plus `_read_all` helper that paginates Firestore via
+        `nextPageToken`. Verified live: 63 players found in the production
+        Negev Toto 2026 tournament (`n40ykJlOIA9Mg839hz91`); Igor at rank
+        26 with all-zeros (tournament hasn't started).
+      - `tools/sync_negev_standings.py` — daily sync script:
+          * Calls `toto_get_standings` → upserts to our `standings` table
+          * Mapping (Option A from handoff): `directionPoints` →
+            `group_points`, `0` → `knockout_points`, `broadBetPoints` →
+            `futures_points`. Strategy layer only uses (you, leader,
+            second) gaps so the group/KO split doesn't matter.
+          * Wrapped in `obs.external_call("negev_toto", "get_standings")`
+            so the call traces to Honeycomb + costs to the ledger.
+          * Cron: `0 7 * * * /home/mondial/mondial2026/.venv/bin/python
+            tools/sync_negev_standings.py` runs daily 2h before the 09:00
+            daily summary so the summary reflects fresh Negev points.
+          * `--dry-run` / `--include-bots` / `--tournament-id` flags.
+      - `.env.example` — added `NEGEV_TOURNAMENT_ID=n40ykJlOIA9Mg839hz91`
+        (the verified live id) + `NEGEV_ALLOW_WRITES=0`.
+      - `config/observability.py` — added `negev_toto` provider (5 req/s
+        polite throttle, no budget, $0 cost) to PROVIDER_LIMITS + PRICING.
+      Tests: +30 (20 typed-tools + 10 sync). All offline (`requests.get`
+      mocked exactly like `test_ingest.py` mocks football-data). Live
+      smoke-test confirmed end-to-end: 63 players, correct mapping,
+      Honeycomb trace.
 - [x] **Day 9.5 — win-the-pool layer wired end-to-end (DONE — 32 tests; 370 total inc. GROUP_-strip regression).**
       Closes the gap between "pure-EV picks" and "position-aware picks":
       - `store/repo.py::standings_context` — fixed TWO bugs: (1) removed

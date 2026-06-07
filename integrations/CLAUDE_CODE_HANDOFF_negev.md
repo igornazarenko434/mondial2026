@@ -97,7 +97,26 @@ before any further work. Key findings:
   don't reveal via read — capture them from the app's Network tab on the first
   write attempt and add to schema.
 
-## ⏳ Step 2 — Typed convenience tools (NOT YET BUILT)
+## ✅ Step 2 — Typed convenience tools (DONE 2026-06-07)
+
+**Built and verified live.** 7 typed `@mcp.tool()` functions added to
+`integrations/negev_toto_mcp.py`, each a thin wrapper over the existing
+generic helpers: `toto_list_tournaments`, `toto_get_standings(tid)`,
+`toto_get_matches`, `toto_get_broad_bets(tid)`, `toto_get_side_bets(tid)`,
+`toto_get_my_preferences`, `toto_update_preferences(...)` (gated by
+`NEGEV_ALLOW_WRITES=1`). Plus `_read_all` helper that paginates Firestore
+via `nextPageToken`.
+
+Tests: `tests/test_negev_mcp.py` (20 offline-mocked tests, all green).
+
+Live 2026-06-07: 63 players in Negev Toto 2026
+(`n40ykJlOIA9Mg839hz91`), Igor at rank 26, pre-tournament all-zeros.
+
+Also wired in Day 9.6: daily 07:00 IDT sync via
+`tools/sync_negev_standings.py` → upserts into our `standings` table for
+the strategy layer. Cron line installed by `infra/bootstrap.sh`.
+
+## (kept for reference) ORIGINAL Step 2 spec
 
 Spec below. Every tool MUST accept `tournament_id` as a parameter so the
 connector binds to any tournament without code changes. Default `tournament_id`

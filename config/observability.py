@@ -40,6 +40,10 @@ PROVIDER_LIMITS = {
     # We only send ~5–10 cards/day, so the per-chat rate is the only one that
     # could ever bind; cap kept conservative.
     "telegram_bot":  {"rate": 1,  "per": 1,    "budget": None,  "budget_period": None},
+    # Negev Toto Firestore — no published quota; we pull ~3 reads/day from cron
+    # (sync_negev_standings). Conservative throttle to be polite to a friends'
+    # app backend.
+    "negev_toto":    {"rate": 5,  "per": 1,    "budget": None,  "budget_period": None},
 }
 
 # Rough $/unit for cost ESTIMATES (free providers = 0). Tune to your plan.
@@ -57,6 +61,7 @@ PRICING = {
     "brave_search":  {"per_call": 0.005}, # $5 / 1,000 requests = $0.005 per call;
                                           # $5/mo free credit covers first 1,000.
     "telegram_bot":  {"per_call": 0.0},   # free
+    "negev_toto":    {"per_call": 0.0},   # friends' Firestore, no metered cost
 }
 
 # Warn when a provider's budget usage crosses this fraction.

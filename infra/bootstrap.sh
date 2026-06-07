@@ -129,10 +129,15 @@ systemctl enable --now mondial2026.service
 sleep 2
 systemctl status --no-pager mondial2026.service || true
 
-bold "7. nightly backup cron"
+bold "7. nightly backup cron + daily Negev standings sync"
 TMP_CRON="$(mktemp)"
-crontab -u "$INSTALL_USER" -l 2>/dev/null | grep -v 'mondial2026/infra/backup.sh' > "$TMP_CRON" || true
+crontab -u "$INSTALL_USER" -l 2>/dev/null \
+    | grep -v 'mondial2026/infra/backup.sh' \
+    | grep -v 'mondial2026/tools/sync_negev_standings.py' \
+    > "$TMP_CRON" || true
+# Backup at 03:15 IDT, sync at 07:00 IDT (2h before the 09:00 daily summary)
 echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> "$TMP_CRON"
+echo "0 7 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet" >> "$TMP_CRON"
 crontab -u "$INSTALL_USER" "$TMP_CRON"
 rm -f "$TMP_CRON"
 

@@ -91,31 +91,40 @@ STRATEGY_TILT=0.4            # 0 = off (default); 0.3–0.6 = position-aware
 
 The daemon will pick these up on its next restart (`systemctl restart mondial2026`).
 
-### 2 — Enter the leaderboard
+### 2 — Get the leaderboard (Day-9.6 auto-sync, recommended)
 
-Friends' standings can't be auto-scraped (Negev Toto needs their Firebase auth
-and we deliberately don't depend on it). Enter them manually with the CLI:
+The Negev Toto Firestore is the source of truth. Day-9.6 wired automatic
+daily sync at 07:00 IDT (2 h before the daily summary):
 
 ```bash
-# One participant at a time
-cd /home/mondial/mondial2026
-sudo -u mondial .venv/bin/python tools/standings_set.py set "Alice" \
-    --group 32.5 --ko 0 --futures 4.2
-
-# Bulk from a JSON file (easier for 8 friends)
-sudo -u mondial .venv/bin/python tools/standings_set.py import friends.json
-# where friends.json looks like:
-#   [{"participant":"Alice","group_points":32.5,"knockout_points":0,"futures_points":4.2},
-#    {"participant":"Bob",  "group_points":28.0,"knockout_points":0,"futures_points":0},
-#    ...]
-
-# Inspect current standings (your row marked ← you)
-sudo -u mondial .venv/bin/python tools/standings_set.py list
+# Manual run any time (the cron fires automatically every morning)
+sudo -u mondial bash -c '
+  cd /home/mondial/mondial2026
+  set -a && source .env && set +a
+  PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py
+'
+# → '✓ 63 players synced. You: rank 26/63 ...'
 ```
 
-**Cadence**: re-enter after each match day. The reader (`standings_context`)
-re-reads on EVERY dispatched job, so a `set` updates kick in on the next
-window-fire — no daemon restart needed.
+The sync calls the Negev MCP's `toto_get_standings(tournament_id=NEGEV_TOURNAMENT_ID)`
+and upserts the result into our `standings` table. Mapping:
+- Negev `directionPoints` → our `group_points`
+- Negev `broadBetPoints` → our `futures_points`
+- `knockout_points` always 0 (Negev folds group+KO into `directionPoints`)
+
+The reader (`standings_context`) re-reads on EVERY dispatched job, so a
+fresh sync kicks in on the next window-fire — no daemon restart needed.
+
+#### Manual entry as fallback
+
+If the Negev sync is unavailable (token expired, sync script broken),
+populate standings manually:
+
+```bash
+sudo -u mondial .venv/bin/python tools/standings_set.py set "Alice" \
+    --group 32.5 --ko 0 --futures 4.2
+sudo -u mondial .venv/bin/python tools/standings_set.py list
+```
 
 ### 3 — How to enter group points (the §14 -15 % reset)
 

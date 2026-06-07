@@ -1,0 +1,167 @@
+"""Daily sync: pull the Negev Toto leaderboard → write to our standings table.
+
+Runs on the VM at 07:00 IDT (via mondial's crontab) — 2 hours before the
+09:00 daily summary, so the summary reflects fresh Negev points.
+
+Mapping (per integrations/CLAUDE_CODE_HANDOFF_negev.md Option A):
+  Negev field        →  our standings column
+  directionPoints    →  group_points     (combines group + KO direction points
+                                          per Negev's data model; the strategy
+                                          layer only needs (you, leader, second)
+                                          gaps so the split doesn't matter)
+  0.0                →  knockout_points  (always 0; reset already baked into
+                                          directionPoints by Negev's writer)
+  broadBetPoints     →  futures_points
+
+Idempotent. Wrapped in obs.external_call so the call is rate-limited + traced.
+Cron line (installed by the bootstrap; can be re-added manually):
+  0 7 * * *  /home/mondial/mondial2026/.venv/bin/python /home/mondial/mondial2026/tools/sync_negev_standings.py >> /var/log/mondial_sync.log 2>&1
+
+CLI flags:
+  --force        run even when the time-since-last-sync gate would skip
+  --dry-run      print what would be upserted; touch no DB
+  --include-bots include role='bot' rows (default: skip)
+"""
+from __future__ import annotations
+import argparse
+import os
+import sqlite3
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from store.db import connect
+from core.obs.logging import get_logger
+from core import obs
+
+log = get_logger("sync_negev")
+
+
+def _import_or_fail():
+    """Lazy-import Negev MCP so this script doesn't blow up if the connector
+    module is missing or NEGEV_REFRESH_TOKEN isn't set. Surfaces a clean error
+    instead."""
+    try:
+        from integrations import negev_toto_mcp as ntm
+        return ntm
+    except Exception as e:                             # noqa: BLE001
+        raise RuntimeError(
+            f"Negev MCP module not importable: {e}. Ensure "
+            "integrations/negev_toto_mcp.py exists and NEGEV_REFRESH_TOKEN "
+            "is set in .env."
+        )
+
+
+def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
+    """One-row UPSERT matching tools/standings_set.py::_upsert shape so the
+    two writers can coexist (manual entry via the CLI, automated via this)."""
+    participant = row["player"]
+    group_pts = float(row["direction"])               # see mapping in module docstring
+    ko_pts = 0.0
+    futures_pts = float(row["broad"])
+    if dry:
+        log.info("[dry-run] would upsert %s: group=%.2f ko=%.2f futures=%.2f total=%.2f",
+                 participant, group_pts, ko_pts, futures_pts,
+                 group_pts + ko_pts + futures_pts)
+        return
+    conn.execute(
+        "INSERT INTO standings (participant, group_points, knockout_points, "
+        "futures_points) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(participant) DO UPDATE SET "
+        "group_points = excluded.group_points, "
+        "knockout_points = excluded.knockout_points, "
+        "futures_points = excluded.futures_points",
+        (participant, group_pts, ko_pts, futures_pts))
+
+
+def sync_standings(*, tournament_id: str | None = None,
+                   include_bots: bool = False,
+                   dry: bool = False,
+                   conn: sqlite3.Connection | None = None,
+                   ntm=None) -> dict:
+    """Pull the leaderboard from Negev → upsert into our standings table.
+
+    Returns: {participants, updated, my_rank, my_total, leader, leader_total}
+    Never raises — failures are caught and reported in the result dict so
+    cron doesn't fire an email about a transient Firestore blip."""
+    ntm = ntm or _import_or_fail()
+    conn = conn or connect()
+    tid = tournament_id or os.environ.get("NEGEV_TOURNAMENT_ID", "").strip()
+    if not tid:
+        return {"ok": False, "error": "NEGEV_TOURNAMENT_ID not set"}
+
+    me = os.environ.get("MY_PARTICIPANT", "").strip()
+
+    try:
+        with obs.external_call("negev_toto", "get_standings"):
+            rows = ntm.toto_get_standings(tournament_id=tid,
+                                           include_bots=include_bots)
+    except Exception as e:                             # noqa: BLE001
+        log.error("Negev fetch failed: %s", e)
+        return {"ok": False, "error": str(e)[:200]}
+
+    if not rows:
+        return {"ok": False, "error": "Negev returned 0 rows — auth failed or tournament empty"}
+
+    n_upserted = 0
+    for r in rows:
+        try:
+            _upsert_standings(conn, r, dry)
+            n_upserted += 1
+        except sqlite3.Error as e:
+            log.warning("upsert %r failed: %s", r.get("player"), e)
+    if not dry:
+        conn.commit()
+
+    leader = rows[0]
+    my_row = next((r for r in rows if r["player"] == me), None)
+    result = {
+        "ok": True, "tournament_id": tid,
+        "participants": len(rows), "upserted": n_upserted,
+        "leader": leader["player"], "leader_total": leader["total"],
+        "second_total": rows[1]["total"] if len(rows) > 1 else None,
+    }
+    if my_row:
+        result.update({"my_rank": my_row["rank"], "my_total": my_row["total"],
+                       "my_gap_to_leader": leader["total"] - my_row["total"]})
+    else:
+        result["warning"] = f"MY_PARTICIPANT={me!r} not in standings"
+    log.info("standings sync: %s", result)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="sync_negev_standings",
+                                description="Pull Negev Toto leaderboard → DB.")
+    p.add_argument("--tournament-id", default=None,
+                   help="Override NEGEV_TOURNAMENT_ID env var")
+    p.add_argument("--include-bots", action="store_true",
+                   help="Include role='bot' rows (default: skip)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print what would be upserted; touch no DB")
+    p.add_argument("--quiet", action="store_true",
+                   help="Suppress final summary line on success")
+    args = p.parse_args(argv)
+
+    with obs.run("sync_negev_standings"):
+        out = sync_standings(tournament_id=args.tournament_id,
+                              include_bots=args.include_bots,
+                              dry=args.dry_run)
+    if not out.get("ok"):
+        print(f"FAILED: {out.get('error')}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        if "my_rank" in out:
+            print(f"✓ {out['participants']} players synced. "
+                  f"You: rank {out['my_rank']}/{out['participants']} "
+                  f"({out['my_total']:.0f} pts; leader {out['leader']} "
+                  f"on {out['leader_total']:.0f}, gap {out['my_gap_to_leader']:.0f})")
+        else:
+            print(f"✓ {out['participants']} players synced. "
+                  f"Leader: {out['leader']} ({out['leader_total']:.0f} pts). "
+                  f"{out.get('warning', '')}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

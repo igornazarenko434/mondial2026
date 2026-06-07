@@ -206,5 +206,300 @@ def toto_patch_document(path: str, fields_json: str) -> dict:
     return {"updated": path, "fields": list(fields)}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Typed convenience tools (Step 2 per CLAUDE_CODE_HANDOFF_negev.md)
+#
+# These are thin wrappers over the 5 generic tools above. They live alongside
+# the generic ones so power-users can still drop down to raw Firestore when
+# something new appears in the schema.
+#
+# `tournament_id` is a parameter on every typed tool — never hard-coded —
+# so the connector works against any pool without code changes. When not
+# passed, falls back to NEGEV_TOURNAMENT_ID env var. Our live tournament is
+# "Negev Toto 2026" (id n40ykJlOIA9Mg839hz91, prize pool ₪32,426, top-10
+# paid — matches config/rules.py::PRIZE_LADDER exactly).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stage label mapping: Negev free-text → our RULES_STAGE labels (config/rules.py).
+# Source: live probe of Negev matches collection + manual mapping by 48-team
+# bracket structure.
+_STAGE_MAP = {
+    "Group Stage - 1": "Group", "Group Stage - 2": "Group", "Group Stage - 3": "Group",
+    "Group Stage": "Group",
+    "Round of 32": "R32", "Round of 16": "R16",
+    "Quarter-finals": "QF", "Quarter Finals": "QF",
+    "Semi-finals": "SF", "Semi Finals": "SF",
+    "3rd Place Final": "3rd", "Third-place Play-off": "3rd",
+    "Final": "Final",
+}
+
+
+def _tid(tournament_id: str | None) -> str:
+    """Resolve the tournament id from arg or NEGEV_TOURNAMENT_ID env var."""
+    tid = tournament_id or os.environ.get("NEGEV_TOURNAMENT_ID", "").strip()
+    if not tid:
+        raise RuntimeError(
+            "tournament_id required. Pass it explicitly or set NEGEV_TOURNAMENT_ID "
+            "in your .env (look it up via toto_list_tournaments)."
+        )
+    return tid
+
+
+def _read_all(collection: str, page_size: int = 100,
+              http_get=None) -> list[dict]:
+    """Read all docs from a collection with pagination via Firestore's
+    nextPageToken. http_get is injectable so tests can mock without network."""
+    get = http_get or requests.get
+    docs: list[dict] = []
+    page_token = None
+    while True:
+        params = {"pageSize": page_size}
+        if page_token:
+            params["pageToken"] = page_token
+        r = get(f"{_base()}/{collection}", headers=_headers(),
+                params=params, timeout=20)
+        if not r.ok:
+            return docs                                # caller may inspect
+        data = r.json()
+        docs.extend(_doc(d) for d in data.get("documents", []))
+        page_token = data.get("nextPageToken")
+        if not page_token:
+            return docs
+
+
+@mcp.tool()
+def toto_list_tournaments() -> list[dict]:
+    """Discover every tournament id referenced by any readable user, then
+    fetch its name + prize pool if accessible to us. Use this to find the
+    Negev Toto 2026 id once if you've forgotten it. Returns sorted by
+    descending prize pool so the real one is first."""
+    users = _read_all("users")
+    tids: set[str] = set()
+    for u in users:
+        for t in u.get("tournaments", []) or []:
+            tids.add(t)
+    out = []
+    for tid in tids:
+        t = toto_get_document(f"tournaments/{tid}")
+        if "error" in t:
+            out.append({"id": tid, "accessible": False, "error": t["error"][:80]})
+            continue
+        settings = t.get("settings") or {}
+        out.append({
+            "id": tid,
+            "name": t.get("name"),
+            "accessible": True,
+            "prize_pool": settings.get("totalPrizePool"),
+            "created_at": t.get("createdAt"),
+            "last_rank_snapshot": t.get("lastRankSnapshot"),
+        })
+    return sorted(out, key=lambda x: -(x.get("prize_pool") or 0))
+
+
+@mcp.tool()
+def toto_get_standings(tournament_id: str | None = None,
+                       extended: bool = False,
+                       include_bots: bool = False) -> list[dict]:
+    """Sorted leaderboard for a tournament: [{rank, player, total, direction,
+    broad, exactCount, role, uid}]. Filters users whose tournaments[] contains
+    the tid. Ties broken by exactScoreCount desc (per PDF §19). extended=True
+    keeps the full user doc on each row. include_bots=True keeps role='bot'
+    rows; default False excludes them so the tracker matches what humans see."""
+    tid = _tid(tournament_id)
+    users = _read_all("users")
+    rows = []
+    for u in users:
+        if tid not in (u.get("tournaments") or []):
+            continue
+        if not include_bots and (u.get("role") == "bot" or u.get("isBot")):
+            continue
+        rows.append({
+            "player": u.get("displayName") or u.get("uid", "?"),
+            "uid": u.get("uid"),
+            "total": float(u.get("pointsTotal") or 0),
+            "direction": float(u.get("directionPoints") or 0),
+            "broad": float(u.get("broadBetPoints") or 0),
+            "exactCount": int(u.get("exactScoreCount") or 0),
+            "role": u.get("role"),
+            **({"_full": u} if extended else {}),
+        })
+    # Sort: total desc, exactCount desc tie-break, displayName asc for stability
+    rows.sort(key=lambda r: (-r["total"], -r["exactCount"], r["player"]))
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+    return rows
+
+
+@mcp.tool()
+def toto_get_matches(date_after: str | None = None,
+                     status: str | None = None,
+                     stage: str | None = None,
+                     limit: int = 200) -> list[dict]:
+    """Read Negev's match catalog, normalized:
+        {match_id, apiFixtureId, home, away, kickoff_utc, stage,
+         status, scoreFullTimeHome/Away, scorePenaltyHome/Away,
+         oddsHome/Draw/Away, oddsSource, isDetonator,
+         exactScoreMultiplier}
+
+    Team names pass through core.data.teams.normalize so they join cleanly
+    with our pipeline. Stage strings map through _STAGE_MAP to our
+    RULES_STAGE labels (Group / R32 / R16 / QF / SF / 3rd / Final).
+
+    Filters:
+      date_after: ISO 8601 date, e.g. '2026-06-11'
+      status:    'NS' (not started) / 'FT' / 'PEN' / etc.
+      stage:     post-normalization label, e.g. 'Group', 'R16'
+    """
+    # Lazy import so the MCP module can run without our repo on the path
+    try:
+        from core.data.teams import normalize as _norm
+    except Exception:                                  # noqa: BLE001
+        _norm = lambda x: x                           # passthrough
+    raw = _read_all("matches", page_size=200)
+    out = []
+    for m in raw[:limit * 3]:                          # over-fetch for post-filter
+        ko_iso = m.get("date")
+        if date_after and ko_iso and ko_iso < date_after:
+            continue
+        if status and m.get("status") != status:
+            continue
+        mapped_stage = _STAGE_MAP.get(m.get("stage", ""), m.get("stage"))
+        if stage and mapped_stage != stage:
+            continue
+        out.append({
+            "match_id": m.get("_path", "").split("/")[-1],
+            "apiFixtureId": m.get("apiFixtureId"),
+            "home": _norm(m.get("homeTeam")),
+            "away": _norm(m.get("awayTeam")),
+            "kickoff_utc": ko_iso,
+            "stage": mapped_stage,
+            "stage_raw": m.get("stage"),
+            "status": m.get("status"),
+            "scoreFullTimeHome": m.get("scoreFullTimeHome"),
+            "scoreFullTimeAway": m.get("scoreFullTimeAway"),
+            "scorePenaltyHome": m.get("scorePenaltyHome"),
+            "scorePenaltyAway": m.get("scorePenaltyAway"),
+            "oddsHome": m.get("oddsHome"),
+            "oddsDraw": m.get("oddsDraw"),
+            "oddsAway": m.get("oddsAway"),
+            "oddsSource": m.get("oddsSource"),
+            "isDetonator": m.get("isDetonator"),
+            "exactScoreMultiplier": m.get("exactScoreMultiplier"),
+        })
+        if len(out) >= limit:
+            break
+    out.sort(key=lambda x: x.get("kickoff_utc") or "")
+    return out
+
+
+@mcp.tool()
+def toto_get_broad_bets(tournament_id: str | None = None) -> list[dict]:
+    """All futures picks in a tournament. Each row:
+        {userId, displayName, winner, goldenBoot, cinderella, bestPlayer,
+         updatedAt}
+    Joins on `users` collection for displayName (uid → display name)."""
+    tid = _tid(tournament_id)
+    raw = _read_all(f"tournaments/{tid}/broadBets")
+    # Build uid → displayName map from users collection
+    users = _read_all("users")
+    name_by_uid = {u.get("uid"): u.get("displayName") for u in users if u.get("uid")}
+    out = []
+    for b in raw:
+        sel = b.get("selections") or {}
+        uid = b.get("userId")
+        out.append({
+            "userId": uid,
+            "displayName": name_by_uid.get(uid, "?"),
+            "winner": sel.get("winner"),
+            "goldenBoot": sel.get("goldenBoot"),
+            "cinderella": sel.get("cinderella"),
+            "bestPlayer": sel.get("bestPlayer"),
+            "updatedAt": b.get("updatedAt"),
+        })
+    out.sort(key=lambda r: r["displayName"])
+    return out
+
+
+@mcp.tool()
+def toto_get_side_bets(tournament_id: str | None = None,
+                       active_only: bool = False) -> list[dict]:
+    """All side-bet questions in a tournament:
+        {id, question, points, stage, startTime, isActive, isLocked,
+         isResolved, correctAnswer, matchId}
+    `matchId` may be None for free-form questions. With active_only=True,
+    returns only rows where isActive and not isResolved."""
+    tid = _tid(tournament_id)
+    raw = _read_all(f"tournaments/{tid}/sideBets")
+    out = []
+    for s in raw:
+        if active_only and (not s.get("isActive") or s.get("isResolved")):
+            continue
+        out.append({
+            "id": s.get("_path", "").split("/")[-1],
+            "question": s.get("question") or "",
+            "points": s.get("points"),
+            "stage": _STAGE_MAP.get(s.get("stage", ""), s.get("stage")),
+            "stage_raw": s.get("stage"),
+            "startTime": s.get("startTime"),
+            "isActive": s.get("isActive", False),
+            "isLocked": s.get("isLocked", False),
+            "isResolved": s.get("isResolved", False),
+            "correctAnswer": s.get("correctAnswer"),
+            "matchId": s.get("matchId"),
+        })
+    out.sort(key=lambda r: r.get("startTime") or "")
+    return out
+
+
+@mcp.tool()
+def toto_get_my_preferences() -> dict:
+    """Read MY user doc and return only the notification-prefs flags + role +
+    status. One network call (users/<my-uid>). Useful before
+    toto_update_preferences to know the current state."""
+    uid = _token.get("uid") or _id_token() and _token.get("uid")
+    if not uid:
+        # _id_token() above ensures sign-in if not cached; uid should now be set
+        _id_token()
+        uid = _token.get("uid")
+    me = toto_get_document(f"users/{uid}")
+    if "error" in me:
+        return me
+    return {
+        "uid": me.get("uid"),
+        "displayName": me.get("displayName"),
+        "role": me.get("role"),
+        "status": me.get("status"),
+        "pref_results": me.get("pref_results"),
+        "pref_reminders": me.get("pref_reminders"),
+        "pref_announcements": me.get("pref_announcements"),
+        "pref_broadBets": me.get("pref_broadBets"),
+        "pref_sideBets": me.get("pref_sideBets"),
+    }
+
+
+@mcp.tool()
+def toto_update_preferences(pref_results: bool | None = None,
+                            pref_reminders: bool | None = None,
+                            pref_announcements: bool | None = None,
+                            pref_broadBets: bool | None = None,
+                            pref_sideBets: bool | None = None) -> dict:
+    """Patch my notification preferences. Only fields explicitly passed are
+    sent (None = unchanged). DISABLED unless NEGEV_ALLOW_WRITES=1."""
+    fields = {k: v for k, v in {
+        "pref_results": pref_results,
+        "pref_reminders": pref_reminders,
+        "pref_announcements": pref_announcements,
+        "pref_broadBets": pref_broadBets,
+        "pref_sideBets": pref_sideBets,
+    }.items() if v is not None}
+    if not fields:
+        return {"error": "nothing to update — pass at least one pref_* arg"}
+    uid = _token.get("uid")
+    if not uid:
+        _id_token()
+        uid = _token.get("uid")
+    return toto_patch_document(f"users/{uid}", json.dumps(fields))
+
+
 if __name__ == "__main__":
     mcp.run()      # stdio transport
