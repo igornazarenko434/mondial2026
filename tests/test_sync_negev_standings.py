@@ -175,14 +175,21 @@ def test_telegram_summary_no_around_when_in_top_5(monkeypatch):
     assert "Around you:" not in body                      # I'm in top 5; no extra block
 
 
-def test_sync_with_send_telegram_calls_delivery_alert(conn, fake_ntm, monkeypatch):
+def test_sync_with_send_telegram_calls_delivery_summary_not_alert(conn, fake_ntm, monkeypatch):
+    """Regression: sync must call delivery.summary (no ⚠️ prefix) — NOT
+    delivery.alert. An earlier version used alert(), which prepended ⚠️
+    to the 📊 title and made the Telegram message look like a failure."""
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     sent = {}
     import core.delivery as d
-    def fake_alert(title, body):
+    def fake_summary(title, body):
         sent["title"] = title
         sent["body"] = body
         return True
+    def fake_alert(*a, **k):
+        sent["alerted"] = True
+        return True
+    monkeypatch.setattr(d, "summary", fake_summary)
     monkeypatch.setattr(d, "alert", fake_alert)
     rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
              "exactCount": 1, "role": "player"}]
@@ -191,13 +198,16 @@ def test_sync_with_send_telegram_calls_delivery_alert(conn, fake_ntm, monkeypatc
     assert out["ok"] is True
     assert out["telegram_delivered"] is True
     assert "Igor" in sent["body"]
+    assert sent["title"].startswith("📊")                  # clean prefix
+    assert "⚠" not in sent["title"]                        # no failure marker
+    assert sent.get("alerted") is None                     # delivery.alert NOT called
 
 
 def test_sync_with_send_telegram_skipped_on_dry_run(conn, fake_ntm, monkeypatch):
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     import core.delivery as d
     fired = {"n": 0}
-    monkeypatch.setattr(d, "alert", lambda t, b: fired.update(n=fired["n"]+1) or True)
+    monkeypatch.setattr(d, "summary", lambda t, b: fired.update(n=fired["n"]+1) or True)
     rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
              "exactCount": 1, "role": "player"}]
     out = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows),
@@ -212,7 +222,7 @@ def test_sync_telegram_delivery_failure_doesnt_break_sync(conn, fake_ntm, monkey
     import core.delivery as d
     def boom(t, b):
         raise RuntimeError("telegram down")
-    monkeypatch.setattr(d, "alert", boom)
+    monkeypatch.setattr(d, "summary", boom)
     rows = [{"player": "Igor", "rank": 1, "total": 10, "direction": 8, "broad": 2,
              "exactCount": 1, "role": "player"}]
     out = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows),

@@ -45,7 +45,17 @@ def deliver_card(card: dict) -> bool:
 
 
 def alert(title: str, body: str) -> bool:
+    """⚠️ -prefixed message for FAILURE notifications. Use `summary()` for
+    informational messages (the prepended ⚠️ would otherwise look like an
+    alert in the chat)."""
     return _fanout(f"⚠️ {title}", body)
+
+
+def summary(title: str, body: str) -> bool:
+    """Informational message (daily summary, Negev standings, etc.) — passes
+    the title through UNMODIFIED so the caller's chosen emoji (☀️ / 📊)
+    isn't double-prefixed with ⚠️."""
+    return _fanout(title, body)
 
 
 def health(summary: dict) -> bool:

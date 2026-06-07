@@ -41,24 +41,24 @@ def _at(local_dt_str: str, tz: str = "Asia/Jerusalem") -> datetime:
 def test_returns_false_before_09_00_local(conn, led):
     """At 08:59 local we are NOT due — would-be tomorrow's summary."""
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = True
+        mock_d.summary.return_value = True
         sent = ds.send_if_due(conn, led, now=_at("2026-06-11 08:59"))
     assert sent is False
-    assert mock_d.alert.call_count == 0
+    assert mock_d.summary.call_count == 0
 
 
 def test_returns_true_at_09_00_first_time(conn, led):
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = True
+        mock_d.summary.return_value = True
         sent = ds.send_if_due(conn, led, now=_at("2026-06-11 09:00"))
     assert sent is True
-    assert mock_d.alert.call_count == 1
+    assert mock_d.summary.call_count == 1
 
 
 def test_returns_true_anytime_after_09_00(conn, led):
     """Catch-up: a restart at 14:00 local still sends today's summary."""
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = True
+        mock_d.summary.return_value = True
         sent = ds.send_if_due(conn, led, now=_at("2026-06-11 14:00"))
     assert sent is True
 
@@ -68,19 +68,19 @@ def test_returns_true_anytime_after_09_00(conn, led):
 def test_does_not_re_send_within_same_local_day(conn, led):
     """Two ticks within the same Jerusalem day → one Telegram message."""
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = True
+        mock_d.summary.return_value = True
         ds.send_if_due(conn, led, now=_at("2026-06-11 09:00"))
         ds.send_if_due(conn, led, now=_at("2026-06-11 09:01"))
         ds.send_if_due(conn, led, now=_at("2026-06-11 23:59"))
-    assert mock_d.alert.call_count == 1
+    assert mock_d.summary.call_count == 1
 
 
 def test_does_send_again_next_local_day(conn, led):
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = True
+        mock_d.summary.return_value = True
         ds.send_if_due(conn, led, now=_at("2026-06-11 09:00"))
         ds.send_if_due(conn, led, now=_at("2026-06-12 09:00"))
-    assert mock_d.alert.call_count == 2
+    assert mock_d.summary.call_count == 2
 
 
 # ─────────────── content composition (all 4 sections) ───────────────
@@ -142,18 +142,18 @@ def test_delivery_alert_failure_records_failed_run_and_still_dedupes(conn, led):
     fires next tick — prevents a retry storm. We accept missing one day's
     summary over flooding the chat."""
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.return_value = False           # delivery failed
+        mock_d.summary.return_value = False           # delivery failed
         first = ds.send_if_due(conn, led, now=_at("2026-06-11 09:00"))
         second = ds.send_if_due(conn, led, now=_at("2026-06-11 09:30"))
     assert first is False and second is False
-    assert mock_d.alert.call_count == 1             # not retried
+    assert mock_d.summary.call_count == 1             # not retried
 
 
 def test_alert_raising_does_not_crash(conn, led):
     """delivery.alert raising must be swallowed — the daemon loop must keep
     polling no matter what."""
     with patch.object(ds, "delivery") as mock_d:
-        mock_d.alert.side_effect = RuntimeError("Telegram chat-id wrong")
+        mock_d.summary.side_effect = RuntimeError("Telegram chat-id wrong")
         sent = ds.send_if_due(conn, led, now=_at("2026-06-11 09:00"))
     assert sent is False                            # no exception escapes
 

@@ -181,7 +181,8 @@ def sync_standings(*, tournament_id: str | None = None,
         try:
             from core import delivery
             title, body = _format_telegram_summary(rows, me, tid)
-            ok = delivery.alert(title, body)
+            # `summary` (not `alert`) — keeps 📊 clean without ⚠️ prefix
+            ok = delivery.summary(title, body)
             result["telegram_delivered"] = bool(ok)
             if ok:
                 log.info("standings summary sent to Telegram")

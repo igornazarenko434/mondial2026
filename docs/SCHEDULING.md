@@ -375,12 +375,13 @@ under each free-tier limit.
 | **Delivery failure** | `⚠ Delivery FAILED — <home> vs <away>` | `pipeline.process_match` | Card was computed but no channel accepted it (Telegram down, file write blocked). |
 | **Scheduler DOWN** | `⚠ Scheduler DOWN` | `watchdog.check_heartbeat` (called every tick) | Heartbeat file >180s stale → the daemon died and was watching itself? No — this comes from an external cron OR from the next tick if the daemon eventually restarts; mostly the systemd auto-restart kicks in first. |
 | **Stuck jobs** | `⚠ Stuck jobs` | `watchdog.check_stuck` (called every tick) | A run started but never finished after 20 min. Body lists match_id + window + started_at. Usually means a hung HTTP call slipped past obs.external_call's rate_timeout. |
-| **Daily summary** ☀️ | `☀️ Daily summary — YYYY-MM-DD` | `schedule.daily_summary.send_if_due` | 09:00 Asia/Jerusalem, once per day. Today's games + recent results + your score + budget status. Doubles as a positive heartbeat — if you don't see it, the daemon is dead even when alerts are also broken. |
+| **Daily summary** ☀️ | `☀️ Daily summary — YYYY-MM-DD` | `schedule.daily_summary.send_if_due` (calls `delivery.summary`, NOT `delivery.alert` → no ⚠️ prefix) | 09:00 Asia/Jerusalem, once per day. Today's games + recent results + your score + budget. Doubles as a positive heartbeat — if you don't see it, the daemon is dead. |
+| **Negev standings sync** 📊 | `📊 Negev standings — YYYY-MM-DD HH:MM IDT` | `tools/sync_negev_standings.py --telegram` (cron, 07:00 IDT; calls `delivery.summary`) | 07:00 Asia/Jerusalem, once per day. Top-5 + your rank + "Around you" window + gap to leader. Day-9.6 addition; arrives 2h before the daily summary. |
 
 All go to the **same** `TELEGRAM_CHAT_ID`. They're visually distinct:
 - Cards start with `⚽` and are 7-9 lines.
-- Alerts start with `⚠` and are 1-3 lines.
-- Daily summary starts with `☀️` and is 4-7 lines.
+- Alerts start with `⚠` and are 1-3 lines (use `delivery.alert`).
+- Informational summaries start with `☀️` / `📊` (use `delivery.summary` to avoid the ⚠️ prefix).
 
 ### What it does NOT alert on (and why that's OK)
 

@@ -329,6 +329,132 @@ def test_update_preferences_passes_only_explicit_fields(fake_firestore, monkeypa
 
 # ─────────────────────────── _read_all pagination ───────────────────────────
 
+# ─────────────────────── toto_get_scoring_grids ───────────────────────
+
+def test_get_scoring_grids_returns_three_named_grids(fake_firestore):
+    tid = "tid-x"
+    fake_firestore["docs"][f"tournaments/{tid}/settings/managerTables"] = {
+        "grids": {
+            "groupStage": {"0-0": 2.75, "1-0": 1.5, "1-1": 2.25, "2-1": 1.5},
+            "round16AndQuarter": {"0-0": 3.75, "1-0": 2.25, "1-1": 3.0},
+            "semiAndFinal": {"0-0": 5.0, "1-0": 3.0, "1-1": 4.0},
+        }
+    }
+    out = ntm.toto_get_scoring_grids(tid)
+    assert out["tournament_id"] == tid
+    assert set(out["grids"].keys()) == {"groupStage", "round16AndQuarter", "semiAndFinal"}
+    # Spot-check one cell
+    assert out["grids"]["groupStage"]["2-1"] == 1.5
+
+
+# ─────────────────────── toto_get_broad_bet_categories ───────────────────────
+
+def test_get_broad_bet_categories_returns_full_options(fake_firestore):
+    tid = "tid-x"
+    fake_firestore["docs"][f"tournaments/{tid}/settings/broadBets"] = {
+        "isPublished": True,
+        "isLocked": False,
+        "categories": [
+            {"id": "winner", "options": [
+                {"id": "team_Portugal", "name": "Portugal", "points": 39, "isKilled": False},
+                {"id": "team_Spain", "name": "Spain", "points": 20, "isKilled": False},
+            ]},
+            {"id": "goldenBoot", "options": [
+                {"id": "1780696080628", "name": "Mbappe", "points": 20, "isKilled": False},
+            ]},
+        ]
+    }
+    out = ntm.toto_get_broad_bet_categories(tid)
+    assert out["isPublished"] is True
+    assert out["isLocked"] is False
+    cat_ids = {c["id"] for c in out["categories"]}
+    assert cat_ids == {"winner", "goldenBoot"}
+    winner = next(c for c in out["categories"] if c["id"] == "winner")
+    assert len(winner["options"]) == 2
+    assert winner["options"][0]["name"] == "Portugal"
+
+
+# ─────────────────────── toto_get_match_bets ───────────────────────
+
+def test_get_match_bets_filters_by_tournament_and_joins_displayName(fake_firestore, monkeypatch):
+    tid = "tid-x"
+    other_tid = "tid-other"
+    # Mock toto_query result
+    def fake_query(*a, **k):
+        return {"results": [
+            {"userId": "u1", "matchId": "m1", "tournamentId": tid, "homeScore": 2,
+             "awayScore": 1, "points": 3.0, "isCorrectDir": True, "isExactScore": False,
+             "breakdown": {"basePoints": 1.0, "totalPoints": 3.0, "odds": 2.0,
+                            "multiplier": 1.5, "detonatorMultiplier": 1,
+                            "penaltiesBonus": 0, "isCorrectDir": True,
+                            "isExactScore": False, "points": 3.0},
+             "processedAt": "2026-06-11T22:00:00Z", "updatedAt": "...",
+             "isBot": False, "_path": "bets/x"},
+            {"userId": "u1", "matchId": "m1", "tournamentId": other_tid, "homeScore": 0,
+             "awayScore": 0, "points": 99.0, "_path": "bets/y"},  # wrong tournament
+        ]}
+    monkeypatch.setattr(ntm, "toto_query", fake_query)
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/u1", "fields": {"uid": "u1", "displayName": "Igor"}}
+    ]
+    rows = ntm.toto_get_match_bets("m1", tid)
+    assert len(rows) == 1                                  # other tournament filtered out
+    assert rows[0]["userId"] == "u1"
+    assert rows[0]["displayName"] == "Igor"
+    assert rows[0]["breakdown"]["odds"] == 2.0
+    assert rows[0]["points"] == 3.0
+
+
+# ─────────────────────── toto_get_my_bets ───────────────────────
+
+def test_get_my_bets_filters_by_my_uid_and_tournament(fake_firestore, monkeypatch):
+    tid = "tid-x"
+    def fake_query(c, field, op, value, limit=200):
+        # Simulate Firestore query for userId = my uid
+        assert field == "userId" and value == "uid-igor"
+        return {"results": [
+            {"userId": "uid-igor", "matchId": "m1", "tournamentId": tid,
+             "homeScore": 2, "awayScore": 1, "points": 3.0,
+             "updatedAt": "2026-06-11T22:00:00Z", "_path": "bets/x"},
+            {"userId": "uid-igor", "matchId": "m2", "tournamentId": "tid-other",
+             "homeScore": 1, "awayScore": 0, "_path": "bets/y"},
+        ]}
+    monkeypatch.setattr(ntm, "toto_query", fake_query)
+    rows = ntm.toto_get_my_bets(tid)
+    assert len(rows) == 1                                  # filtered to tid
+    assert rows[0]["matchId"] == "m1"
+
+
+# ─────────────────────── _tid resolution edges ───────────────────────
+
+def test_tid_resolves_from_arg_first(monkeypatch):
+    monkeypatch.setenv("NEGEV_TOURNAMENT_ID", "tid-env")
+    assert ntm._tid("tid-arg") == "tid-arg"
+
+
+def test_tid_falls_back_to_env(monkeypatch):
+    monkeypatch.setenv("NEGEV_TOURNAMENT_ID", "tid-env")
+    assert ntm._tid(None) == "tid-env"
+
+
+def test_tid_raises_clear_error_when_neither_set(monkeypatch):
+    monkeypatch.delenv("NEGEV_TOURNAMENT_ID", raising=False)
+    with pytest.raises(RuntimeError, match="tournament_id required"):
+        ntm._tid(None)
+
+
+# ─────────────────────── mcp import is optional ───────────────────────
+
+def test_module_works_without_mcp_package_installed():
+    """Regression: the `mcp` import must be optional so tools that use this
+    module as a library (e.g. tools/sync_negev_standings.py) work on the VM
+    without the `mcp[cli]` package installed."""
+    # The module imported fine — that's the assertion. If `mcp` were a hard
+    # dependency the test file wouldn't have loaded.
+    assert hasattr(ntm, "toto_get_standings")
+    assert hasattr(ntm, "_tid")
+
+
 def test_read_all_paginates_via_nextPageToken(monkeypatch):
     monkeypatch.setattr(ntm, "_id_token", lambda: "fake-id")
     pages = [

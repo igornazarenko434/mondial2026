@@ -151,7 +151,8 @@ def send_if_due(conn: sqlite3.Connection, led: RunLedger, *,
                         correlation_id=window_label)
     try:
         body = build_summary_text(conn, now, tz)
-        ok = delivery.alert(f"☀️ Daily summary — {day_label}", body)
+        # `summary` (not `alert`) — keeps the ☀️ emoji clean without ⚠️ prefix
+        ok = delivery.summary(f"☀️ Daily summary — {day_label}", body)
         led.finish(run_id, "ok" if ok else "failed",
                     detail=None if ok else "delivery returned False",
                     card_delivered=bool(ok))
