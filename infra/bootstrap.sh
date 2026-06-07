@@ -129,27 +129,11 @@ systemctl enable --now mondial2026.service
 sleep 2
 systemctl status --no-pager mondial2026.service || true
 
-bold "7. nightly backup cron + daily Negev standings sync"
-TMP_CRON="$(mktemp)"
-# IDEMPOTENT: filter ALL lines we manage so re-running bootstrap doesn't
-# duplicate them. Add new filter lines here whenever we add a new cron.
-crontab -u "$INSTALL_USER" -l 2>/dev/null \
-    | grep -v 'mondial2026/infra/backup.sh' \
-    | grep -v 'mondial2026/tools/sync_negev_standings.py' \
-    | grep -v 'mondial2026/tools/post_match_audit.py' \
-    > "$TMP_CRON" || true
-# Backup at 03:15 IDT, sync at 07:00 IDT (2h before the 09:00 daily summary)
-echo "15 3 * * *  $INSTALL_DIR/infra/backup.sh" >> "$TMP_CRON"
-# Daily 07:00 IDT: Negev standings + results sync + 📊 Telegram leaderboard
-echo "0 7 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram" >> "$TMP_CRON"
-# Every 2 hours during match-day evenings (16:00-02:00 IDT = 13:00-23:00 UTC):
-# silent Negev sync so points land in our DB within ~2h of a match ending.
-echo "0 16,18,20,22,0,2 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet" >> "$TMP_CRON"
-# 08:00 IDT: post-match audit — compares our score_match() vs Negev's
-# points for finished matches, alerts only on discrepancy > 0.01 pts.
-echo "0 8 * * *  cd $INSTALL_DIR && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/post_match_audit.py --telegram" >> "$TMP_CRON"
-crontab -u "$INSTALL_USER" "$TMP_CRON"
-rm -f "$TMP_CRON"
+bold "7. cron: backup + Negev sync + post-match audit (from infra/mondial2026.crontab)"
+# Single source of truth for crontab lines is infra/mondial2026.crontab —
+# this keeps bootstrap idempotent (replace, don't append) and lets users
+# install/refresh manually if cron drifts: `sudo -u mondial crontab ...`
+crontab -u "$INSTALL_USER" "$INSTALL_DIR/infra/mondial2026.crontab"
 
 bold "8. live journal — Ctrl-C to exit (the daemon stays up)"
 sleep 1
