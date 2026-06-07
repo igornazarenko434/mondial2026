@@ -23,9 +23,21 @@ CREATE TABLE IF NOT EXISTS api_calls (
     units REAL DEFAULT 1, tokens INTEGER DEFAULT 0,
     duration_ms REAL DEFAULT 0,
     est_cost REAL DEFAULT 0, ok INTEGER DEFAULT 1,
-    correlation_id TEXT
+    correlation_id TEXT,
+    error_class TEXT,
+    error_message TEXT
 );
 """
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Backfill columns added after the original schema. ALTER TABLE is a no-op
+    if the column already exists (we check via PRAGMA first)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(api_calls)").fetchall()}
+    if "error_class" not in cols:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN error_class TEXT")
+    if "error_message" not in cols:
+        conn.execute("ALTER TABLE api_calls ADD COLUMN error_message TEXT")
 
 
 def _period_start(period: str) -> str:
@@ -52,6 +64,7 @@ class CostLedger:
         self._lock = threading.RLock()
         with self._lock:
             self.conn.execute(_DDL)
+            _migrate(self.conn)
             self.conn.commit()
 
     def _est(self, provider: str, units: float, tokens: int) -> float:
@@ -60,14 +73,22 @@ class CostLedger:
 
     def record(self, provider: str, endpoint: str, units: float = 1,
                tokens: int = 0, ok: bool = True, correlation_id: str = "-",
-               duration_ms: float = 0) -> float:
+               duration_ms: float = 0,
+               error_class: str | None = None,
+               error_message: str | None = None) -> float:
+        """Append one row to api_calls. On failure (ok=False) callers SHOULD
+        pass error_class (e.g. 'RateLimitError' / 'AuthenticationError' /
+        'APITimeoutError') and error_message (~200 chars of the exception
+        repr) so root-cause is queryable later via tools/llm_audit.py."""
         cost = self._est(provider, units, tokens)
         with self._lock:
             self.conn.execute(
-                "INSERT INTO api_calls (ts,provider,endpoint,units,tokens,duration_ms,est_cost,ok,correlation_id)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO api_calls (ts,provider,endpoint,units,tokens,"
+                "duration_ms,est_cost,ok,correlation_id,error_class,error_message)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (datetime.now(timezone.utc).isoformat(), provider, endpoint,
-                 units, tokens, duration_ms, cost, int(ok), correlation_id))
+                 units, tokens, duration_ms, cost, int(ok), correlation_id,
+                 error_class, (error_message or "")[:200] or None))
             self.conn.commit()
         metrics.incr("api_calls", 1, provider=provider, endpoint=endpoint)
         if tokens:

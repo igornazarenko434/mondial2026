@@ -236,6 +236,29 @@ sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/b
 # Burns ~6 free units total (1 Brave + 1 LLM + ~4 small ones). All within budgets.
 ```
 
+### LLM agent root-cause audit (Day-9.10 — read-only, no API calls)
+
+```bash
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/llm_audit.py --hours 24'
+```
+
+Five sections answer the questions you actually have at 2 AM when a card
+landed without news:
+
+1. **CHAIN STATE** — which LLMs *would run right now* for a fresh card, and
+   for each chain entry which is bypassed (`no key` / `over budget` / `✓`).
+2. **PER-PROVIDER LEDGER** — per gemini / claude / openai over the window:
+   call count, ok vs fail, tokens, avg latency, est$, failures broken down
+   **by error class** (`RateLimitError × 3`, `APITimeoutError × 1`, etc.).
+3. **QUOTA STATE** — used / budget per provider with % and `🛑 OVER` flag.
+4. **NEWS CARD AUDIT** — per recent card: `news_provider`, `parse_tier`
+   (`strict` / `regex_repair` / `failed` / `never_called`), `fallbacks_used`,
+   per-fallback error classes, **and the raw 200-char LLM output when
+   `parse_tier == failed`** so you can see exactly what it actually said.
+5. **RECENT LLM FAILURES** — last N raw failure rows: timestamp, provider,
+   endpoint, error class, message, duration, correlation_id (jump straight
+   to Honeycomb with that cid for the full span).
+
 ### Brave quota only (quick check)
 
 ```bash

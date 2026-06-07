@@ -73,22 +73,33 @@ def run(label: str | None = None):
 @contextmanager
 def external_call(provider: str, endpoint: str, tokens: int = 0,
                   units: float = 1, rate_timeout: float | None = 30):
-    """Guard one outbound API/LLM call: rate-limit -> span -> time -> cost."""
+    """Guard one outbound API/LLM call: rate-limit → span → time → cost.
+
+    On exception the cost-ledger row is stamped with `error_class` (e.g.
+    'RateLimitError', 'APIConnectionError', 'AuthenticationError') and
+    `error_message` (first 200 chars of the exception repr) so root-cause
+    is queryable later — no need to grep journalctl to figure out *why*
+    Gemini failed at 14:32 yesterday."""
     if not ratelimit.acquire(provider, n=units, timeout=rate_timeout):
         log.warning("rate-limit timeout for %s/%s", provider, endpoint)
     start = time.monotonic()
     ok = True
+    err_class: str | None = None
+    err_msg: str | None = None
     try:
         with span(f"{provider}.{endpoint}", provider=provider, endpoint=endpoint):
             yield
-    except Exception:
+    except Exception as e:                              # noqa: BLE001
         ok = False
+        err_class = type(e).__name__
+        err_msg = str(e)
         raise
     finally:
         dur_ms = (time.monotonic() - start) * 1000
         metrics.observe("external_call_ms", dur_ms, provider=provider, endpoint=endpoint)
         ledger().record(provider, endpoint, units=units, tokens=tokens, ok=ok,
-                        correlation_id=correlation_id.get(), duration_ms=dur_ms)
+                        correlation_id=correlation_id.get(), duration_ms=dur_ms,
+                        error_class=err_class, error_message=err_msg)
 
 
 __all__ = ["setup", "run", "staged", "stage_of", "current_stage", "external_call",

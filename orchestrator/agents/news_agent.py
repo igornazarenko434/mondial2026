@@ -313,25 +313,36 @@ def _clamp(x) -> float:
         return 0.0
 
 
-def _parse_json_lenient(raw: str) -> dict | None:
-    """Three-tier JSON parser: strict → regex-repair → None."""
+def _parse_json_lenient(raw: str) -> tuple[dict | None, str]:
+    """Three-tier JSON parser. Returns (data, tier).
+
+    tier is one of:
+      "strict"        — raw output parsed as valid JSON directly
+      "regex_repair"  — first/largest {...} block parsed (LLM added prose)
+      "empty"         — empty input (provider returned nothing)
+      "failed"        — both tiers failed (output was non-JSON garbage)
+
+    The tier is stamped on the card as `news_parse_tier` so the user can
+    tell whether neutral deltas came from "everything ran fine, just no
+    news" vs "LLM responded but the output was unparseable".
+    """
     if not raw:
-        return None
+        return None, "empty"
     s = raw.strip()
     # Strip ```json fences (the router already does this once, defensive again)
     s = s.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
-        return json.loads(s)
+        return json.loads(s), "strict"
     except json.JSONDecodeError:
         pass
     # Tier 2: find the largest {...} block in the text
     m = re.search(r"\{[\s\S]*\}", s)
     if m:
         try:
-            return json.loads(m.group(0))
+            return json.loads(m.group(0)), "regex_repair"
         except json.JSONDecodeError:
             pass
-    return None
+    return None, "failed"
 
 
 def _validate_and_clamp(data: dict | None) -> dict:
@@ -376,6 +387,16 @@ def analyze(home: str, away: str, context_text: str,
     The returned dict has a new field `provider` set to the LLM name that
     actually answered (e.g. "gemini" / "claude" / "openai") so the card
     audit trail can show which model produced the news output.
+
+    Day-9.10 stamps additional fields for full observability:
+      - parse_tier:        which of strict/regex_repair/empty/failed succeeded
+      - raw_excerpt:       first 200 chars of the unparseable output (only
+                            set when parse_tier is 'failed', so the user can
+                            see what the LLM actually returned)
+      - fallback_errors:   {provider_name: {error_class, error_message}} for
+                            each upstream provider that failed BEFORE the
+                            successful one — tells you WHY Gemini was
+                            bypassed (RateLimitError? AuthError? Timeout?)
     """
     llm = router or LLMRouter()
     prompt = (f"Fixture: {home} (home) vs {away} (away).\n\n"
@@ -386,13 +407,20 @@ def analyze(home: str, away: str, context_text: str,
         raw = llm.complete(SYSTEM, prompt, json_mode=True, max_tokens=500)
     except Exception:
         raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=500)
-    parsed = _parse_json_lenient(raw)
+    parsed, tier = _parse_json_lenient(raw)
     out = _validate_and_clamp(parsed)
-    # Stamp which provider answered + any providers tried before falling
-    # through — surface this on the card so the user knows which model
-    # was authoritative for THIS news delta.
     out["provider"] = getattr(llm, "last_provider", None)
     out["fallbacks_used"] = list(getattr(llm, "last_fallbacks", []) or [])
+    out["fallback_errors"] = dict(getattr(llm, "last_fallback_errors", {}) or {})
+    out["parse_tier"] = tier
+    if tier == "failed":
+        # Capture the head of the bad output so we can see why the LLM's
+        # response wasn't parseable. Logged AND stamped on the card.
+        excerpt = str(raw)[:200] if raw else ""
+        out["raw_excerpt"] = excerpt
+        log.warning("LLM output for %s vs %s could not be parsed (provider=%s); "
+                    "first 200 chars: %r",
+                    home, away, out["provider"], excerpt)
     return out
 
 
@@ -404,16 +432,26 @@ def analyze_safe(home: str, away: str, context_text: str,
     On failure, the returned dict's `provider` field is None and `failure`
     holds a short reason — both surface on the card so the user knows why
     news contributed zero (vs. legitimately neutral input data).
+
+    Day-9.10 also stamps:
+      - failure_class:   exception type name (e.g. 'AllProvidersFailed')
+      - fallback_errors: per-provider error_class+message map (which provider
+                          died with which error before we gave up)
     """
     try:
         return analyze(home, away, context_text, router)
     except Exception as e:                            # noqa: BLE001
-        log.warning("news/LLM unavailable for %s vs %s (%s); neutral deltas",
-                    home, away, e)
+        log.warning("news/LLM unavailable for %s vs %s (%s: %s); neutral deltas",
+                    home, away, type(e).__name__, e)
         out = dict(NEUTRAL)
         out["provider"] = None
-        out["fallbacks_used"] = []
+        out["fallbacks_used"] = list(getattr(router, "last_fallbacks", []) or []) \
+                                if router else []
+        out["fallback_errors"] = dict(getattr(router, "last_fallback_errors", {}) or {}) \
+                                  if router else {}
         out["failure"] = str(e)[:120]
+        out["failure_class"] = type(e).__name__
+        out["parse_tier"] = "never_called"             # didn't get past LLM call
         return out
 
 

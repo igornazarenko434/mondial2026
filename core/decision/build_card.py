@@ -188,7 +188,11 @@ def build_card(match: dict, conn=None, *,
             "notes": deltas.get("notes") or [],
             "provider": deltas.get("provider"),          # which LLM answered
             "fallbacks_used": deltas.get("fallbacks_used") or [],
+            "fallback_errors": deltas.get("fallback_errors") or {},  # Day-9.10
+            "parse_tier": deltas.get("parse_tier"),       # Day-9.10
+            "raw_excerpt": deltas.get("raw_excerpt"),     # Day-9.10
             "failure": deltas.get("failure"),
+            "failure_class": deltas.get("failure_class"), # Day-9.10
         }
         # If the LLM legitimately ran but ALL providers failed, count news as
         # signals_failed so the audit trail is honest (not silently "used").
@@ -203,7 +207,9 @@ def build_card(match: dict, conn=None, *,
         news_deltas = (0.0, 0.0)
         news_meta = {"home": 0.0, "away": 0.0, "confidence": "low",
                        "notes": [], "provider": None, "fallbacks_used": [],
-                       "failure": _trim(e)}
+                       "fallback_errors": {}, "parse_tier": "never_called",
+                       "raw_excerpt": None, "failure": _trim(e),
+                       "failure_class": type(e).__name__}
 
     # ───── 5. Run the model assembler ─────
     try:
@@ -253,7 +259,11 @@ def build_card(match: dict, conn=None, *,
     card["news_notes"]          = news_meta.get("notes", [])
     card["news_provider"]       = news_meta.get("provider")
     card["news_fallbacks_used"] = news_meta.get("fallbacks_used", [])
+    card["news_fallback_errors"] = news_meta.get("fallback_errors", {})  # Day-9.10
+    card["news_parse_tier"]     = news_meta.get("parse_tier")             # Day-9.10
+    card["news_raw_excerpt"]    = news_meta.get("raw_excerpt")            # Day-9.10
     card["news_failure"]        = news_meta.get("failure")
+    card["news_failure_class"]  = news_meta.get("failure_class")          # Day-9.10
 
     # Golden auditability rule: every signal must appear somewhere. The
     # production path enforces this by construction (we visit every signal

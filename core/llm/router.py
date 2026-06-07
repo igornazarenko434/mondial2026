@@ -36,15 +36,37 @@ class LLMRouter:
         # Providers we attempted before the successful one — chain visibility
         # for fallback audit (e.g. ["gemini"] when we fell back to claude).
         self.last_fallbacks: list[str] = []
+        # Day-9.10: per-provider failure detail. Maps each tried provider name
+        # → {"error_class": "RateLimitError", "error_message": "...truncated"}
+        # so the news_agent can stamp the *specific* upstream reason on the
+        # card, not just "fallback happened".
+        self.last_fallback_errors: dict[str, dict] = {}
 
     def _ordered_available(self) -> list[LLMProvider]:
+        """Providers in chain order, filtered by (a) key configured and
+        (b) cost-ledger budget NOT exhausted. Records each skip reason on
+        `last_fallbacks` (suffixed `:no_key` or `:over_budget`) so the
+        audit trail explains WHY a provider was bypassed."""
         out = []
         for name in self.chain:
             p = self.registry.get(name)
-            if p and p.available():
-                out.append(p)
-            elif p:
+            if not p:
+                continue
+            if not p.available():
                 log.info("LLM provider '%s' configured but not available (no key)", name)
+                continue
+            # Day-9.10: pre-flight over-budget check. Otherwise we'd burn the
+            # call, get a 429, log it, fall back — same effect but with one
+            # wasted upstream request and a noisy "fallback" line that doesn't
+            # explain "we already knew Gemini was at 1500/1500".
+            try:
+                from core.obs.cost import ledger
+                if ledger().over_budget(name):
+                    log.warning("LLM provider '%s' over budget; skipping", name)
+                    continue
+            except Exception:                              # noqa: BLE001
+                pass
+            out.append(p)
         return out
 
     def _instrument(self, provider, fn, system, prompt, **kw):
@@ -79,36 +101,48 @@ class LLMRouter:
     def complete(self, system: str, prompt: str, **kw) -> str:
         last = None
         tried: list[str] = []
+        errors: dict[str, dict] = {}
         for p in self._ordered_available():
             try:
                 result = self._instrument(p, p.complete, system, prompt, **kw)
                 # Success — stamp which model answered (for card audit trail).
                 self.last_provider = p.name
                 self.last_fallbacks = tried
+                self.last_fallback_errors = errors
                 return result
             except Exception as e:               # noqa: BLE001 - fall back on any error
                 tried.append(p.name)
-                log.warning("provider '%s' failed: %s; falling back", p.name, e)
+                errors[p.name] = {"error_class": type(e).__name__,
+                                   "error_message": str(e)[:200]}
+                log.warning("provider '%s' failed (%s): %s; falling back",
+                            p.name, type(e).__name__, e)
                 last = e
         self.last_provider = None
         self.last_fallbacks = tried
+        self.last_fallback_errors = errors
         raise AllProvidersFailed(
             f"no usable LLM in chain {self.chain}; last error: {last}")
 
     def complete_json(self, system: str, prompt: str, **kw) -> dict:
         last = None
         tried: list[str] = []
+        errors: dict[str, dict] = {}
         for p in self._ordered_available():
             try:
                 result = self._instrument(p, p.complete_json, system, prompt, **kw)
                 self.last_provider = p.name
                 self.last_fallbacks = tried
+                self.last_fallback_errors = errors
                 return result
             except Exception as e:               # noqa: BLE001
                 tried.append(p.name)
-                log.warning("provider '%s' json failed: %s; falling back", p.name, e)
+                errors[p.name] = {"error_class": type(e).__name__,
+                                   "error_message": str(e)[:200]}
+                log.warning("provider '%s' json failed (%s): %s; falling back",
+                            p.name, type(e).__name__, e)
                 last = e
         self.last_provider = None
         self.last_fallbacks = tried
+        self.last_fallback_errors = errors
         raise AllProvidersFailed(
             f"no usable LLM in chain {self.chain}; last error: {last}")
