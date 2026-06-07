@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mondial 2026 — System Architecture</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a212c;
+    --panel-2: #232b38;
+    --border: #2d3748;
+    --text: #e2e8f0;
+    --text-dim: #a0aec0;
+    --accent: #4fd1c5;
+    --accent-warm: #f6ad55;
+    --ok: #48bb78;
+    --warn: #ed8936;
+    --err: #fc8181;
+    --signal-dc: #63b3ed;
+    --signal-elo: #b794f4;
+    --signal-market: #f6e05e;
+    --signal-news: #fc8181;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  header {
+    background: linear-gradient(135deg, #1a365d 0%, #2a4365 100%);
+    padding: 36px 28px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 {
+    margin: 0 0 8px;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  header .sub {
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+  nav.toc {
+    background: var(--panel);
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    font-size: 13px;
+  }
+  nav.toc a {
+    color: var(--accent);
+    text-decoration: none;
+    margin-right: 18px;
+    white-space: nowrap;
+  }
+  nav.toc a:hover { text-decoration: underline; }
+  main {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 28px 80px;
+  }
+  section { margin-bottom: 60px; }
+  h2 {
+    font-size: 22px;
+    margin-top: 8px;
+    margin-bottom: 16px;
+    color: var(--accent);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+  h3 {
+    font-size: 17px;
+    margin-top: 28px;
+    margin-bottom: 10px;
+    color: var(--accent-warm);
+  }
+  h4 {
+    font-size: 14px;
+    margin-top: 18px;
+    margin-bottom: 8px;
+    color: var(--text);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  p, ul, ol { margin: 8px 0 12px; }
+  ul, ol { padding-left: 22px; }
+  code {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    background: var(--panel-2);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 13px;
+    color: var(--accent);
+  }
+  pre {
+    background: var(--panel);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 13px;
+  }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--panel-2);
+    color: var(--accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.05em;
+  }
+  tr:hover td { background: rgba(79, 209, 197, 0.04); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 18px 22px;
+    margin: 14px 0;
+  }
+  .panel.ok    { border-left: 3px solid var(--ok); }
+  .panel.warn  { border-left: 3px solid var(--warn); }
+  .panel.err   { border-left: 3px solid var(--err); }
+  .panel.info  { border-left: 3px solid var(--accent); }
+  .panel-title {
+    font-weight: 700;
+    color: var(--accent-warm);
+    margin-bottom: 6px;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .pill {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 9px;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0 2px;
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  .pill.ok    { color: var(--ok); border-color: var(--ok); }
+  .pill.warn  { color: var(--warn); border-color: var(--warn); }
+  .pill.err   { color: var(--err); border-color: var(--err); }
+  .pill.dc    { color: var(--signal-dc); border-color: var(--signal-dc); }
+  .pill.elo   { color: var(--signal-elo); border-color: var(--signal-elo); }
+  .pill.market { color: var(--signal-market); border-color: var(--signal-market); }
+  .pill.news  { color: var(--signal-news); border-color: var(--signal-news); }
+  /* Diagrams */
+  .flow {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    margin: 16px 0;
+    overflow-x: auto;
+  }
+  .flow svg { display: block; margin: 0 auto; }
+  /* Mermaid-ish ASCII boxes */
+  .stage-box {
+    display: inline-block;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 6px 12px;
+    margin: 4px 2px;
+    font-size: 12px;
+    font-family: "SF Mono", Menlo, monospace;
+  }
+  .stage-box.signal-dc { border-color: var(--signal-dc); color: var(--signal-dc); }
+  .stage-box.signal-elo { border-color: var(--signal-elo); color: var(--signal-elo); }
+  .stage-box.signal-market { border-color: var(--signal-market); color: var(--signal-market); }
+  .stage-box.signal-news { border-color: var(--signal-news); color: var(--signal-news); }
+  .footer-note {
+    color: var(--text-dim);
+    font-size: 12px;
+    margin-top: 60px;
+    text-align: center;
+    border-top: 1px solid var(--border);
+    padding-top: 20px;
+  }
+  details {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 8px 14px;
+    margin: 8px 0;
+    cursor: pointer;
+  }
+  details summary {
+    cursor: pointer;
+    color: var(--accent-warm);
+    font-weight: 600;
+    font-size: 14px;
+  }
+  details[open] summary { margin-bottom: 10px; }
+  hr {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+  }
+  @media print {
+    body { background: white; color: black; }
+    header { background: #f0f0f0; }
+    nav.toc { display: none; }
+    section { page-break-inside: avoid; }
+    .panel { background: #f7f7f7; }
+    pre { background: #f0f0f0; color: black; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Mondial 2026 — System Architecture</h1>
+  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07.</div>
+</header>
+
+<nav class="toc">
+  <a href="#tldr">TL;DR</a>
+  <a href="#stack">Stack</a>
+  <a href="#stages">Pipeline Stages</a>
+  <a href="#stage1">1. Calendar</a>
+  <a href="#stage2">2. Scheduler</a>
+  <a href="#stage3">3. Signals</a>
+  <a href="#stage4">4. Blend</a>
+  <a href="#stage5">5. EV</a>
+  <a href="#stage6">6. Strategy</a>
+  <a href="#stage7">7. Render</a>
+  <a href="#stage8">8. Deliver</a>
+  <a href="#stage9">9. Scoring</a>
+  <a href="#stage10">10. Watchdog</a>
+  <a href="#observability">Observability</a>
+  <a href="#failures">Failure Modes</a>
+  <a href="#timing">Timing</a>
+</nav>
+
+<main>
+
+<!-- =========== TL;DR =========== -->
+<section id="tldr">
+  <h2>TL;DR — what this system does</h2>
+  <div class="panel info">
+    <p><strong>Goal:</strong> Win our friends' Toto pool by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
+    <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × locked odds, renders a 7-9 line card, and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to Honeycomb.</p>
+    <p><strong>Where:</strong> Hetzner CPX22 VM ($10 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart.</p>
+    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa).</p>
+  </div>
+</section>
+
+<!-- =========== STACK =========== -->
+<section id="stack">
+  <h2>The stack — every system we use and why</h2>
+  <table>
+    <thead><tr><th>Layer</th><th>Tech</th><th>Why this</th></tr></thead>
+    <tbody>
+    <tr><td>Compute</td><td>Hetzner CPX22 (2 vCPU AMD, 4 GB RAM)</td><td>$10 for tournament, always-on, EU latency</td></tr>
+    <tr><td>OS</td><td>Ubuntu 24.04 LTS</td><td>5-year support, stable Python 3.12</td></tr>
+    <tr><td>Process supervisor</td><td>systemd</td><td>Built-in, Restart=always, MemoryMax=512M</td></tr>
+    <tr><td>State</td><td>SQLite</td><td>Single-user; zero config; survives restarts</td></tr>
+    <tr><td>Calendar source</td><td>football-data.org Free</td><td>10/min, no daily cap, official feed</td></tr>
+    <tr><td>Odds source</td><td>the-odds-api Starter</td><td>500 credits/mo, Pinnacle + Betfair coverage</td></tr>
+    <tr><td>Lineups / injuries</td><td>api-sports football Free</td><td>10/min, 100/day</td></tr>
+    <tr><td>News search</td><td>Brave Search API</td><td>$5/mo free credit = 1000 free queries/mo, no Google scraping</td></tr>
+    <tr><td>LLM (primary)</td><td>Google Gemini Flash 2.5 (free)</td><td>15 RPM, 1500/day, $0 OOP</td></tr>
+    <tr><td>LLM (fallback)</td><td>Claude Haiku 4.5 → OpenAI gpt-4o-mini</td><td>PAYG safety net if Gemini fails</td></tr>
+    <tr><td>Tracing</td><td>OpenTelemetry → Honeycomb</td><td>Vendor-neutral SDK, free Honeycomb dataset</td></tr>
+    <tr><td>Delivery</td><td>Telegram Bot API</td><td>Push-to-phone, free, 30 msg/sec global</td></tr>
+    <tr><td>Historical results (DC fit)</td><td>github.com/martj42/international_results</td><td>Maintained CSV, ~49k rows back to 1872</td></tr>
+    <tr><td>Elo ratings</td><td>eloratings.net/World.tsv</td><td>Standard reference, updated daily</td></tr>
+    <tr><td>Test framework</td><td>pytest</td><td>369 tests, ~17s full suite</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- =========== PIPELINE STAGES OVERVIEW =========== -->
+<section id="stages">
+  <h2>The pipeline — 10 stages, end-to-end</h2>
+  <div class="flow">
+<svg viewBox="0 0 1000 720" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .box { fill: #232b38; stroke: #4a5568; stroke-width: 1.5; }
+    .box-accent { fill: #1a365d; stroke: #4fd1c5; stroke-width: 1.5; }
+    .label { fill: #e2e8f0; font-family: -apple-system, sans-serif; font-size: 12px; font-weight: 600; }
+    .label-small { fill: #a0aec0; font-family: -apple-system, sans-serif; font-size: 10px; }
+    .arrow { stroke: #4fd1c5; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .arrow-dim { stroke: #4a5568; stroke-width: 1.5; fill: none; marker-end: url(#arrow-dim); stroke-dasharray: 4 3; }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4fd1c5"/>
+    </marker>
+    <marker id="arrow-dim" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4a5568"/>
+    </marker>
+  </defs>
+
+  <!-- Stage 1: Calendar -->
+  <rect x="50" y="20" width="200" height="60" rx="5" class="box-accent"/>
+  <text x="150" y="42" text-anchor="middle" class="label">1. Calendar ingest</text>
+  <text x="150" y="60" text-anchor="middle" class="label-small">football-data.org → matches table</text>
+  <text x="150" y="72" text-anchor="middle" class="label-small">every 30 min</text>
+
+  <!-- Stage 2: Scheduler -->
+  <rect x="50" y="110" width="200" height="60" rx="5" class="box-accent"/>
+  <text x="150" y="132" text-anchor="middle" class="label">2. Scheduler</text>
+  <text x="150" y="150" text-anchor="middle" class="label-small">due_jobs → ThreadPool dispatch</text>
+  <text x="150" y="162" text-anchor="middle" class="label-small">every 60 s</text>
+
+  <!-- Stage 3: Signals (4 parallel) -->
+  <rect x="380" y="80" width="240" height="120" rx="5" class="box"/>
+  <text x="500" y="100" text-anchor="middle" class="label">3. 4 signals load (parallel)</text>
+  <rect x="395" y="115" width="100" height="22" rx="3" fill="#1a365d" stroke="#63b3ed"/>
+  <text x="445" y="130" text-anchor="middle" class="label-small" fill="#63b3ed">Dixon-Coles</text>
+  <rect x="505" y="115" width="100" height="22" rx="3" fill="#1a365d" stroke="#b794f4"/>
+  <text x="555" y="130" text-anchor="middle" class="label-small" fill="#b794f4">Elo</text>
+  <rect x="395" y="145" width="100" height="22" rx="3" fill="#1a365d" stroke="#f6e05e"/>
+  <text x="445" y="160" text-anchor="middle" class="label-small" fill="#f6e05e">Market odds</text>
+  <rect x="505" y="145" width="100" height="22" rx="3" fill="#1a365d" stroke="#fc8181"/>
+  <text x="555" y="160" text-anchor="middle" class="label-small" fill="#fc8181">News (LLM)</text>
+  <text x="500" y="190" text-anchor="middle" class="label-small">each in try/except → signals_used or signals_failed</text>
+
+  <!-- Stage 4: Blend -->
+  <rect x="750" y="110" width="200" height="60" rx="5" class="box-accent"/>
+  <text x="850" y="132" text-anchor="middle" class="label">4. Blend</text>
+  <text x="850" y="150" text-anchor="middle" class="label-small">0.30 DC + 0.20 Elo + 0.50 mkt</text>
+  <text x="850" y="162" text-anchor="middle" class="label-small">→ score matrix</text>
+
+  <!-- Stage 5: EV optimizer -->
+  <rect x="750" y="220" width="200" height="60" rx="5" class="box-accent"/>
+  <text x="850" y="242" text-anchor="middle" class="label">5. EV optimizer</text>
+  <text x="850" y="260" text-anchor="middle" class="label-small">pick exact score with max</text>
+  <text x="850" y="272" text-anchor="middle" class="label-small">mult × odds × P(s)</text>
+
+  <!-- Stage 6: Strategy (optional) -->
+  <rect x="750" y="320" width="200" height="60" rx="5" class="box"/>
+  <text x="850" y="342" text-anchor="middle" class="label">6. Strategy tilt</text>
+  <text x="850" y="360" text-anchor="middle" class="label-small">(optional, default OFF)</text>
+  <text x="850" y="372" text-anchor="middle" class="label-small">position-aware variance</text>
+
+  <!-- Stage 7: Render -->
+  <rect x="380" y="320" width="240" height="60" rx="5" class="box-accent"/>
+  <text x="500" y="342" text-anchor="middle" class="label">7. render_card</text>
+  <text x="500" y="360" text-anchor="middle" class="label-small">7-9 line plain-text card</text>
+  <text x="500" y="372" text-anchor="middle" class="label-small">Signals: DC+Elo+Market+News(gemini)</text>
+
+  <!-- Stage 8: Deliver -->
+  <rect x="50" y="320" width="200" height="60" rx="5" class="box-accent"/>
+  <text x="150" y="342" text-anchor="middle" class="label">8. Deliver</text>
+  <text x="150" y="360" text-anchor="middle" class="label-small">Telegram + file + console</text>
+  <text x="150" y="372" text-anchor="middle" class="label-small">never raises</text>
+
+  <!-- Stage 9: Scoring -->
+  <rect x="50" y="430" width="200" height="60" rx="5" class="box"/>
+  <text x="150" y="452" text-anchor="middle" class="label">9. update_standings</text>
+  <text x="150" y="470" text-anchor="middle" class="label-small">runs every tick</text>
+  <text x="150" y="482" text-anchor="middle" class="label-small">idempotent</text>
+
+  <!-- Stage 10: Watchdog -->
+  <rect x="380" y="430" width="240" height="60" rx="5" class="box"/>
+  <text x="500" y="452" text-anchor="middle" class="label">10. Watchdog + Daily summary</text>
+  <text x="500" y="470" text-anchor="middle" class="label-small">heartbeat + stuck-job + ☀️ 09:00</text>
+
+  <!-- Observability -->
+  <rect x="50" y="540" width="900" height="60" rx="5" class="box-accent"/>
+  <text x="500" y="562" text-anchor="middle" class="label">Observability (everywhere)</text>
+  <text x="500" y="580" text-anchor="middle" class="label-small">obs.external_call wraps every HTTP call → OTel span → Honeycomb + cost ledger + rate-limit bucket</text>
+  <text x="500" y="592" text-anchor="middle" class="label-small">runs ledger persists (match_id, window) status → idempotent across restarts</text>
+
+  <!-- Arrows -->
+  <path d="M 150 80 L 150 110" class="arrow"/>
+  <path d="M 250 140 L 380 140" class="arrow"/>
+  <path d="M 620 140 L 750 140" class="arrow"/>
+  <path d="M 850 170 L 850 220" class="arrow"/>
+  <path d="M 850 280 L 850 320" class="arrow"/>
+  <path d="M 750 350 L 620 350" class="arrow"/>
+  <path d="M 380 350 L 250 350" class="arrow"/>
+  <!-- Scoring/watchdog runs alongside -->
+  <path d="M 150 380 L 150 430" class="arrow-dim"/>
+  <path d="M 500 380 L 500 430" class="arrow-dim"/>
+</svg>
+  </div>
+  <p class="label-small" style="text-align:center;color:var(--text-dim)">Solid lines = data flow per match. Dashed lines = post-pick housekeeping. The observability bar at the bottom is implicit on every external call.</p>
+</section>
+
+<!-- =========== STAGE 1: CALENDAR =========== -->
+<section id="stage1">
+  <h2>Stage 1 — Calendar ingestion</h2>
+
+  <h3>Who, what, when</h3>
+  <table>
+    <tr><th>Who</th><td><code>schedule/runner.py::_maybe_ingest</code> → <code>core/data/football_data.py::refresh</code></td></tr>
+    <tr><th>What</th><td>HTTPS GET <code>https://api.football-data.org/v4/competitions/WC/matches</code></td></tr>
+    <tr><th>When</th><td>Daemon startup + every 30 minutes (<code>INGEST_EVERY_MIN</code>)</td></tr>
+    <tr><th>Cost</th><td>1 of 10/min rate-limit budget; no daily cap</td></tr>
+    <tr><th>Outcome</th><td>UPSERTs 104 rows into <code>matches</code> table; tags 6 detonators from <code>data/wc2026_detonator_fixtures.csv</code></td></tr>
+  </table>
+
+  <h3>What gets stored per match</h3>
+  <pre><code>match_id     INTEGER (PK)    e.g. 537327
+utc_kickoff  TEXT (ISO)      e.g. 2026-06-11T19:00:00+00:00
+local_kickoff TEXT (display) e.g. 2026-06-11 22:00
+stage        TEXT (rules)    Group | R32 | R16 | QF | SF | 3rd | Final
+grp          TEXT            "A" .. "L"
+home, away   TEXT            normalized via core/data/teams.normalize
+status       TEXT            SCHEDULED | TIMED | IN_PLAY | PAUSED | FINISHED | POSTPONED | CANCELLED
+home_goals,
+away_goals   INTEGER         NULL until FINISHED
+detonator    INTEGER (0/1)   tagged from CSV; preserved on re-ingest</code></pre>
+
+  <h3>How time changes / TBD knockouts / rescheduled matches flow through</h3>
+  <div class="panel info">
+    <p>The UPSERT on every <code>refresh()</code> means the <strong>system self-synchronizes from a single source of truth</strong>:</p>
+    <ul>
+      <li><strong>Time change:</strong> next ingest overwrites <code>utc_kickoff</code> → next tick's <code>due_jobs()</code> recomputes from new kickoff → window fires at new time</li>
+      <li><strong>TBD knockout:</strong> rows with <code>home=NULL</code> or <code>away=NULL</code> are filtered out by <code>upcoming_matches</code>. When the bracket resolves, football-data fills in teams and the next ingest writes them — appears automatically</li>
+      <li><strong>POSTPONED → SCHEDULED:</strong> filtered out while POSTPONED; appears again once re-scheduled with new kickoff</li>
+      <li><strong>FINISHED:</strong> stays in table forever (for scoring); filtered from <code>upcoming_matches</code> by <code>status IN ('SCHEDULED','TIMED')</code></li>
+    </ul>
+  </div>
+
+  <h3>Failure modes for this stage</h3>
+  <div class="panel warn">
+    <ul>
+      <li><strong>API 429 / 5xx</strong> → caught + logged + retried next 30-min cycle. Daemon continues. Calendar may be stale by up to 60 min — acceptable buffer.</li>
+      <li><strong>Bad API key (401/403)</strong> → caught + logged. No new matches. Existing calendar still drives scheduling (so cached fixtures still fire). Daily summary's "Budget" line stays at 0 — that's your early-warning signal.</li>
+      <li><strong>Schema change in football-data response</strong> → parse exception caught row-by-row; bad rows skipped with warning, good rows ingested.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- =========== STAGE 2: SCHEDULER =========== -->
+<section id="stage2">
+  <h2>Stage 2 — Time-based scheduling</h2>
+
+  <h3>The poll loop (not a queue!)</h3>
+  <div class="panel info">
+    <p>There is <strong>no external job queue</strong>. No Redis. No Celery. Just a poll loop:</p>
+    <ul>
+      <li>Every 60 s, <code>SchedulerDaemon.tick()</code> runs.</li>
+      <li>It reads the calendar table.</li>
+      <li>For each upcoming match, it computes <code>run_at = kickoff − window_offset</code> for each of the 4 windows.</li>
+      <li>If <code>now ≥ run_at</code> AND <code>(now − run_at) ≤ 120 min</code> (catch-up cap) AND not in runs ledger → DUE.</li>
+      <li>Due jobs go into a 6-worker ThreadPoolExecutor.</li>
+    </ul>
+    <p><strong>Why no queue?</strong> SQLite + the poll loop are simpler than a broker. Restart-safe via the runs ledger. No back-pressure issues since we control the trigger times.</p>
+  </div>
+
+  <h3>The 4 windows</h3>
+  <table>
+    <tr><th>Window</th><th>Offset from kickoff</th><th>What runs there</th><th>Why this offset</th></tr>
+    <tr><td><span class="pill">T-24h</span></td><td>24 hours before</td><td>News scan + LLM analysis; preview card (no odds yet)</td><td>Catches early lineup rumors; lets you see the pick a day ahead</td></tr>
+    <tr><td><span class="pill">T-60m</span></td><td>60 minutes before</td><td>FIRST odds pull; full card; full news refresh</td><td>Pinnacle/Betfair lines mostly stable by then</td></tr>
+    <tr><td><span class="pill">T-15m</span></td><td>15 minutes before</td><td>Refresh news; reuse T-60m if confident</td><td>Catches confirmed XI announcements</td></tr>
+    <tr><td><span class="pill warn">T-7m</span></td><td>7 minutes before</td><td><strong>LOCK</strong>: final card, odds saved for scoring</td><td>Toto rules: lock is the bookmaker's odds at lock time</td></tr>
+  </table>
+
+  <h3>Idempotency — why a restart never doubles a card</h3>
+  <p>Two layers:</p>
+  <ol>
+    <li><strong>In-memory dedupe</strong> (<code>self._dispatched</code> set): cleared on daemon restart but prevents within-tick double-firing.</li>
+    <li><strong>Persistent dedupe</strong> (<code>runs</code> table in <code>obs.db</code>): the <code>is_done</code> predicate calls <code>runs().was_handled(match_id, window)</code>. This row gets <code>INSERT</code>'d by <code>runs.start()</code> at the BEGINNING of <code>process_match</code>.</li>
+  </ol>
+  <div class="panel warn">
+    <p><strong>The one edge case:</strong> if a worker thread is killed (e.g. SIGTERM during update) between <code>runs.start()</code> and the actual Telegram send, the row is marked but no card landed. <code>update.sh</code>'s active-worker guard prevents this by refusing to restart while any started-but-unfinished run exists. Manual fix: <code>DELETE FROM runs WHERE match_id=X AND window='Y' AND card_delivered=0</code>.</p>
+  </div>
+</section>
+
+<!-- =========== STAGE 3: SIGNALS =========== -->
+<section id="stage3">
+  <h2>Stage 3 — Four signals load (in parallel try/except)</h2>
+
+  <p>Each signal is loaded independently inside <code>build_card</code>. Each is wrapped in <code>try/except</code> with a per-signal failure reason. The card NEVER raises — at worst it delivers a model-only modal-fallback pick.</p>
+
+  <h3><span class="pill dc">Dixon-Coles</span> team strengths</h3>
+  <div class="panel">
+    <table>
+      <tr><th>Module</th><td><code>core/models/dixon_coles.py</code> + <code>core/data/results_io.py</code></td></tr>
+      <tr><th>Inputs</th><td>~4 years of international match results (martj42 CSV, 24h disk cache)</td></tr>
+      <tr><th>Outputs</th><td><code>(λ_home, λ_away)</code> expected-goal Poisson rates</td></tr>
+      <tr><th>Fallback if loader fails</th><td>neutral <code>(1.3, 1.1)</code>; signal marked failed</td></tr>
+      <tr><th>Cost when cache hit</th><td>$0 — no network</td></tr>
+    </table>
+  </div>
+
+  <h3><span class="pill elo">Elo ratings</span></h3>
+  <div class="panel">
+    <table>
+      <tr><th>Module</th><td><code>core/data/soccerdata_io.py</code> → eloratings.net World.tsv</td></tr>
+      <tr><th>Inputs</th><td>Daily-refreshed national-team Elo ratings (24h cache)</td></tr>
+      <tr><th>Outputs</th><td><code>P(H), P(D), P(A)</code> direction probabilities from Elo edge</td></tr>
+      <tr><th>Fallback if missing</th><td>default 1500.0 per team → 50/50 outcome</td></tr>
+      <tr><th>Cost when cache hit</th><td>$0 — no network</td></tr>
+    </table>
+  </div>
+
+  <h3><span class="pill market">Market odds</span></h3>
+  <div class="panel">
+    <table>
+      <tr><th>Module</th><td><code>core/data/oddsapi.py</code> via <code>events_cache</code> (batched per tick) or direct fetch</td></tr>
+      <tr><th>Inputs</th><td>Pinnacle (preferred) → Betfair Exchange → consensus de-vig fallback</td></tr>
+      <tr><th>Outputs</th><td><code>{H, D, A}</code> decimal odds; de-vigged to <code>P(H), P(D), P(A)</code></td></tr>
+      <tr><th>Fallback if no event found</th><td>modal-pick (no EV optimization — pick the most-likely score directly)</td></tr>
+      <tr><th>Cost per call</th><td>1 credit (out of 500/mo). With batching: 1 credit per tick covers all due matches.</td></tr>
+    </table>
+  </div>
+
+  <h3><span class="pill news">News deltas</span> (the LLM signal)</h3>
+  <div class="panel">
+    <p>Two-stage process:</p>
+    <ol>
+      <li><strong>Context assembly</strong> (<code>news_agent.gather_context</code>): pulls API-Football lineups + injuries; pulls 3-4 Brave search results per window. Caps at 1800 chars.</li>
+      <li><strong>LLM analysis</strong> (<code>news_agent.analyze</code>): sends to Gemini Flash 2.5 → Claude Haiku → OpenAI gpt-4o-mini (router fallback). Returns <code>(home_goal_delta, away_goal_delta)</code> in ±0.6.</li>
+    </ol>
+    <table>
+      <tr><th>Inputs</th><td>Match + window + stage + group</td></tr>
+      <tr><th>Outputs</th><td><code>{home_goal_delta, away_goal_delta, confidence, notes, provider, fallbacks_used, failure}</code></td></tr>
+      <tr><th>Cost per match</th><td>3 Brave (T-24h) + 4 Brave (T-60m) + 0-2 Brave (T-15m, cached) + 1 LLM call per window</td></tr>
+      <tr><th>5-layer guardrails</th><td>L1 dated queries + WC2026 anchor → L2 source-side freshness → L3 capped context → L4 SYSTEM prompt with worked examples → L5 strict→regex→NEUTRAL parse + ±0.6 clamp</td></tr>
+    </table>
+  </div>
+
+  <h3>How the deltas affect the model</h3>
+  <pre><code>// inside score_distribution():
+lh, la = expected_goals_fn(home, away)         // from Dixon-Coles
+lh = max(0.05, lh + news_deltas[0])            // shift home expected goals
+la = max(0.05, la + news_deltas[1])            // shift away expected goals
+// Then build Poisson(lh, la, rho=-0.05) score matrix → blend with Elo + market</code></pre>
+  <p>So the news agent literally moves the Poisson rates before the matrix is built. A delta of ±0.6 is a meaningful shift (e.g. confirmed star striker out).</p>
+</section>
+
+<!-- =========== STAGE 4: BLEND =========== -->
+<section id="stage4">
+  <h2>Stage 4 — Blend the 3 probability sources</h2>
+
+  <p>The score matrix is a weighted combination of:</p>
+  <ul>
+    <li>Dixon-Coles Poisson matrix (from the news-shifted <code>λ_home, λ_away</code>)</li>
+    <li>Elo edge → direction probabilities</li>
+    <li>Market de-vigged → direction probabilities</li>
+  </ul>
+
+  <pre><code>final_matrix[i,j] = w_DC × DC_matrix[i,j]
+                  + w_Elo × Elo_matrix[i,j]      // Elo direction projected back onto cells
+                  + w_market × market_matrix[i,j]
+
+w_DC = 0.30   w_Elo = 0.20   w_market = 0.50</code></pre>
+
+  <div class="panel info">
+    <p><strong>Why market = 0.50?</strong> The bookmaker is the only signal that incorporates <em>all</em> public info plus billions of dollars of skin in the game. It's the strongest single signal we have. Half-weighting it lets DC + Elo override the market when they agree strongly with each other (the model's edge: catching cases where the market is slow to react to lineup news, for example).</p>
+    <p><strong>Are these weights right?</strong> Partial calibration on June 2026 data showed the optimum at (0.375, 0.125, 0.50) — within 0.4 % of expected points per game vs our default. We deliberately don't recalibrate pre-tournament because it costs ~50 historical-odds credits (~10× the normal rate). Will redo post-tournament for free.</p>
+  </div>
+</section>
+
+<!-- =========== STAGE 5: EV OPTIMIZER =========== -->
+<section id="stage5">
+  <h2>Stage 5 — Expected-points optimizer</h2>
+
+  <h3>The formula</h3>
+  <p>For each candidate scoreline <code>s = (i, j)</code> in the matrix:</p>
+  <pre><code>EV(s) = locked_odds[direction(s)] × detonator × [base × (P(direction) − P(s)) + table_mult(s) × P(s)]
+
+where:
+  base       = 1.0 group | 1.5 KO | 2.0 final
+  table_mult = exact-score cell from rules tables (e.g. 2.25 for group 1-0, 5 for final 0-0)
+  detonator  = 2 if match is detonator, else 1
+  P(s)       = probability of this EXACT score
+  P(dir)     = sum of probabilities for the same direction</code></pre>
+
+  <h3>Why pick the EV-optimal scoreline (not the modal one)?</h3>
+  <div class="panel ok">
+    <p>Worked example, opener: Mexico vs South Africa, locked odds 1.85 / 3.60 / 4.20.</p>
+    <ul>
+      <li>Modal score: <strong>1-0</strong> (probability ≈ 18%) → EV = 1.85 × (1.0×0.45 + 2.25×0.18) = <strong>1.582 pts</strong></li>
+      <li>2-0 score: probability ≈ 14% → EV = 1.85 × (1.0×0.49 + 2.25×0.14) = <strong>1.490 pts</strong></li>
+      <li><strong>3-0 score</strong>: probability ≈ 8% → EV = 1.85 × (1.0×0.55 + 4.5×0.08) = <strong>1.684 pts</strong> ← WINNER</li>
+    </ul>
+    <p>The 4.5x cap multiplier on rare blowouts gives 3-0 the EV edge despite lower probability. <strong>With detonator (×2)</strong>: pick = 3-0, EV = 3.368 pts.</p>
+  </div>
+
+  <h3>Why this maximizes total tournament expected points</h3>
+  <p>By linearity of expectation: <code>E[total points] = Σ E[points per game]</code>. Maximizing each independently maximizes the sum. Provably optimal for "expected total". <em>Caveat:</em> maximizing P(winning the pool) is a slightly different objective — see Stage 6.</p>
+</section>
+
+<!-- =========== STAGE 6: STRATEGY =========== -->
+<section id="stage6">
+  <h2>Stage 6 — Win-the-pool strategy tilt <span class="pill warn">DEFAULT OFF</span></h2>
+
+  <p>The EV optimizer maximizes expected <em>total</em> points. Winning a top-heavy prize pool sometimes requires <em>variance</em> management: if you're far behind, take longer-odds picks; if you're far ahead, protect.</p>
+
+  <h3>The math (<code>core/decision/strategy.py</code>)</h3>
+  <pre><code>capacity = games_left × SWING                 // SWING default = 6 pts/game
+if your_points &lt; leader_points:               // BEHIND
+    pressure = min(1, (leader − you) / capacity)
+else:                                          // AHEAD
+    gap_over_second = max(0, you − second_points)
+    pressure = − min(1, gap_over_second / capacity)</code></pre>
+
+  <p>Then <code>strategize</code> picks among the <strong>TOP_K = 5</strong> highest-EV candidates, weighted by their "upside" (= EV / P(score)). Higher pressure → more variance preferred.</p>
+
+  <h3>How to turn it on (mid-tournament if behind)</h3>
+  <ol>
+    <li>SSH to VM: <code>ssh root@167.233.66.192</code></li>
+    <li>Enter friends' standings via <code>tools/standings_set.py</code>:
+      <pre><code>sudo -u mondial /home/mondial/mondial2026/.venv/bin/python \
+  /home/mondial/mondial2026/tools/standings_set.py set "Alice" \
+  --group 42 --ko 0 --futures 4.2</code></pre>
+    </li>
+    <li>Edit <code>.env</code>: <code>STRATEGY_TILT=0.4</code></li>
+    <li><code>systemctl restart mondial2026</code></li>
+  </ol>
+
+  <div class="panel info">
+    <p>Default OFF because: (a) pre-tournament you don't know the field, (b) friends' standings need manual entry every match day (no auto-scrape from Negev Toto), (c) for most of the tournament max-EV is close to max-P(win).</p>
+  </div>
+</section>
+
+<!-- =========== STAGE 7: RENDER =========== -->
+<section id="stage7">
+  <h2>Stage 7 — Render the card</h2>
+
+  <h3>Layout (≤9 lines, plain text, Telegram-safe)</h3>
+  <pre><code>⚽ Mexico vs South Africa — 2026-06-11 22:00 (Group A)  ⚡ DETONATOR x2
+Locked odds: Mexico 1.85 / Draw 3.60 / South Africa 4.20
+Model: Mexico 63% / Draw 23% / South Africa 14%
+► Pick: Mexico win    Exact: Mexico 3 — South Africa 0
+   (likeliest: Mexico 2 — South Africa 0)
+► If pens: Mexico (54%)               ← ONLY on KO+draw branch
+Expected points ≈ 3.50  → ×2 detonator ≈ 7.00
+Signals: DC+Elo+Market+News(gemini)
+ℹ Mexico likely fields full XI    ℹ Lozano confirmed starter</code></pre>
+
+  <h3>What "Signals:" tells you</h3>
+  <table>
+    <tr><th>Pattern</th><th>Meaning</th></tr>
+    <tr><td><code>DC+Elo+Market+News(gemini)</code></td><td>Happy path. All 4 signals fired. LLM that answered = gemini.</td></tr>
+    <tr><td><code>DC+Elo+Market+News(claude)</code></td><td>Gemini failed; Claude took over.</td></tr>
+    <tr><td><code>DC+Elo+News  ⚠market: budget</code></td><td>Odds API blocked / over budget. Card is modal-fallback.</td></tr>
+    <tr><td><code>DC+Elo+Market  ⚠news: llm 429</code></td><td>All LLMs failed. Card uses pure DC+Elo+market math.</td></tr>
+    <tr><td><code>DC  ⚠elo: empty ⚠market: ... ⚠news: ...</code></td><td>3-of-4 failures. Still delivers something. Real concern.</td></tr>
+  </table>
+
+  <p>Auditability golden rule: <strong>every signal MUST appear in <code>signals_used</code> OR <code>signals_failed</code></strong>. Pinned by parametrized test across 6 scenarios.</p>
+</section>
+
+<!-- =========== STAGE 8: DELIVER =========== -->
+<section id="stage8">
+  <h2>Stage 8 — Deliver the card</h2>
+
+  <p><code>core/delivery/__init__.py::deliver_card</code> tries channels in order:</p>
+  <ol>
+    <li><strong>Telegram</strong> (primary): POST to <code>https://api.telegram.org/bot{TOKEN}/sendMessage</code></li>
+    <li><strong>FileReport</strong> (backup): writes to <code>reports/{match_id}-{window}.txt</code></li>
+    <li><strong>Console</strong> (final fallback): prints to stdout (visible in journal)</li>
+  </ol>
+
+  <p>Returns <code>True</code> if ANY channel succeeded. Never raises. If <code>False</code>, the pipeline sends a separate <code>⚠ Delivery FAILED</code> alert and the runs ledger records <code>card_delivered=0</code>.</p>
+</section>
+
+<!-- =========== STAGE 9: SCORING =========== -->
+<section id="stage9">
+  <h2>Stage 9 — Post-match scoring</h2>
+
+  <p>Triggered by <code>_maybe_update_standings()</code> on every tick (cheap, idempotent). When a match goes from <code>SCHEDULED</code> → <code>FINISHED</code>:</p>
+  <ol>
+    <li>Next 30-min ingest writes <code>status='FINISHED'</code> + <code>home_goals/away_goals</code></li>
+    <li>Next tick (within 60s of the ingest) calls <code>update_standings(participant='Igor')</code></li>
+    <li>For each finished match: looks up your stored prediction in <code>predictions</code>, looks up the locked odds in <code>odds_snapshots</code>, calls <code>score_match()</code>, sums into group_points or knockout_points</li>
+    <li>If any knockout match scored: applies §14 -15% reset to group_points</li>
+    <li>Upserts your row in <code>standings</code></li>
+  </ol>
+
+  <h3>The score_match formula</h3>
+  <pre><code>def score_match(stage, pred_h, pred_a, act_h, act_a, odds, detonator):
+    if direction(pred) != direction(actual):  return 0   # wrong direction
+    odds_used = odds[direction(actual)]
+    if (pred_h, pred_a) == (act_h, act_a):                # exact
+        mult = exact_table[stage_type][(winner_goals, loser_goals)]
+    else:                                                  # direction-only
+        mult = base[stage_type]                            # 1.0 / 1.5 / 2.0
+    pts = mult × odds_used
+    if detonator:  pts × = 2
+    return pts</code></pre>
+
+  <p><strong>Verified against the rules PDF</strong> via 3 unit tests pinning the worked examples (France 2-1=3.000 / Draw 1-1=5.625 / Final 2-1 detonator=12.5).</p>
+</section>
+
+<!-- =========== STAGE 10: WATCHDOG =========== -->
+<section id="stage10">
+  <h2>Stage 10 — Watchdog & daily summary</h2>
+
+  <h3>Watchdog (every tick)</h3>
+  <ul>
+    <li><code>watchdog.beat()</code> writes ISO timestamp to <code>store/heartbeat</code></li>
+    <li><code>watchdog.run_checks()</code>:
+      <ul>
+        <li><code>check_heartbeat</code>: alerts if file age &gt; 180 s. Shouldn't fire because the same tick writes the heartbeat.</li>
+        <li><code>check_stuck</code>: queries <code>runs</code> table for <code>status='started'</code> rows older than 20 min → Telegram alert <code>⚠ Stuck jobs</code></li>
+      </ul>
+    </li>
+  </ul>
+
+  <h3>Daily summary (09:00 Asia/Jerusalem, once per day)</h3>
+  <p><code>schedule/daily_summary.py::send_if_due</code>. Idempotency via synthetic <code>match_id = −1</code> and day-stamped window <code>daily-summary-YYYY-MM-DD</code> in the runs ledger.</p>
+  <p>Content: today's games + recent results + your standings + Brave/odds budget. <strong>Doubles as a positive heartbeat</strong> — if you don't see ☀️ at 09:00, the daemon is dead even if alerts are also broken.</p>
+</section>
+
+<!-- =========== OBSERVABILITY =========== -->
+<section id="observability">
+  <h2>Observability — every external call traced + budgeted</h2>
+
+  <p><code>obs.external_call(provider, endpoint)</code> is the gate every HTTP/LLM call passes through. It does THREE things atomically:</p>
+  <ol>
+    <li><strong>Acquire rate-limit token</strong> from the shared per-provider token bucket (thread-safe; 4 concurrent matches collectively stay under each free-tier rate)</li>
+    <li><strong>Open OTel span</strong> named <code>provider.endpoint</code> (e.g. <code>gemini.complete</code>), with <code>provider</code> + <code>endpoint</code> + <code>correlation_id</code> attributes</li>
+    <li><strong>Record in cost ledger</strong> (<code>obs.db::api_calls</code> table) on exit with units consumed + tokens + duration + ok flag</li>
+  </ol>
+
+  <h3>Every provider verified against actual dashboards (June 2026)</h3>
+  <table>
+    <tr><th>Provider</th><th>Our rate limit</th><th>Their published</th><th>Our budget</th><th>Their plan</th></tr>
+    <tr><td>football_data</td><td>10 / min</td><td>10 / min Free</td><td>none</td><td>Free, no daily cap</td></tr>
+    <tr><td>odds_api</td><td>1 / 2 s</td><td>(implicit)</td><td>500 / month</td><td>Starter $0/mo, 500 credits</td></tr>
+    <tr><td>api_football</td><td>10 / min</td><td>10 / min Free</td><td>100 / day</td><td>Free, 100 / day</td></tr>
+    <tr><td>gemini</td><td>15 / min</td><td>15 RPM Flash 2.5 free</td><td>1500 / day</td><td>Free</td></tr>
+    <tr><td>claude</td><td>50 / min</td><td>50 RPM Tier-1</td><td>none</td><td>PAYG</td></tr>
+    <tr><td>brave_search</td><td>1 / s</td><td>1 / s Search plan</td><td>1000 / month</td><td>$5/mo free credit = 1000 free</td></tr>
+    <tr><td>telegram_bot</td><td>1 / s per chat</td><td>1 / s per chat</td><td>none</td><td>Free</td></tr>
+  </table>
+
+  <h3>Honeycomb dataset: <code>mondial2026</code></h3>
+  <p>Useful queries at api.honeycomb.io:</p>
+  <pre><code>// All spans by type (last 24h)
+SELECT COUNT GROUP BY name ORDER BY COUNT desc
+
+// Drill into one match-window job
+WHERE correlation_id = "match-537327-T-7m"
+
+// Failure rate per provider
+WHERE name = "gemini.complete" SELECT P95(duration_ms), COUNT WHERE error = true
+
+// Daily summary trace
+WHERE correlation_id LIKE "daily-summary-%"</code></pre>
+</section>
+
+<!-- =========== FAILURE MODES =========== -->
+<section id="failures">
+  <h2>Failure modes — what happens when X breaks</h2>
+
+  <details open>
+    <summary>Calendar source (football-data) down</summary>
+    <p>30-min ingest retries silently. Existing calendar in DB still drives scheduling. Daily summary's "Budget" line stays at 0 (early warning). Worst case: stale calendar by ~60 min. No card-delivery impact for matches we already know about.</p>
+  </details>
+  <details>
+    <summary>Odds API down or over budget</summary>
+    <p>Card moves to <code>ev_pathway='modal_fallback'</code>: pick the most-likely score instead of EV-optimizing. Signal: <code>⚠ market: budget</code> in the card's Signals line.</p>
+  </details>
+  <details>
+    <summary>All LLMs fail (gemini, claude, openai all return errors)</summary>
+    <p>news_agent's <code>analyze_safe</code> catches → returns NEUTRAL deltas with <code>failure</code> stamped. Card built with DC+Elo+market only. Signal: <code>⚠ news: &lt;reason&gt;</code>.</p>
+  </details>
+  <details>
+    <summary>Brave Search blocked / over budget</summary>
+    <p>3-layer budget brake in <code>web_search.py</code>: key check → 90% monthly brake → 60/day cap. Returns <code>[]</code> gracefully. Context still has API-Football lineups if available. LLM still runs with smaller context.</p>
+  </details>
+  <details>
+    <summary>Telegram down</summary>
+    <p>FileReport channel succeeds (writes to <code>reports/</code>). Card not lost. Pipeline sends <code>⚠ Delivery FAILED</code> alert (which also fails). Runs ledger records <code>card_delivered=0</code>. Daemon continues.</p>
+  </details>
+  <details>
+    <summary>Honeycomb (OTel exporter) down</summary>
+    <p>OTel SDK silently retries. Cards still emit. Cost ledger still records locally. No card-delivery impact.</p>
+  </details>
+  <details>
+    <summary>Daemon crashes</summary>
+    <p>systemd auto-restarts within 10 s. <code>StartLimitBurst=5</code> means it'll keep trying for 60 s after a crash storm. <code>infra/update.sh</code>'s 3-level health check catches regressions and auto-rolls-back.</p>
+  </details>
+  <details>
+    <summary>VM dies</summary>
+    <p>Hetzner: rebuild the VM (~1 min) → run <code>bootstrap.sh</code> → scp <code>.env</code> from Mac. Re-fetches calendar; runs ledger is gone so duplicates possible for any window that was in flight — accepted risk for a hardware failure.</p>
+  </details>
+  <details>
+    <summary>Restart mid-window (the dangerous one)</summary>
+    <p>Active-worker guard in <code>update.sh</code> prevents this — refuses to restart if any <code>runs.status='started'</code> row is &lt; 5 min old. Override with <code>--force</code> only if you accept the missed-card risk.</p>
+  </details>
+</section>
+
+<!-- =========== TIMING =========== -->
+<section id="timing">
+  <h2>Timing — when you'll actually see things</h2>
+
+  <table>
+    <tr><th>When (Israel local)</th><th>What you see</th><th>Where</th></tr>
+    <tr><td>2026-06-08 09:00</td><td>☀️ Daily summary</td><td>Telegram</td></tr>
+    <tr><td>...every morning at 09:00</td><td>☀️ Daily summary</td><td>Telegram</td></tr>
+    <tr><td><strong>2026-06-10 22:00</strong></td><td><strong>⚽ First card — Mexico vs South Africa T-24h</strong></td><td>Telegram</td></tr>
+    <tr><td>2026-06-11 21:00</td><td>⚽ T-60m card (full odds, full news)</td><td>Telegram</td></tr>
+    <tr><td>2026-06-11 21:45</td><td>⚽ T-15m card</td><td>Telegram</td></tr>
+    <tr><td>2026-06-11 21:53</td><td>⚽ T-7m card (THE LOCK)</td><td>Telegram</td></tr>
+    <tr><td><strong>2026-06-11 21:59</strong></td><td><strong>🚨 Manual deadline: enter Day-7 futures in Negev Toto</strong></td><td>Negev Toto app</td></tr>
+    <tr><td>2026-06-11 22:00</td><td>Kickoff (system idles during the match)</td><td>(TV)</td></tr>
+    <tr><td>2026-06-11 23:50ish</td><td>Score ingested; standings update; next morning's summary reflects it</td><td>Telegram next morning</td></tr>
+    <tr><td>2026-06-27</td><td>Group stage ends. If you're behind, consider <code>STRATEGY_TILT=0.4</code>.</td><td>Manual decision</td></tr>
+    <tr><td>2026-07-19</td><td>Final. Run <code>tools.calibrate.run()</code> after for post-tournament tune.</td><td>Manual</td></tr>
+    <tr><td>2026-07-20+</td><td>Destroy the Hetzner VM (~€5 total event cost)</td><td>Hetzner Console</td></tr>
+  </table>
+</section>
+
+<div class="footer-note">
+  Generated 2026-06-07 · Updated when stages change · Companion to <code>CLAUDE.md</code> and <code>docs/SERVER.md</code>
+</div>
+
+</main>
+
+</body>
+</html>

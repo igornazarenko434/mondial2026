@@ -294,6 +294,60 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.5 — win-the-pool layer wired end-to-end (DONE — 32 tests +369 total).**
+      Closes the gap between "pure-EV picks" and "position-aware picks":
+      - `store/repo.py::standings_context` — fixed TWO bugs: (1) removed
+        unconditional `group_points * 0.85` multiplier (was double-applying
+        the §14 reset post-knockouts), (2) defaults to `None` (no-op) when
+        `me=None` or `me` not in standings instead of silently using the
+        leader's total as yours.
+      - `tools/standings_set.py` — NEW CLI: `list / set / remove / import`
+        for entering friends' Negev Toto standings (no auto-scrape — needs
+        their Firebase auth which we deliberately don't depend on). Marks
+        YOUR row via `MY_PARTICIPANT` env var.
+      - `schedule/runner.py` — daemon now accepts `strategy_context_fn` +
+        `strategy_tilt` hooks. `_run_job` loads context AT DISPATCH time
+        (so a fresh `standings_set` update fires on the next match-window
+        without a daemon restart). `__main__` wires the live versions
+        backed by `MY_PARTICIPANT` env var + `config.strategy.DEFAULT_TILT`.
+      - `.env.example` — added `MY_PARTICIPANT`, `STRATEGY_TILT`,
+        `STRATEGY_TOP_K`, `STRATEGY_SWING` with on/off recommendations.
+      - `docs/STRATEGY.md` — appended "How to actually turn it on" section
+        with .env values, CLI usage, group-reset rules, "how to verify"
+        SQL query.
+      Default: OFF (`STRATEGY_TILT=0` → pure-EV unchanged). Flip later in
+      tournament if behind: `echo STRATEGY_TILT=0.4 >> .env && systemctl
+      restart mondial2026`.
+- [x] **Operational infrastructure done (Day-9.5 era).**
+      - Hetzner CPX22, Falkenstein, Ubuntu 24.04, ~$10/mo total. Live IP
+        167.233.66.192, hostname mondial2026.
+      - `infra/bootstrap.sh` — idempotent Ubuntu provisioner. Uses stock
+        python3 (3.12); no PPA dependencies.
+      - `infra/update.sh` — safe code-update with active-worker guard
+        (refuses to restart mid-window unless `--force`), 3-level health
+        check post-restart (is-active + "scheduler started" in journal +
+        zero ERROR lines in 60s), AUTO-ROLLBACK to previous SHA on any
+        failure, `--dry-run` / `--rollback` flags.
+      - `infra/backup.sh` — nightly `sqlite3 .backup` + 7-day rotation.
+      - `infra/mondial2026.service` — `Restart=always`, MemoryMax=512M,
+        ProtectSystem=strict, ReadWritePaths covers store/cache/reports.
+      - `docs/SERVER.md` — canonical operational reference (~400 lines).
+        Written so a fresh LLM session reading only this file can fully
+        operate the daemon: server identity, every env var with
+        defaults, rate limits verified against actual dashboards, ops
+        cheat-sheet, SQL queries, Honeycomb queries, alert taxonomy,
+        common problems + fixes, tournament timeline, "if you're a new
+        LLM session" onboarding section.
+      - `docs/SYSTEM_ARCHITECTURE.html` — single-file presentation
+        explaining every stage, data flow, calculation, fallback
+        (printable / shareable).
+      - Honeycomb live: trace `604ae03d…` from VM has the full
+        ~8-span audit run (gemini, brave, api-football, odds, football-
+        data, telegram, run parent).
+      - Provider rate limits verified against actual dashboards Jun 2026:
+        api_football 10/min 100/day (bumped from 5/min), football_data
+        10/min, odds_api 500/mo, brave 1/sec 1000/mo, gemini 15/min
+        1500/day. All in `config/observability.py::PROVIDER_LIMITS`.
 - [ ] **Day 10 — harden.** **Full BLEND_WEIGHTS calibration** — two paths:
       (a) PRE-TOURNAMENT WARM-START (~50 credits, optional). the-odds-api
           DOES expose a historical-odds endpoint on the free tier (corrected
@@ -366,3 +420,90 @@ Day 1 (48-team format) and extend the map if needed.
 ## Testing the edge
 `orchestrator/run.py` is the integration smoke test. Keep it runnable with no
 keys (placeholder inputs) so you can always eyeball the pipeline.
+
+## What's tested in production vs. what only the first whistle can prove
+
+The system was deployed to the Hetzner VM on 2026-06-07. Between deploy and
+the first match (2026-06-11 22:00 Israel) the daemon idle-ticks — no jobs
+fire, no cards emit. This is by design. The following are pinned by 369
+unit/integration tests but will only be confirmed in production from the
+opener onwards:
+
+| Path | Tests that pin it | First live fire |
+|---|---|---|
+| T-24h / T-60m / T-15m / T-7m dispatch | scheduler concurrency + idempotency tests | 2026-06-10 22:00 Israel |
+| News agent's `gather_context` with REAL API-Football data | 8 tests under `test_news_agent_day8.py` | T-60m of opener |
+| LLM router gemini→claude→openai fallback in PROD | `test_llm.py`'s 4-provider fallback tests | first time gemini returns malformed/empty |
+| `events_cache` batched odds | `test_events_cache_fetched_once_per_tick_when_t7m_due` | T-60m of opener |
+| T-15m cache reuse from T-60m predictions | `test_read_prior_deltas_*` | 21:45 Israel on opener day |
+| `news_provider` stamped on a real card | `test_news_provider_stamped_on_card_when_analyzer_returns_one` | T-24h+ |
+| Detonator ×2 EV multiplier on real card | `test_scoring_*` + `test_ev_optimizer_*` | opener IS detonator |
+| Concurrent multi-match dispatch | `test_two_simultaneous_matches_run_concurrently` | Group day-2 (2026-06-12+) |
+| Standings update after FINISHED | `test_standings_after_first_ko_applies_reset` | ~2026-06-12 morning |
+| Strategy tilt active picks | 32 win-the-pool tests | When STRATEGY_TILT>0 |
+| `process_match` retry on transient | `test_reliability_*` | first 429/503 from a provider |
+| Watchdog stuck-job alert | `test_watchdog_detects_stuck_run` | first hung worker (hopefully never) |
+
+## Known unhandled-but-low-risk edges (port if they trigger)
+
+These are real edges that could appear during the tournament. Each has a
+graceful default — none breaks the pick — but if you see them in logs you
+can fix and `update.sh`.
+
+- **Match status = `POSTPONED` / `CANCELLED`** — `upcoming_matches` filter
+  is `status IN ('SCHEDULED','TIMED')` so postponed/cancelled rows drop out.
+  When football-data re-publishes a new `utc_kickoff`, status flips back to
+  `SCHEDULED` and the new windows compute correctly. **But**: if a card was
+  already DELIVERED at T-7m for the old kickoff and the match then gets
+  postponed (rare), the runs ledger sees `was_handled=True` for the old
+  `(match_id, T-7m)` and won't re-fire when the new kickoff arrives. Fix
+  if it triggers: `DELETE FROM runs WHERE match_id=<mid> AND window='T-7m'`.
+
+- **Extra-time + penalty result mapping** — knockouts. Current
+  `score_match` uses the FINAL score regardless of how it got there
+  (regulation, ET, pens). For a match that finishes 1-1 in regulation and
+  goes to pens, football-data returns `score.fullTime` as the regulation
+  result and the pen score in a separate field. Our ingest takes
+  `score.fullTime` so we score 1-1 (draw direction) which under the §15c-e
+  rules is partially correct but doesn't award the pen-winner bonus.
+  Backlog item — port to `score_match` if it materially affects standings.
+
+- **`events_cache` staleness within a tick** — we fetch at start of tick,
+  dispatch jobs that consume it ~milliseconds later. Within one tick the
+  cache is fresh; if a tick takes 2+ minutes to dispatch (it doesn't — pool
+  submission is instant), it could be stale. No real risk today.
+
+- **Honeycomb OTLP export 500-ing** — silently degrades; the SDK keeps
+  trying. No card-delivery impact. Daemon continues normally without traces
+  until Honeycomb recovers.
+
+- **Telegram bot rate-limit (30 msg/sec global)** — worst case 4 simultaneous
+  group matches × 4 windows = 16 messages within 6 min. 4 msg/sec peak. Way
+  under limit. Not a concern.
+
+- **`detonator` flag if a match the CSV doesn't cover gets played** — the
+  flag defaults to 0 (no detonator). Scoring computes correctly (no ×2);
+  pick remains EV-optimal for non-detonator EV math. No edge.
+
+- **Time changes BACKWARDS** (UEFA reschedules to earlier) — `due_jobs`
+  recomputes from the new (earlier) `utc_kickoff` so new windows fire
+  correctly. The OLD windows are then "in the past" and the catchup-cap
+  (120 min) excludes them. No double-fire. No miss if the new kickoff is at
+  least 7 minutes ahead.
+
+## Onboarding a new LLM session
+
+If you (a future LLM session) are looking at this repo for the first time,
+read in this order:
+
+1. **CLAUDE.md** (you're here) — build order + open items + golden rules
+2. **docs/SERVER.md** — operational reference for the running daemon on
+   Hetzner. Includes every .env var, every SQL/Honeycomb query you need,
+   and onboarding instructions in §11.
+3. **docs/SYSTEM_ARCHITECTURE.html** — single-file visual presentation of
+   every pipeline stage, data flow, failure mode, and calculation. Open
+   in any browser. Print-friendly.
+4. **docs/SCHEDULING.md** — daemon internals + safe-update procedure
+5. **docs/STRATEGY.md** — win-the-pool tilt + how to activate
+6. **docs/BLUEPRINT.md** — original system design (some details now stale;
+   trust the code over the blueprint when they conflict)
