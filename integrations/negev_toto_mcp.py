@@ -546,23 +546,70 @@ def toto_get_scoring_grids(tournament_id: str | None = None) -> dict:
 def toto_get_broad_bet_categories(tournament_id: str | None = None) -> dict:
     """The four futures categories with their full option lists:
       * winner / cinderella  — 48 team options each ({id, name, points, isKilled})
-      * goldenBoot           — striker roster
-      * bestPlayer           — player roster (filled as bets come in)
+      * goldenBoot           — striker roster (19 strikers)
+      * bestPlayer           — **the META-BET: which PARTICIPANT will finish
+                                  highest in the pool**, NOT a football player.
 
-    `points` is the LIVE futures value per the §7-10 ladder; `isKilled=True`
-    means the option is eliminated (team knocked out, player ineligible). Use
-    to cross-reference broad-bet picks (toto_get_broad_bets returns IDs like
-    'team_Portugal' / '1780696080628' — this resolves them to names + values).
+    The `bestPlayer` category in `settings/broadBets` only stores 1 placeholder
+    option. The Negev web app dynamically composes the dropdown from the
+    `users` collection — every approved human participant becomes an option.
+    We replicate the same logic here so the returned `bestPlayer.options`
+    matches what the app shows. Bots are excluded (same _is_bot() filter).
+
+    Points default to 5 (the lowest Kod-bonus rank) for participants whose
+    standing hasn't yet earned a higher payout.
     """
     tid = _tid(tournament_id)
     doc = toto_get_document(f"tournaments/{tid}/settings/broadBets")
     if "error" in doc:
         return doc
+    categories = doc.get("categories", []) or []
+
+    # bestPlayer needs dynamic synthesis from the users collection (see
+    # explanation above). We do this even if the doc has 1+ options because
+    # the doc only stores a placeholder; the live UI list is per-tournament.
+    users = _read_all("users")
+    humans = [u for u in users
+              if tid in (u.get("tournaments") or [])
+              and not _is_bot(u)
+              and u.get("status") == "approved"]
+    # 5 = the lowest Kod-bonus value per `tournaments/{tid}.settings.kodBonuses`
+    # — matches what the Negev UI displays before standings settle.
+    DEFAULT_BEST_PLAYER_POINTS = 5
+    synth_options = sorted([
+        {"name": u.get("displayName") or u.get("uid", "?"),
+         "id": u.get("uid", "?"),
+         "points": DEFAULT_BEST_PLAYER_POINTS,
+         "isKilled": False}
+        for u in humans
+    ], key=lambda o: (o["name"] or "").lower())
+
+    out_categories = []
+    for c in categories:
+        if c.get("id") == "bestPlayer":
+            # Replace the placeholder list with the synthesized full roster
+            out_categories.append({
+                **c,
+                "options": synth_options,
+                "_synthesized": True,
+                "_source": "users collection (filtered to approved human "
+                           "participants in this tournament)",
+            })
+        else:
+            out_categories.append(c)
+    # If the Negev settings doc somehow lacks a bestPlayer entry, append one
+    if not any(c.get("id") == "bestPlayer" for c in categories):
+        out_categories.append({
+            "id": "bestPlayer", "options": synth_options,
+            "_synthesized": True,
+            "_source": "users collection (settings missing the category)",
+        })
+
     return {
         "tournament_id": tid,
         "isPublished": doc.get("isPublished"),
         "isLocked": doc.get("isLocked"),
-        "categories": doc.get("categories", []),
+        "categories": out_categories,
     }
 
 

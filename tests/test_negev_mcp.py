@@ -432,14 +432,88 @@ def test_get_broad_bet_categories_returns_full_options(fake_firestore):
             ]},
         ]
     }
+    fake_firestore["collections"]["users"] = []                # synth-bestPlayer with empty roster
     out = ntm.toto_get_broad_bet_categories(tid)
     assert out["isPublished"] is True
     assert out["isLocked"] is False
     cat_ids = {c["id"] for c in out["categories"]}
-    assert cat_ids == {"winner", "goldenBoot"}
+    # bestPlayer is auto-appended even if settings doc lacks it
+    assert cat_ids == {"winner", "goldenBoot", "bestPlayer"}
     winner = next(c for c in out["categories"] if c["id"] == "winner")
     assert len(winner["options"]) == 2
     assert winner["options"][0]["name"] == "Portugal"
+
+
+def test_get_broad_bet_categories_synthesizes_bestPlayer_from_users(fake_firestore):
+    """The bestPlayer category is a META-BET: which PARTICIPANT (friend) will
+    finish highest in the pool — NOT a football player. The Negev app dynamically
+    builds this dropdown from the users collection client-side, so our MCP must
+    do the same. Without this synthesis, the settings doc only contains 1
+    placeholder option, but the UI shows ~50."""
+    tid = "tid-x"
+    fake_firestore["docs"][f"tournaments/{tid}/settings/broadBets"] = {
+        "isPublished": True, "isLocked": False,
+        "categories": [
+            {"id": "winner", "options": []},
+            {"id": "bestPlayer", "options": [
+                {"id": "placeholder", "name": "placeholder", "points": 5, "isKilled": False}
+            ]},
+        ]
+    }
+    fake_firestore["collections"]["users"] = [
+        # 3 approved humans in this tournament
+        {"path": "users/u1", "fields": {"uid": "u1", "displayName": "Aharony",
+                                        "role": "player", "status": "approved",
+                                        "tournaments": [tid]}},
+        {"path": "users/u2", "fields": {"uid": "u2", "displayName": "Alfi",
+                                        "role": "player", "status": "approved",
+                                        "tournaments": [tid]}},
+        {"path": "users/u3", "fields": {"uid": "u3", "displayName": "Igor",
+                                        "role": "player", "status": "approved",
+                                        "tournaments": [tid]}},
+        # Bot — excluded
+        {"path": "users/bot1", "fields": {"uid": "bot_chinchilla",
+                                          "displayName": "The Chinchilla",
+                                          "role": "bot", "isBot": True,
+                                          "status": "approved",
+                                          "tournaments": [tid]}},
+        # Pending — excluded (status != approved)
+        {"path": "users/u4", "fields": {"uid": "u4", "displayName": "Pending",
+                                        "role": "player", "status": "pending",
+                                        "tournaments": [tid]}},
+        # Different tournament — excluded
+        {"path": "users/u5", "fields": {"uid": "u5", "displayName": "Outsider",
+                                        "role": "player", "status": "approved",
+                                        "tournaments": ["other-tid"]}},
+    ]
+    out = ntm.toto_get_broad_bet_categories(tid)
+    bp = next(c for c in out["categories"] if c["id"] == "bestPlayer")
+    names = [o["name"] for o in bp["options"]]
+    # Only approved humans in this tournament; alphabetical; placeholder gone
+    assert names == ["Aharony", "Alfi", "Igor"]
+    assert bp["_synthesized"] is True                          # audit trail
+    # All synthesized options have the default Kod-bonus value of 5
+    assert all(o["points"] == 5 for o in bp["options"])
+    assert all(o["isKilled"] is False for o in bp["options"])
+
+
+def test_get_broad_bet_categories_appends_bestPlayer_if_missing(fake_firestore):
+    """If the settings doc doesn't list bestPlayer at all, we still synthesize
+    it from users so the caller gets a complete picture."""
+    tid = "tid-x"
+    fake_firestore["docs"][f"tournaments/{tid}/settings/broadBets"] = {
+        "isPublished": True, "isLocked": False,
+        "categories": [{"id": "winner", "options": []}],          # no bestPlayer entry
+    }
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/u1", "fields": {"uid": "u1", "displayName": "Igor",
+                                        "role": "player", "status": "approved",
+                                        "tournaments": [tid]}},
+    ]
+    out = ntm.toto_get_broad_bet_categories(tid)
+    bp = next(c for c in out["categories"] if c["id"] == "bestPlayer")
+    assert [o["name"] for o in bp["options"]] == ["Igor"]
+    assert bp["_synthesized"] is True
 
 
 # ─────────────────────── toto_get_match_bets ───────────────────────

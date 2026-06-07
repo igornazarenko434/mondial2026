@@ -203,6 +203,18 @@ payout per option (matches our rules: "Spain 20 ... USA 170" pattern).
 }
 ```
 
+### The 4 broad-bet categories — what each actually means
+
+Don't conflate the IDs — `bestPlayer` is a meta-bet on the leaderboard, not a
+football-player pick:
+
+| Category id | Real name in UI | Bet on | Options come from |
+|---|---|---|---|
+| `winner` | Tournament Winner | Which **team** wins the WC | 48 team options in `settings/broadBets.categories[winner]` |
+| `cinderella` | Cinderella Team | Which underdog **team** goes furthest | 48 teams (only 11 have non-zero points) in same doc |
+| `goldenBoot` | Golden Boot | Which **player** scores most goals | 19 strikers in same doc |
+| **`bestPlayer`** | **Best Placed Player** | **Which PARTICIPANT (friend!) finishes highest in the pool** | The doc only stores 1 placeholder. **The Negev app dynamically builds this dropdown from the `users` collection** (all approved humans in this tournament). Our `toto_get_broad_bet_categories` does the same synthesis client-side. |
+
 ### Bot accounts (3 known, must be excluded)
 
 The Negev Toto app has 3 bot players for entertainment — their position is
