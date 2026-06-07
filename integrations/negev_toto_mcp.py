@@ -695,6 +695,73 @@ def toto_update_match_result(match_id: str,
 
 
 @mcp.tool()
+def toto_submit_match_prediction(home: str | None = None,
+                                  away: str | None = None,
+                                  home_score: int = 0,
+                                  away_score: int = 0,
+                                  match_id: str | None = None,
+                                  tournament_id: str | None = None) -> dict:
+    """Save MY per-match score prediction to Negev (the equivalent of clicking
+    YOUR PREDICTION → enter score → Save Prediction in the Matches tab).
+
+    DISABLED unless NEGEV_ALLOW_WRITES=1.
+
+    The Negev `bets` doc path is `bets/{tournamentId}_{apiFixtureId}_{userId}`.
+    We UPSERT only the fields the user owns; the points/breakdown/processedAt
+    are populated server-side AFTER the match plays. Idempotent — re-submitting
+    overwrites the previous prediction (matches the app's behavior up until
+    the match locks at kickoff).
+
+    Lookup the match by team-name pair OR by match_id (Negev internal doc id).
+    Example: toto_submit_match_prediction(home='Mexico', away='South Africa',
+                                          home_score=2, away_score=1)
+    """
+    if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
+        return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
+                f"Would have saved {home or '?'} {home_score}-{away_score} {away or '?'}"}
+    tid = _tid(tournament_id)
+    # Find the match
+    target = None
+    matches = toto_get_matches(tournament_id=tid, limit=300)
+    if match_id:
+        target = next((m for m in matches if m["match_id"] == match_id), None)
+    elif home and away:
+        try:
+            from core.data.teams import normalize as _norm
+        except Exception:                              # noqa: BLE001
+            _norm = lambda x: x
+        h_n = (_norm(home) or "").lower()
+        a_n = (_norm(away) or "").lower()
+        target = next((m for m in matches if (m["home"] or "").lower() == h_n
+                        and (m["away"] or "").lower() == a_n), None)
+    if not target:
+        return {"error": f"match not found in tournament {tid}: "
+                         f"home={home!r} away={away!r} match_id={match_id!r}"}
+    if target["status"] not in ("NS", "TIMED"):
+        return {"error": f"match has already started ({target['status']}); "
+                "predictions are locked"}
+
+    apifid = target["apiFixtureId"]
+    uid = _token.get("uid")
+    if not uid:
+        _id_token(); uid = _token.get("uid")
+    bet_doc_id = f"{tid}_{apifid}_{uid}"
+    bet_matchid = f"{tid}_{apifid}"
+
+    from datetime import datetime, timezone
+    fields = {
+        "userId": uid,
+        "matchId": bet_matchid,
+        "tournamentId": tid,
+        "homeScore": int(home_score),
+        "awayScore": int(away_score),
+        "updatedAt": datetime.now(timezone.utc).isoformat(),
+        "isBot": False,
+    }
+    return toto_patch_document(f"bets/{bet_doc_id}", json.dumps(fields))
+
+
+@mcp.tool()
 def toto_next_match(tournament_id: str | None = None) -> dict:
     """The next un-finished match in time order — what you'd ask before
     submitting a result via toto_update_match_result. Returns:

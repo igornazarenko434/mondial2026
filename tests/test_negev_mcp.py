@@ -365,6 +365,57 @@ def test_update_match_result_knockout_with_penalties(fake_firestore, monkeypatch
     assert captured["fields"]["winnerTeam"] == "Mexico"
 
 
+# ─────────────────────────── toto_submit_match_prediction ───────────────────────────
+
+def test_submit_match_prediction_blocked_without_writes(fake_firestore, monkeypatch):
+    monkeypatch.delenv("NEGEV_ALLOW_WRITES", raising=False)
+    out = ntm.toto_submit_match_prediction(
+        home="Mexico", away="South Africa", home_score=2, away_score=1,
+        tournament_id="tid-x")
+    assert "writes disabled" in (out.get("error") or "")
+    assert "Mexico 2-1 South Africa" in (out.get("error") or "")
+
+
+def test_submit_match_prediction_patches_correct_path_and_fields(fake_firestore, monkeypatch):
+    monkeypatch.setenv("NEGEV_ALLOW_WRITES", "1")
+    monkeypatch.setitem(ntm._token, "uid", "uid-igor")
+    _seed_matches(fake_firestore, monkeypatch=monkeypatch, tid="tid-x")
+    captured = {}
+    def fake_patch(path, fields_json):
+        captured["path"] = path
+        captured["fields"] = json.loads(fields_json)
+        return {"updated": path, "fields": list(captured["fields"].keys())}
+    monkeypatch.setattr(ntm, "toto_patch_document", fake_patch)
+    out = ntm.toto_submit_match_prediction(
+        home="Mexico", away="South Africa",
+        home_score=2, away_score=1, tournament_id="tid-x")
+    # Negev seed for Mexico match has apiFixtureId=999999
+    assert captured["path"] == "bets/tid-x_999999_uid-igor"
+    assert captured["fields"]["userId"] == "uid-igor"
+    assert captured["fields"]["matchId"] == "tid-x_999999"
+    assert captured["fields"]["tournamentId"] == "tid-x"
+    assert captured["fields"]["homeScore"] == 2
+    assert captured["fields"]["awayScore"] == 1
+    assert captured["fields"]["isBot"] is False
+    assert "updatedAt" in captured["fields"]              # ISO timestamp
+
+
+def test_submit_match_prediction_rejects_started_matches(fake_firestore, monkeypatch):
+    """Once a match is IP (in play) or FT, predictions are locked."""
+    monkeypatch.setenv("NEGEV_ALLOW_WRITES", "1")
+    state = fake_firestore
+    state["_match_rows"] = [
+        {"_path": "matches/m1", "apiFixtureId": 1, "tournamentId": "tid-x",
+         "homeTeam": "A", "awayTeam": "B", "date": "2026-06-11T10:00:00+00:00",
+         "stage": "Group Stage", "status": "FT"}                    # already finished
+    ]
+    monkeypatch.setattr(ntm, "toto_query",
+        lambda c, f, op, v, limit=200: {"results": state["_match_rows"]})
+    out = ntm.toto_submit_match_prediction(
+        home="A", away="B", home_score=1, away_score=0, tournament_id="tid-x")
+    assert "locked" in (out.get("error") or "")
+
+
 # ─────────────────────────── toto_next_match ───────────────────────────
 
 def test_next_match_returns_first_pending_with_correct_stage_type(fake_firestore, monkeypatch):
