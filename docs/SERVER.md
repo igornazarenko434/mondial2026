@@ -383,11 +383,11 @@ calls silently no-op (cards still land, just without news signal).
 
 ## 10. Tournament timeline (autopilot from here)
 
-- **Now → 2026-06-10 ~19:00 Israel**: daemon idle-ticks. Daily summary every morning.
-- **2026-06-10 19:00 Israel**: first T-24h card lands (Mexico vs South Africa).
-- **2026-06-11 18:00 / 18:45 / 18:53 Israel**: T-60m / T-15m / T-7m for opener.
-- **2026-06-11 19:00**: kickoff. Result ingested ~2h later; standings update within 30 min.
+- **Now → 2026-06-10 ~22:00 Israel**: daemon idle-ticks. Daily summary every morning at 09:00 Israel.
+- **2026-06-10 22:00 Israel** (=19:00 UTC): first T-24h card lands (Mexico vs South Africa).
+- **2026-06-11 21:00 / 21:45 / 21:53 Israel** (=18:00 / 18:45 / 18:53 UTC): T-60m / T-15m / T-7m for opener.
 - **2026-06-11 21:59 Israel**: 🚨 **manual deadline — enter Day-7 futures (Portugal/Uzbekistan/Mbappé) in Negev Toto app**
+- **2026-06-11 22:00 Israel** (=19:00 UTC): kickoff. Result ingested ~2h later; standings update within 30 min.
 - **2026-06-27 (approx)**: group stage ends. Consider activating `STRATEGY_TILT=0.4` if behind.
 - **2026-07-19**: Final. Run `tools.calibrate.run()` afterwards for post-tournament weights tune.
 - **After Final**: destroy the Hetzner server (~€5 total for the event).
