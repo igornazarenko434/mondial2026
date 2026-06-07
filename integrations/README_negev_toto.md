@@ -27,9 +27,10 @@ sb = m.toto_get_side_bets(active_only=True)   # → active yes/no questions
 .venv/bin/python -m integrations.negev_toto_mcp   # stdio transport
 ```
 
-## The 12 tools
+## The 22 tools (Day-9.6 → Day-9.8)
 
-5 generic (low-level) + 7 typed (high-level convenience):
+5 generic (low-level) + 14 typed reads + 3 typed writes.
+**4 of the 22 are writes** (`toto_patch_document` generic + 3 typed), all gated by `NEGEV_ALLOW_WRITES=1` (env) + module check + Negev's own Firestore rules.
 
 ### Generic / discovery
 | Tool | Purpose |
@@ -40,20 +41,33 @@ sb = m.toto_get_side_bets(active_only=True)   # → active yes/no questions
 | `toto_query(c, field, op, value, limit=50)` | Firestore structured-query filter |
 | `toto_patch_document(path, fields_json)` | Edit a doc (gated by `NEGEV_ALLOW_WRITES=1`) |
 
-### Typed (recommended for everyday use)
+### Typed reads (recommended for everyday use)
 | Tool | Returns | Notes |
 |---|---|---|
 | `toto_list_tournaments()` | every tournament id + name + prize pool | Sorted by descending pool. Negev Toto 2026 is the real one. |
 | `toto_get_standings(tid, extended, include_bots)` | sorted leaderboard `[{rank, player, total, direction, broad, exactCount}]` | Tie-break by exactCount per PDF §19. Bots excluded by default. |
-| `toto_get_matches(date_after, status, stage, limit)` | normalized match catalog with our canonical team names + RULES_STAGE labels | Negev's `matches` is global (all leagues); use `stage='Group'` etc. to filter to WC2026 |
-| `toto_get_broad_bets(tid)` | every user's futures picks (winner/scorer/cinderella/bestPlayer), joined with displayName | 6 users have submitted as of 2026-06-07 |
+| `toto_get_matches(date_after, status, stage, limit)` | normalized match catalog with our canonical team names + RULES_STAGE labels | **Tournament-scoped (Day-9.6 fix)** — filters by `tournamentId == NEGEV_TOURNAMENT_ID` so no J-League / friendlies leak in. |
+| `toto_get_broad_bets(tid)` | every user's futures picks (winner/scorer/cinderella/bestPlayer), joined with displayName | bestPlayer category synthesizes options from `users` collection (it's a META-BET on participants, not football players). |
 | `toto_get_side_bets(tid, active_only)` | daily yes/no shells; `active_only=True` for unresolved+active | 18 shells live (questions empty until founder fills them) |
-| `toto_get_scoring_grids(tid)` | the 3 multiplier grids (groupStage/round16AndQuarter/semiAndFinal) | Source of truth for verifying `config/rules.py::SCORE_TABLE` |
+| `toto_get_scoring_grids(tid)` | the 3 multiplier grids (groupStage/round16AndQuarter/semiAndFinal) | **Day-9.7 verified 147/147 cells match `config/rules.py::SCORE_TABLE`** after groupStage column-shift fix. |
 | `toto_get_broad_bet_categories(tid)` | full options for the 4 futures categories with current `points` + `isKilled` | Resolves IDs like `team_Portugal` → `{name: "Portugal", points: 39}` |
-| `toto_get_match_bets(match_id, tid)` | all picks for ONE match with full breakdown | Lets us audit our score_match() vs Negev's server-side scoring |
+| `toto_get_match_bets(match_id, tid)` | all picks for ONE match with full breakdown | Lets us audit our score_match() vs Negev's server-side scoring. Used by `tools/post_match_audit.py` (Day-9.8). |
 | `toto_get_my_bets(tid, limit=200)` | all of MY picks for a tournament | Verifies our daemon's predictions agree with Negev |
 | `toto_get_my_preferences()` | my `pref_*` notification flags | One read |
-| `toto_update_preferences(...)` | patch my prefs | Gated by `NEGEV_ALLOW_WRITES=1` |
+
+### Typed reads added (Day-9.6 → Day-9.8)
+| Tool | Returns | Notes |
+|---|---|---|
+| `toto_get_match_details(home, away, tid)` | full per-match view: match row + my pick + friends' picks + applicable exact-score multiplier grid | Convenience for "show me everything about Mexico vs South Africa". |
+| `toto_get_side_bets_upcoming(tid)` / `toto_get_side_bets_resolved(tid)` | filtered subsets of side bets | Matches the Negev UI's two panels. |
+| `toto_next_match(tid)` | next un-finished match + whether penalties may apply | Used before submitting a result. |
+
+### Typed writes (`NEGEV_ALLOW_WRITES=1` required)
+| Tool | Effect | Notes |
+|---|---|---|
+| `toto_update_preferences(...)` | patch my `pref_*` flags | One PATCH; surface-level |
+| `toto_submit_match_prediction(home, away, home_score, away_score, advances_team, match_id, tid)` | create/replace my bet on a single match | **Day-9.6.** Negev's Cloud Function computes points server-side AFTER kickoff. Used 2026-06-07 to save Mexico 2-1. |
+| `toto_update_match_result(match_id, home_score, away_score, status, penalty_home, penalty_away, winner_team, tid)` | update the OFFICIAL match result (founder-only in practice) | **Day-9.6.** For knockouts on pens: pass `status='PEN'` + penalty scores + `winner_team`. |
 
 ## How natural-language questions map to tools
 
@@ -74,29 +88,42 @@ When asking Claude these typical questions, the routing is:
 | "Who's the favourite to win the tournament?" | `toto_get_broad_bet_categories()` → categories.winner sorted by points |
 | "What's been picked for golden boot?" | `toto_get_broad_bet_categories()` → categories.goldenBoot |
 
-## Daily sync to our standings table
+## Sync to our standings table — 7 runs/day (Day-9.8)
 
-`tools/sync_negev_standings.py` runs every morning at 07:00 IDT (cron line
-installed by `infra/bootstrap.sh`):
+Canonical crontab `infra/mondial2026.crontab`:
 
-```bash
-0 7 * * *  cd /home/mondial/mondial2026 && source .env && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram
+```cron
+# Morning summary (Telegram)
+0 7 * * *  ...sync_negev_standings.py --quiet --telegram
+# Evening match-day syncs (silent; keep DB ≤2h stale)
+0 16,18,20,22,0,2 * * *  ...sync_negev_standings.py --quiet
+# Post-match audit
+0 8 * * *  ...post_match_audit.py --telegram
 ```
 
-What it does:
+What `sync_negev_standings.py` does:
 1. Calls `toto_get_standings()` for `NEGEV_TOURNAMENT_ID`
-2. Maps to our `standings` table schema:
+2. Calls `sync_match_results()` (Day-9.8) — pulls Negev's FT/PEN match outcomes
+   into our local `matches` table (status, home/away goals, scoredAt)
+3. Calls `sync_standings()` — UPSERTs each row to our `standings` table:
    - `directionPoints` → `group_points`
    - `broadBetPoints` → `futures_points`
-   - `0` → `knockout_points`
-3. Upserts each row (`participant` = Negev `displayName`)
-4. Sends a 📊 Telegram summary (top-5 + "Around you" + gap to leader)
-5. Wrapped in `obs.external_call("negev_toto", "get_standings")` → traces
-   to Honeycomb + counts to cost ledger
+   - `knockoutPoints` (when present) → `knockout_points`
+4. (If `--telegram`) sends a 📊 leaderboard summary via `delivery.summary()`
+5. Wrapped in `obs.external_call("negev_toto", "*")` → Honeycomb traces +
+   cost ledger
 
-CLI flags:
+What `post_match_audit.py` does (Day-9.8):
+1. For each FT match, calls `toto_get_match_bets(match_id)` to get Negev's
+   awarded points per bet
+2. Re-runs our `score_match()` against the same locked T-7m odds + detonator
+3. Compares per-bet — if Negev's `processedAt` missing, retries up to 5×30s
+4. If any Δ > 0.01 pts → sends 🔍 Telegram with per-match table; silent otherwise
+
+CLI flags (`sync_negev_standings.py`):
 - `--dry-run` — print what would change; touch nothing
-- `--telegram` — send the leaderboard to Telegram (default for cron)
+- `--telegram` — send the leaderboard to Telegram
+- `--quiet` — suppress stdout (for cron)
 - `--include-bots` — keep role='bot' rows
 - `--tournament-id <id>` — override env var
 
@@ -154,17 +181,20 @@ Full schema in `integrations/SCHEMA_negev.md`. Highlights:
 - 36 distinct tournament IDs referenced across users; 3 accessible to my account
 - **73 total users in DB; 66 in Negev Toto 2026 (63 humans + 3 bots — bots filtered out by default)**
 
-## Telegram messages — full taxonomy after Day-9.6
+## Telegram messages — full taxonomy after Day-9.8
 
 | Glyph | Sender | When | What |
 |---|---|---|---|
-| ⚽ | daemon (process_match) | each match window | the pick card |
-| ⚠ | daemon | failures | pipeline / delivery / scheduler down |
-| ☀️ | daemon (daily_summary) | 09:00 IDT | today's games + recent results + your score + budget |
-| 📊 | cron (sync_negev_standings) | 07:00 IDT | live leaderboard top-5 + Igor's rank + gap to leader |
+| ⚽ | daemon (process_match) | each match window (T-24h / T-60m / T-15m / T-7m) | the pick card |
+| ⚠ | daemon | failures | pipeline / delivery / scheduler down (uses `delivery.alert()`) |
+| ☀️ | daemon (daily_summary) | 09:00 IDT | today's games + recent results + your score + budget (uses `delivery.summary()`) |
+| 📊 | cron (sync_negev_standings.py --telegram) | 07:00 IDT | live leaderboard top-5 + Igor's rank + "Around you" window + gap to leader (uses `delivery.summary()`) |
+| 🔍 | cron (post_match_audit.py --telegram) | 08:00 IDT | **silent on Δ=0**; sends per-match table only when our `score_match()` differs from Negev's awarded points by >0.01. Day-9.8 addition; retries 5×30s for Negev `processedAt` race conditions. |
 
 All go to the same `TELEGRAM_CHAT_ID`. Per-chat rate limit is 1/sec —
-4 messages/day on quiet days, ~12 on match days. Far under limits.
+2-3 messages/day on quiet days, ~12 on match days, audit silent unless real Δ.
+Note: `delivery.summary()` is used for informational ☀️/📊/🔍 to avoid the
+⚠️ prefix that `delivery.alert()` prepends.
 
 ## Memory + auto-discovery for new sessions
 

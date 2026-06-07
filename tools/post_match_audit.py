@@ -41,34 +41,43 @@ from core.data.oddsapi import latest_snapshot
 log = get_logger("post_match_audit")
 
 
-def _fetch_my_bet_with_retry(ntm, tid: str, match_id_negev: str,
-                              max_retries: int = 5,
-                              backoff_seconds: float = 30.0) -> dict | None:
-    """Read my bet for this match. Retry with backoff if `processedAt` is
-    still missing (Negev's Cloud Function hasn't run yet). Returns the bet
-    doc or None if no bet found / never processed within budget."""
-    uid = ntm._token.get("uid") or ntm._id_token() and ntm._token.get("uid")
-    for attempt in range(1, max_retries + 1):
-        res = ntm.toto_query("bets", "userId", "EQUAL", uid, limit=200)
-        for b in res.get("results", []):
-            if (b.get("tournamentId") == tid
-                and (b.get("matchId") == match_id_negev
-                     or str(b.get("matchId")) == match_id_negev.split("_")[-1])):
-                if b.get("processedAt"):                # Cloud Function ran ✓
-                    return b
-                if attempt == max_retries:
-                    log.warning("bet for match %s found but not yet processed "
-                                "after %d attempts; using current values",
-                                match_id_negev, attempt)
-                    return b                            # return unprocessed
-                log.info("bet for %s pending Negev scoring (attempt %d/%d) — "
-                         "waiting %.0fs", match_id_negev, attempt, max_retries,
-                         backoff_seconds)
-                time.sleep(backoff_seconds)
-                break
-        else:
-            return None                                 # no bet found
+def _find_my_bet(my_bets: list[dict], tid: str, match_id_negev: str) -> dict | None:
+    """Find my bet for this match in a pre-fetched list. Returns the bet doc
+    or None if no bet found. Pure — no network."""
+    for b in my_bets:
+        if (b.get("tournamentId") == tid
+            and (b.get("matchId") == match_id_negev
+                 or str(b.get("matchId")) == match_id_negev.split("_")[-1])):
+            return b
     return None
+
+
+def _wait_for_processed(ntm, tid: str, match_id_negev: str, *,
+                         max_retries: int = 5,
+                         backoff_seconds: float = 30.0,
+                         initial: dict | None = None) -> dict | None:
+    """If `initial` is already processed → return it. Otherwise retry-fetch
+    (NEW query each attempt — same UID lookup as the original fetch) until
+    either it's processed OR we exhaust retries; in the latter case return
+    the last seen unprocessed bet so the caller can decide what to do."""
+    if initial and initial.get("processedAt"):
+        return initial
+    uid = ntm._token.get("uid") or (ntm._id_token() and ntm._token.get("uid"))
+    last_seen = initial
+    for attempt in range(1, max_retries + 1):
+        log.info("bet for %s pending Negev scoring (attempt %d/%d) — "
+                 "waiting %.0fs", match_id_negev, attempt, max_retries,
+                 backoff_seconds)
+        time.sleep(backoff_seconds)
+        res = ntm.toto_query("bets", "userId", "EQUAL", uid, limit=200)
+        b = _find_my_bet(res.get("results", []), tid, match_id_negev)
+        if b:
+            last_seen = b
+            if b.get("processedAt"):
+                return b
+    log.warning("bet for match %s found but not yet processed after %d "
+                "attempts; using current values", match_id_negev, max_retries)
+    return last_seen
 
 
 def audit(*, tournament_id: str | None = None,
@@ -95,13 +104,25 @@ def audit(*, tournament_id: str | None = None,
     total_ours = total_negev = 0.0
     discrepancies = 0
 
+    # Pre-fetch the Negev match catalog ONCE (Day-9.8 efficiency fix — was
+    # fetching once per finished match before)
+    try:
+        with obs.external_call("negev_toto", "get_matches"):
+            negev_ms = ntm.toto_get_matches(tournament_id=tid, limit=300)
+    except Exception as e:                             # noqa: BLE001
+        return {"ok": False, "error": f"Negev fetch failed: {e!s}"}
+
+    # Pre-fetch MY bets ONCE (the retry loop re-queries only if a bet is
+    # found but not yet processed)
+    uid = ntm._token.get("uid") or (ntm._id_token() and ntm._token.get("uid"))
+    try:
+        with obs.external_call("negev_toto", "get_my_bets"):
+            my_bets_res = ntm.toto_query("bets", "userId", "EQUAL", uid, limit=200)
+        my_bets = my_bets_res.get("results", [])
+    except Exception as e:                             # noqa: BLE001
+        return {"ok": False, "error": f"Negev bets fetch failed: {e!s}"}
+
     for m in finished:
-        # Find the matching Negev match (by team-pair) to get its apiFixtureId
-        try:
-            with obs.external_call("negev_toto", "get_matches"):
-                negev_ms = ntm.toto_get_matches(tournament_id=tid, limit=300)
-        except Exception as e:                         # noqa: BLE001
-            return {"ok": False, "error": f"Negev fetch failed: {e!s}"}
         negev_match = next((x for x in negev_ms
                              if x["home"] == m["home"] and x["away"] == m["away"]),
                             None)
@@ -111,10 +132,13 @@ def audit(*, tournament_id: str | None = None,
             continue
         nmid = negev_match["match_id"]                 # '<tid>_<apifid>'
 
-        # Read MY bet for this match
-        bet = _fetch_my_bet_with_retry(ntm, tid, nmid,
-                                         max_retries=max_retries,
-                                         backoff_seconds=backoff)
+        # Find MY bet for this match (then wait for processedAt if missing)
+        bet = _find_my_bet(my_bets, tid, nmid)
+        if bet and not bet.get("processedAt"):
+            bet = _wait_for_processed(ntm, tid, nmid,
+                                       max_retries=max_retries,
+                                       backoff_seconds=backoff,
+                                       initial=bet)
         if not bet:
             log.info("no bet for match %s — skipping", nmid)
             continue

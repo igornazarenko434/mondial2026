@@ -15,6 +15,7 @@ Why this exists, even though watchdog already alerts on failure:
     runs ledger means we never send twice per day, even across restarts.
 """
 from __future__ import annotations
+import os
 import sqlite3
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -90,13 +91,17 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
     except Exception as e:                          # noqa: BLE001
         log.warning("recent-finished read failed: %s", e)
 
-    # Standings
+    # Standings — read MY row by the configured participant label. Same
+    # MY_PARTICIPANT env var the scheduler uses for update_standings() and
+    # the strategy layer's standings_context, so the three writers/readers
+    # always reference the SAME row (e.g. "Igor" on prod, "me" in tests).
+    me = os.environ.get("MY_PARTICIPANT", "me").strip() or "me"
     stand = None
     try:
         stand = conn.execute(
             "SELECT group_points, knockout_points, futures_points, "
             "(group_points + knockout_points + futures_points) AS total "
-            "FROM standings WHERE participant='me'"
+            "FROM standings WHERE participant=?", (me,)
         ).fetchone()
     except Exception as e:                          # noqa: BLE001
         log.warning("standings read failed: %s", e)

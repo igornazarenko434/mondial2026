@@ -7,17 +7,27 @@
 # truth for one-shot manual recovery (e.g. after a duplicate-lines cleanup).
 #
 # Times are local (the VM's timezone is set to Asia/Jerusalem by bootstrap).
+#
+# Defense-in-depth (Day-9.8 hardening):
+#   * `flock -n` on a per-job lockfile — a hung run never accumulates a
+#     second copy; the second run exits immediately with "another instance
+#     running" and the next slot tries again.
+#   * Output captured to `/home/mondial/mondial2026/reports/cron-*.log`
+#     (gitignored). Last failure is visible even without MAILTO. Trim:
+#     `find /home/mondial/mondial2026/reports/cron-*.log -mtime +14 -delete`
+#   * `timeout` cap so a stuck network call can't run for the full 2h slot.
 
 # 03:15 IDT — nightly SQLite backup + 7-day rotation
-15 3 * * *  /home/mondial/mondial2026/infra/backup.sh
+15 3 * * *  flock -n /tmp/mondial-backup.lock timeout 300 /home/mondial/mondial2026/infra/backup.sh >> /home/mondial/mondial2026/reports/cron-backup.log 2>&1
 
 # 07:00 IDT — daily Negev standings + match results sync + 📊 Telegram leaderboard
-0 7 * * *  cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram
+0 7 * * *  flock -n /tmp/mondial-negev-sync.lock timeout 300 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram' >> /home/mondial/mondial2026/reports/cron-sync.log 2>&1
 
 # 16:00 / 18:00 / 20:00 / 22:00 / 00:00 / 02:00 IDT — silent evening-window
 # Negev sync so post-match points land in our DB within ~2h of full-time
-0 16,18,20,22,0,2 * * *  cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet
+0 16,18,20,22,0,2 * * *  flock -n /tmp/mondial-negev-sync.lock timeout 300 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet' >> /home/mondial/mondial2026/reports/cron-sync.log 2>&1
 
 # 08:00 IDT — post-match audit: our score_match() vs Negev's awarded points.
 # Sends 🔍 Telegram ONLY if any discrepancy > 0.01 pts (silent otherwise).
-0 8 * * *  cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/post_match_audit.py --telegram
+# Higher timeout because we may wait up to 5×30s per unprocessed bet.
+0 8 * * *  flock -n /tmp/mondial-audit.lock timeout 900 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/post_match_audit.py --telegram' >> /home/mondial/mondial2026/reports/cron-audit.log 2>&1

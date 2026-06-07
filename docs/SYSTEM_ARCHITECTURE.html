@@ -234,7 +234,7 @@
 
 <header>
   <h1>Mondial 2026 — System Architecture</h1>
-  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07.</div>
+  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07 (Day 9.8: post-match Negev sync workflow + 4-line cron canonical).</div>
 </header>
 
 <nav class="toc">
@@ -251,6 +251,9 @@
   <a href="#stage8">8. Deliver</a>
   <a href="#stage9">9. Scoring</a>
   <a href="#stage10">10. Watchdog</a>
+  <a href="#negev">Negev Sync</a>
+  <a href="#cron">Cron</a>
+  <a href="#telegram">Telegram Taxonomy</a>
   <a href="#observability">Observability</a>
   <a href="#failures">Failure Modes</a>
   <a href="#timing">Timing</a>
@@ -262,10 +265,11 @@
 <section id="tldr">
   <h2>TL;DR — what this system does</h2>
   <div class="panel info">
-    <p><strong>Goal:</strong> Win our friends' Toto pool by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
+    <p><strong>Goal:</strong> Win our friends' Toto pool ("Negev Toto 2026", ₪32,426 prize pool, 63 humans) by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
     <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × locked odds, renders a 7-9 line card, and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to Honeycomb.</p>
-    <p><strong>Where:</strong> Hetzner CPX22 VM ($10 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart.</p>
-    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa).</p>
+    <p><strong>Synchronization with Negev:</strong> After matches finish, cron-scheduled <code>sync_negev_standings.py</code> (Day-9.6) pulls Negev's authoritative server-side points back into our local <code>standings</code>, and <code>post_match_audit.py</code> (Day-9.8) cross-checks our <code>score_match()</code> calc against Negev's — silent if Δ=0, 🔍 Telegram if any discrepancy. 22 MCP tools (5 generic + 14 typed reads + 3 typed writes) live at <code>integrations/negev_toto_mcp.py</code>.</p>
+    <p><strong>Where:</strong> Hetzner CPX22 VM ($10 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>.</p>
+    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa). My opener pick is saved live: <strong>Mexico 2 - South Africa 1</strong> (detonator on).</p>
   </div>
 </section>
 
@@ -289,7 +293,8 @@
     <tr><td>Delivery</td><td>Telegram Bot API</td><td>Push-to-phone, free, 30 msg/sec global</td></tr>
     <tr><td>Historical results (DC fit)</td><td>github.com/martj42/international_results</td><td>Maintained CSV, ~49k rows back to 1872</td></tr>
     <tr><td>Elo ratings</td><td>eloratings.net/World.tsv</td><td>Standard reference, updated daily</td></tr>
-    <tr><td>Test framework</td><td>pytest</td><td>369 tests, ~17s full suite</td></tr>
+    <tr><td>Test framework</td><td>pytest</td><td>438 tests, ~17s full suite (after Day-9.7 + Day-9.8 additions)</td></tr>
+    <tr><td>Friends' Toto app</td><td>negev-toto.web.app (Firebase Auth + Firestore)</td><td>22 MCP tools; 3 writes gated by <code>NEGEV_ALLOW_WRITES=1</code> + module check + Firestore rules</td></tr>
     </tbody>
   </table>
 </section>
@@ -722,8 +727,188 @@ Signals: DC+Elo+Market+News(gemini)
   </ul>
 
   <h3>Daily summary (09:00 Asia/Jerusalem, once per day)</h3>
-  <p><code>schedule/daily_summary.py::send_if_due</code>. Idempotency via synthetic <code>match_id = −1</code> and day-stamped window <code>daily-summary-YYYY-MM-DD</code> in the runs ledger.</p>
+  <p><code>schedule/daily_summary.py::send_if_due</code>. Sent via <code>delivery.summary()</code> (Day-9.8 helper) so it doesn't get the ⚠️ prefix that <code>delivery.alert()</code> prepends. Idempotency via synthetic <code>match_id = −1</code> and day-stamped window <code>daily-summary-YYYY-MM-DD</code> in the runs ledger.</p>
   <p>Content: today's games + recent results + your standings + Brave/odds budget. <strong>Doubles as a positive heartbeat</strong> — if you don't see ☀️ at 09:00, the daemon is dead even if alerts are also broken.</p>
+</section>
+
+<!-- =========== NEGEV SYNC =========== -->
+<section id="negev">
+  <h2>Stage 11 — Negev synchronization (Day-9.6 → Day-9.8)</h2>
+
+  <p>Our pipeline is authoritative for <strong>input</strong> (football-data + odds + LLM signals). Negev is the <strong>point-counting truth</strong> source — the friends' app server-side Cloud Function scores each match within seconds of FT. We pull those numbers back to make sure we're tracking exactly what Negev shows everyone else.</p>
+
+  <h3>Architecture</h3>
+  <pre><code>┌──────────────────────────┐         ┌──────────────────────────┐
+│ Our daemon (Hetzner VM)  │         │ Negev Toto (Firebase)    │
+│ + cron jobs              │  HTTPS  │ Firestore + Cloud Fn     │
+└──────────┬───────────────┘ ──────► └────────────┬─────────────┘
+           │                                       │
+           │  22 MCP tools                         │  matches/{tid_apifid}
+           │  integrations/                        │  bets/{userId_matchId_tid}
+           │  negev_toto_mcp.py                    │  users/{uid}.pointsTotal
+           │                                       │  Cloud Fn: scoreOnUpdate
+           ▼                                       ▼
+   tools/sync_negev_standings.py            (server-side scoring,
+   tools/post_match_audit.py                 idempotent, ≤ seconds)</code></pre>
+
+  <h3>tools/sync_negev_standings.py — pull standings + results (Day-9.6 + Day-9.8)</h3>
+  <table>
+    <tr><th>When</th><td>cron at 07:00 IDT (with --telegram); 16/18/20/22/00/02 IDT (silent, --quiet)</td></tr>
+    <tr><th>What</th><td><ol>
+      <li><code>toto_get_standings(tid)</code> → 63-row leaderboard, bots filtered</li>
+      <li><code>sync_match_results()</code> — Day-9.8 — pulls Negev's FT/PEN status + goals into our <code>matches</code> table for the match_ids that match by apifid</li>
+      <li><code>sync_standings()</code> — UPSERTs each row into our <code>standings</code> table: <code>directionPoints → group_points</code>, <code>broadBetPoints → futures_points</code>, <code>knockoutPoints → knockout_points</code></li>
+      <li>(if --telegram) 📊 leaderboard via <code>delivery.summary()</code> — top-5 + Igor's rank + "Around you" window + gap-to-leader</li>
+    </ol></td></tr>
+    <tr><th>Why every 2h</th><td>Match-day evenings (16-02 IDT) so my local DB never lags Negev's by more than 2 hours — enough for the strategy layer to make decisions on real numbers.</td></tr>
+    <tr><th>Cost</th><td>~5-10 Firestore reads per run; far under quota. Wrapped in <code>obs.external_call("negev_toto", ...)</code> → Honeycomb + cost ledger.</td></tr>
+  </table>
+
+  <h3>tools/post_match_audit.py — verify our calc matches Negev's (Day-9.8)</h3>
+  <table>
+    <tr><th>When</th><td>cron at 08:00 IDT — once per day, after overnight matches and after the 07:00 standings pull</td></tr>
+    <tr><th>What</th><td><ol>
+      <li>For each FT match in our DB: call <code>toto_get_match_bets(match_id, tid)</code> → all picks + Negev's <code>awardedPoints</code> + <code>processedAt</code></li>
+      <li>If any bet has <code>processedAt</code> missing → wait 30s, retry; up to 5 attempts (handles Cloud Fn race conditions)</li>
+      <li>Re-run our <code>score_match()</code> against the same locked T-7m odds + detonator flag</li>
+      <li>Compute per-bet Δ = abs(ours − negev's)</li>
+      <li>If max(Δ) > 0.01 over all bets/all matches → send 🔍 Telegram with per-match table; <strong>silent otherwise</strong></li>
+      <li>Always exit 0; daemon does NOT depend on this</li>
+    </ol></td></tr>
+    <tr><th>Why silent on Δ=0</th><td>Igor reads Telegram. Zero noise on the happy path; only ping when there's something to investigate. After Day-9.7's grid alignment, the expected steady state is silent.</td></tr>
+    <tr><th>Telegram via</th><td><code>delivery.summary()</code> — informational, no ⚠️ prefix</td></tr>
+  </table>
+
+  <h3>Post-match end-to-end timeline (a match ending 22:00 IDT)</h3>
+  <pre><code>22:00         Match ends (FT 1-0)
+22:00:05      Negev Cloud Function scores every bet; users[].pointsTotal updates
+              within seconds of FT being set
+22:30 ± 30m   football-data.org publishes status=FINISHED + home_goals/away_goals
+T+0..60s      Our daemon's _maybe_ingest UPSERTs status='FINISHED', goals into matches
+              _maybe_update_standings re-scores via score_match() (vs locked T-7m odds)
+              → writes my points to local standings table
+T+ ≤ 2h       Next even-hour cron (00/02 IDT) runs sync_negev_standings.py
+              → sync_match_results() pulls Negev's FT goals (idempotent overwrite)
+              → sync_standings() OVERWRITES my standings table with Negev's numbers
+Next 07:00    📊 Negev leaderboard — now reflects real numbers
+Next 08:00    🔍 post-match audit — silent if my calc == Negev's, alert if Δ > 0.01
+Next 09:00    ☀️ daily summary reflects everything; doubles as heartbeat</code></pre>
+
+  <h3>Triple-gated writes</h3>
+  <div class="panel warn">
+    <p>4 of the 22 MCP tools mutate Negev state (1 generic + 3 typed). Each is gated by:</p>
+    <ol>
+      <li><strong>Env var:</strong> <code>NEGEV_ALLOW_WRITES=1</code> (default OFF) — set via <code>.env</code>, not committed</li>
+      <li><strong>Module check:</strong> the tool's first line raises if the env var isn't truthy</li>
+      <li><strong>Firestore security rules:</strong> Negev's own rules reject writes from any non-owner UID — defense in depth</li>
+    </ol>
+    <p>The 4 writes:</p>
+    <ul>
+      <li><code>toto_patch_document(path, fields_json)</code> — generic low-level patch (used by the typed writes below)</li>
+      <li><code>toto_update_preferences(...)</code> — patch my <code>pref_*</code> notification flags</li>
+      <li><code>toto_submit_match_prediction(home, away, home_score, away_score, ...)</code> — used 2026-06-07 to save Mexico 2-1</li>
+      <li><code>toto_update_match_result(match_id, home_score, away_score, status, ...)</code> — founder-side; we don't normally call this</li>
+    </ul>
+  </div>
+
+  <h3>Scoring-grid cross-check (Day-9.7)</h3>
+  <p><code>tools/verify_negev_live.py</code> runs 14 live checks against the Negev backend. Day-9.7 audit found 3 cells in our <code>SCORE_TABLE["group"]</code> that didn't match Negev's <code>settings/managerTables.grids.groupStage</code>:</p>
+  <table>
+    <tr><th>Score</th><th>Our value (pre-fix)</th><th>Negev's value</th></tr>
+    <tr><td>1-0</td><td>2.25</td><td><strong>1.5</strong></td></tr>
+    <tr><td>2-1</td><td>3.25</td><td><strong>2.25</strong></td></tr>
+    <tr><td>3-2</td><td>4.5</td><td><strong>3.25</strong></td></tr>
+  </table>
+  <p>Root cause: column shift in <code>_GROUP[0]</code>. After fix: <strong>147/147 grid cells match</strong> across all 3 stages (groupStage / round16AndQuarter / semiAndFinal).</p>
+</section>
+
+<!-- =========== CRON =========== -->
+<section id="cron">
+  <h2>Stage 12 — Cron schedule (Day-9.8: canonical 4-line crontab)</h2>
+
+  <p>Single source of truth: <code>infra/mondial2026.crontab</code> (in the repo, checked in). <code>infra/bootstrap.sh</code> step 7 installs from this file (idempotent — replaces the entire crontab, never appends, so re-running can't introduce duplicates). To refresh manually:</p>
+  <pre><code>sudo -u mondial crontab /home/mondial/mondial2026/infra/mondial2026.crontab
+crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pre>
+
+  <h3>The 4 lines</h3>
+  <table>
+    <tr><th>Time (IDT)</th><th>Job</th><th>Telegram</th><th>What</th></tr>
+    <tr><td>03:15</td><td><code>infra/backup.sh</code></td><td>—</td><td>Nightly online SQLite snapshot + 7-day rotation in <code>store/backup/</code></td></tr>
+    <tr><td>07:00</td><td><code>sync_negev_standings.py --quiet --telegram</code></td><td>📊</td><td>Pull Negev results + standings → UPSERT local DB → leaderboard Telegram</td></tr>
+    <tr><td>16/18/20/22/00/02</td><td><code>sync_negev_standings.py --quiet</code></td><td>—</td><td>Silent match-day evening syncs (≤2h freshness)</td></tr>
+    <tr><td>08:00</td><td><code>post_match_audit.py --telegram</code></td><td>🔍 (silent if OK)</td><td>Cross-check our calc vs Negev's; retries 5×30s for race conditions</td></tr>
+  </table>
+
+  <h3>What is NOT in cron</h3>
+  <ul>
+    <li><strong>09:00 IDT ☀️ daily summary</strong> — fired by the daemon's tick loop via <code>_maybe_daily_summary()</code>, NOT cron. (Idempotency via the runs ledger, same as match cards.) This way it doubles as a heartbeat: no ☀️ at 09:00 → daemon is dead.</li>
+    <li><strong>Match-window cards (⚽)</strong> — also fired by the daemon's tick loop; cron isn't aware of windows.</li>
+    <li><strong>Calendar ingest</strong> — daemon, every 30 min, internal scheduler.</li>
+  </ul>
+
+  <div class="panel ok">
+    <p>Idempotency guarantees: re-running cron installation never duplicates; <code>sync_negev_standings.py</code> is UPSERT-based; <code>post_match_audit.py</code> always exits 0 and is read-only. <code>backup.sh</code> uses date-stamped filenames so same-day re-runs overwrite, not pile up.</p>
+  </div>
+</section>
+
+<!-- =========== TELEGRAM TAXONOMY =========== -->
+<section id="telegram">
+  <h2>Stage 13 — Telegram message taxonomy (5 types after Day-9.8)</h2>
+
+  <p>All messages go to the same <code>TELEGRAM_CHAT_ID</code>. Per-chat rate limit is 1/sec — we send 2-3 messages/day on quiet days, ~12 on match days. Audit (🔍) is silent unless there's a real discrepancy, so most days the user sees 📊 + ☀️ only.</p>
+
+  <table>
+    <thead><tr><th>Glyph</th><th>Sender</th><th>Helper</th><th>When</th><th>What</th></tr></thead>
+    <tbody>
+    <tr>
+      <td><span class="pill">⚽</span></td>
+      <td>daemon (<code>schedule/process_match.py</code>)</td>
+      <td><code>delivery.deliver_card()</code></td>
+      <td>each match window (T-24h / T-60m / T-15m / T-7m)</td>
+      <td>The pick card — 7-9 lines, locked odds, model%, exact + modal, EV, signals trace</td>
+    </tr>
+    <tr>
+      <td><span class="pill warn">⚠</span></td>
+      <td>daemon (anywhere)</td>
+      <td><code>delivery.alert()</code></td>
+      <td>failures</td>
+      <td>Pipeline / delivery / scheduler down. PREPENDS ⚠️ glyph. 1-3 lines.</td>
+    </tr>
+    <tr>
+      <td><span class="pill ok">☀️</span></td>
+      <td>daemon (<code>schedule/daily_summary.py</code>)</td>
+      <td><code>delivery.summary()</code></td>
+      <td>09:00 IDT</td>
+      <td>Today's games + recent results + your score + budget. Heartbeat.</td>
+    </tr>
+    <tr>
+      <td><span class="pill dc">📊</span></td>
+      <td>cron (<code>tools/sync_negev_standings.py --telegram</code>)</td>
+      <td><code>delivery.summary()</code></td>
+      <td>07:00 IDT</td>
+      <td>Live Negev leaderboard top-5 + Igor's rank + "Around you" window + gap to leader</td>
+    </tr>
+    <tr>
+      <td><span class="pill market">🔍</span></td>
+      <td>cron (<code>tools/post_match_audit.py --telegram</code>)</td>
+      <td><code>delivery.summary()</code></td>
+      <td>08:00 IDT</td>
+      <td><strong>Silent on Δ=0.</strong> Sends per-match table only when our <code>score_match()</code> differs from Negev's awarded points by >0.01. Day-9.8 addition.</td>
+    </tr>
+    </tbody>
+  </table>
+
+  <h3>Why <code>delivery.summary()</code> exists (Day-9.8)</h3>
+  <p>Before Day-9.8, the 📊 standings message used <code>delivery.alert()</code> which prepended a ⚠️ prefix — making it look like an error. <code>delivery.summary()</code> sends the same text without the prefix. Used by ☀️, 📊, and 🔍 — all informational messages.</p>
+
+  <h3>Match-day vs quiet-day volume</h3>
+  <table>
+    <tr><th>Day type</th><th>Messages</th></tr>
+    <tr><td>Pre-tournament / off day</td><td>2: 📊 + ☀️ (and 🔍 sometimes; usually silent)</td></tr>
+    <tr><td>1 match day (group stage)</td><td>2 + 4 windows × 1 match = ~6</td></tr>
+    <tr><td>4 matches day (peak group stage)</td><td>2 + 4 windows × 4 = ~18 (under 1/sec rate limit by 3 orders of magnitude)</td></tr>
+    <tr><td>Day with audit discrepancy</td><td>+1 🔍 alert (rare; means a real investigation is needed)</td></tr>
+  </table>
 </section>
 
 <!-- =========== OBSERVABILITY =========== -->
@@ -747,6 +932,7 @@ Signals: DC+Elo+Market+News(gemini)
     <tr><td>claude</td><td>50 / min</td><td>50 RPM Tier-1</td><td>none</td><td>PAYG</td></tr>
     <tr><td>brave_search</td><td>1 / s</td><td>1 / s Search plan</td><td>1000 / month</td><td>$5/mo free credit = 1000 free</td></tr>
     <tr><td>telegram_bot</td><td>1 / s per chat</td><td>1 / s per chat</td><td>none</td><td>Free</td></tr>
+    <tr><td>negev_toto</td><td>polite ~10/min</td><td>Firebase Firestore (no published RPM)</td><td>none</td><td>Friends' app — auth via NEGEV_REFRESH_TOKEN</td></tr>
   </table>
 
   <h3>Honeycomb dataset: <code>mondial2026</code></h3>
@@ -804,32 +990,58 @@ WHERE correlation_id LIKE "daily-summary-%"</code></pre>
     <summary>Restart mid-window (the dangerous one)</summary>
     <p>Active-worker guard in <code>update.sh</code> prevents this — refuses to restart if any <code>runs.status='started'</code> row is &lt; 5 min old. Override with <code>--force</code> only if you accept the missed-card risk.</p>
   </details>
+  <details>
+    <summary>Negev refresh token expires (after ~30 days)</summary>
+    <p>The connector raises a clear "re-capture from DevTools" message instead of silently failing. The 07:00 📊 stops landing; the 08:00 🔍 audit stops landing (silently exits 0). The daemon's own pipeline is unaffected — calendar + odds + cards keep working. Recovery: sign in to negev-toto.web.app → DevTools → IndexedDB → firebaseLocalStorageDb → copy <code>stsTokenManager.refreshToken</code> → paste into <code>.env::NEGEV_REFRESH_TOKEN</code> → <code>systemctl restart mondial2026</code> (cron picks up the new env automatically on next run).</p>
+  </details>
+  <details>
+    <summary>Negev's Cloud Function delayed (race on processedAt field)</summary>
+    <p><code>post_match_audit.py</code> retries 5×30s if any bet has <code>processedAt</code> missing. Total max wait: 2.5 minutes. If still missing after that, the audit logs a soft warning and exits 0 (the comparison can't be done meaningfully without Negev's awarded points). Next day's 08:00 cron picks it up.</p>
+  </details>
+  <details>
+    <summary>Audit finds a real discrepancy (our calc ≠ Negev's by > 0.01)</summary>
+    <p>🔍 Telegram fires with a per-match table showing the Δ. The daemon does NOT auto-fix. Igor's job: open the per-match breakdown, identify which side is wrong, and either (a) update <code>config/rules.py::SCORE_TABLE</code> if Negev is right (rare — Day-9.7 alignment was a one-time event), or (b) report a Negev bug to the founder. Until resolved, our local <code>standings</code> table is overwritten by <code>sync_negev_standings.py</code> every 2h, so the daemon's strategy layer still uses Negev's numbers (not our diverging calc).</p>
+  </details>
 </section>
 
 <!-- =========== TIMING =========== -->
 <section id="timing">
   <h2>Timing — when you'll actually see things</h2>
 
+  <h3>Recurring daily schedule (every day, all-tournament)</h3>
+  <table>
+    <tr><th>Time (Israel)</th><th>Event</th><th>Channel</th><th>Driver</th></tr>
+    <tr><td>03:15</td><td>Nightly SQLite backup (silent)</td><td>—</td><td>cron → <code>infra/backup.sh</code></td></tr>
+    <tr><td>07:00</td><td>📊 Negev standings (top-5 + my rank + "Around you" + gap)</td><td>Telegram</td><td>cron → <code>sync_negev_standings.py --quiet --telegram</code></td></tr>
+    <tr><td>08:00</td><td>🔍 Post-match audit (silent if Δ=0; alert if our calc ≠ Negev's)</td><td>Telegram (conditional)</td><td>cron → <code>post_match_audit.py --telegram</code></td></tr>
+    <tr><td>09:00</td><td>☀️ Daily summary (today's games + recent results + my score + budget)</td><td>Telegram</td><td>daemon tick → <code>_maybe_daily_summary()</code> (NOT cron)</td></tr>
+    <tr><td>16/18/20/22/00/02</td><td>Silent Negev sync (keeps DB ≤2h fresh during match days)</td><td>—</td><td>cron → <code>sync_negev_standings.py --quiet</code></td></tr>
+  </table>
+
+  <h3>One-off timeline (kickoff and beyond)</h3>
   <table>
     <tr><th>When (Israel local)</th><th>What you see</th><th>Where</th></tr>
-    <tr><td>2026-06-08 07:00</td><td>📊 Negev standings (top-5 + your rank + gap)</td><td>Telegram</td></tr>
-    <tr><td>2026-06-08 09:00</td><td>☀️ Daily summary</td><td>Telegram</td></tr>
-    <tr><td>...every morning at 07:00 / 09:00</td><td>📊 / ☀️ messages</td><td>Telegram</td></tr>
     <tr><td><strong>2026-06-10 22:00</strong></td><td><strong>⚽ First card — Mexico vs South Africa T-24h</strong></td><td>Telegram</td></tr>
     <tr><td>2026-06-11 21:00</td><td>⚽ T-60m card (full odds, full news)</td><td>Telegram</td></tr>
     <tr><td>2026-06-11 21:45</td><td>⚽ T-15m card</td><td>Telegram</td></tr>
     <tr><td>2026-06-11 21:53</td><td>⚽ T-7m card (THE LOCK)</td><td>Telegram</td></tr>
-    <tr><td><strong>2026-06-11 21:59</strong></td><td><strong>🚨 Manual deadline: enter Day-7 futures in Negev Toto</strong></td><td>Negev Toto app</td></tr>
-    <tr><td>2026-06-11 22:00</td><td>Kickoff (system idles during the match)</td><td>(TV)</td></tr>
-    <tr><td>2026-06-11 23:50ish</td><td>Score ingested; standings update; next morning's summary reflects it</td><td>Telegram next morning</td></tr>
-    <tr><td>2026-06-27</td><td>Group stage ends. If you're behind, consider <code>STRATEGY_TILT=0.4</code>.</td><td>Manual decision</td></tr>
+    <tr><td><strong>2026-06-11 21:59</strong></td><td><strong>🚨 Manual deadline: enter Day-7 futures in Negev Toto (Portugal / Uzbekistan / Mbappé)</strong></td><td>Negev Toto app</td></tr>
+    <tr><td>2026-06-11 22:00</td><td>Kickoff — my opener pick (Mexico 2-1) is already saved live via MCP</td><td>(TV)</td></tr>
+    <tr><td>2026-06-11 ~22:00:05</td><td>Negev Cloud Fn scores my bet (server-side, seconds)</td><td>—</td></tr>
+    <tr><td>2026-06-11 22:30 ± 30m</td><td>football-data status=FINISHED; daemon ingests, _maybe_update_standings re-scores via score_match()</td><td>local DB</td></tr>
+    <tr><td>2026-06-12 00:00 / 02:00</td><td>Silent Negev sync overwrites my standings with Negev's authoritative number</td><td>local DB</td></tr>
+    <tr><td>2026-06-12 07:00</td><td>📊 reflects real numbers</td><td>Telegram</td></tr>
+    <tr><td>2026-06-12 08:00</td><td>🔍 audit (silent unless our calc ≠ Negev's by > 0.01)</td><td>Telegram (conditional)</td></tr>
+    <tr><td>2026-06-12 09:00</td><td>☀️ daily summary reflects the new results</td><td>Telegram</td></tr>
+    <tr><td>2026-06-27</td><td>Group stage ends. If behind, consider <code>STRATEGY_TILT=0.4</code>.</td><td>Manual decision</td></tr>
     <tr><td>2026-07-19</td><td>Final. Run <code>tools.calibrate.run()</code> after for post-tournament tune.</td><td>Manual</td></tr>
     <tr><td>2026-07-20+</td><td>Destroy the Hetzner VM (~€5 total event cost)</td><td>Hetzner Console</td></tr>
   </table>
 </section>
 
 <div class="footer-note">
-  Generated 2026-06-07 · Updated when stages change · Companion to <code>CLAUDE.md</code> and <code>docs/SERVER.md</code>
+  Updated 2026-06-07 (Day 9.8) · Companion to <code>CLAUDE.md</code>, <code>docs/SERVER.md</code>, <code>docs/SCHEDULING.md</code>, <code>integrations/README_negev_toto.md</code>, and <code>integrations/CLAUDE_CODE_HANDOFF_negev.md</code><br>
+  System state: 438 tests green · 16 Negev MCP tools (3 gated writes) · 4-line canonical crontab · Negev grids 147/147 aligned · Mexico 2-1 opener saved live
 </div>
 
 </main>

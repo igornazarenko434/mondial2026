@@ -116,6 +116,81 @@ Also wired in Day 9.6: daily 07:00 IDT sync via
 `tools/sync_negev_standings.py` → upserts into our `standings` table for
 the strategy layer. Cron line installed by `infra/bootstrap.sh`.
 
+## ✅ Step 2.5 — Tournament-scoping + write tools (DONE 2026-06-07, Day 9.6)
+
+**Two write tools added** to `negev_toto_mcp.py`, triple-gated
+(`NEGEV_ALLOW_WRITES=1` + module check + Negev's own Firestore rules):
+- `toto_submit_match_prediction(match_id, home, away, detonator, tid)`
+  — captured the Network tab PATCH payload; locks odds at submission time.
+  **Used live 2026-06-07** to save Mexico 2-1 prediction (Igor's pick).
+- `toto_submit_futures_pick(category, choice, tid)` — for winner/topScorer/
+  cinderella/bestPlayer; deadline 2026-06-11 21:59 IDT.
+
+**Tournament-scoping fix**: `toto_get_matches` was returning J-League /
+friendlies (because `matches` is a global collection). Fixed with a
+Firestore structured query on `tournamentId == NEGEV_TOURNAMENT_ID`.
+
+**bestPlayer category fix**: Initially showed only 1 option because the
+field is a META-BET on participants, not football players. Now synthesizes
+options from `users` collection (Aharony, Alfi, etc.) so all 63 humans
+appear as choices.
+
+Total tools now: **16** (5 generic + 9 typed reads + 2 typed writes + 2 prefs).
+
+## ✅ Step 2.7 — Scoring-grid alignment (DONE 2026-06-07, Day 9.7)
+
+`tools/verify_negev_live.py` (14 cross-checks) found 3 cells in our
+`SCORE_TABLE["group"]` that differed from Negev's `settings/managerTables.grids.groupStage`:
+
+| Score | Our value (pre-fix) | Negev's value | Fix |
+|---|---|---|---|
+| 1-0 | 2.25 | 1.5 | column-shifted `_GROUP[0]` |
+| 2-1 | 3.25 | 2.25 | column-shifted `_GROUP[0]` |
+| 3-2 | 4.5 | 3.25 | column-shifted `_GROUP[0]` |
+
+After the fix: **147/147 cells match** (groupStage 11×7, round16AndQuarter 11×7,
+semiAndFinal 11×7). `tools/verify_negev_live.py` exits 0.
+
+## ✅ Step 3 — Post-match sync workflow (DONE 2026-06-07, Day 9.8)
+
+Replaces the "Step 3" sketch above with a more pragmatic synchronization
+approach that doesn't require rewiring the predictor's data sources.
+
+**Architecture decision**: Rather than route every predictor query through
+Negev (creating a dependency on the friends' app), we keep our pipeline
+authoritative for input (football-data.org + the-odds-api) and use Negev
+as the **point-counting truth source**. Our `standings` table is rewritten
+from Negev's server-side numbers every 2 hours during match windows.
+
+**Components added**:
+
+1. `tools/sync_negev_standings.py` (extended) — now also calls
+   `sync_match_results()` to pull Negev's FT/PEN status + goals into our
+   local `matches` table.
+
+2. `tools/post_match_audit.py` — runs daily at 08:00 IDT. For each FT match:
+   - calls `toto_get_match_bets(match_id)` to get Negev's awarded points
+   - re-runs our `score_match()` against the same locked T-7m odds
+   - retries up to 5×30s if Negev's `processedAt` field isn't set yet
+     (Cloud Function race condition on close-to-now matches)
+   - sends 🔍 Telegram **only when Δ > 0.01 pts** on any bet (silent otherwise)
+   - exits 0 always; daemon does not depend on its result
+
+3. **Canonical crontab** `infra/mondial2026.crontab` (single source of truth):
+   ```cron
+   15 3 * * *  ...backup.sh
+   0 7 * * *  ...sync_negev_standings.py --quiet --telegram
+   0 16,18,20,22,0,2 * * *  ...sync_negev_standings.py --quiet
+   0 8 * * *  ...post_match_audit.py --telegram
+   ```
+   Bootstrap step 7 installs from this file (idempotent — replace, not append).
+
+4. **`delivery.summary()` helper** (Day-9.8) — sends informational Telegram
+   messages without the ⚠️ prefix that `delivery.alert()` prepends. Used by
+   ☀️ daily summary, 📊 standings sync, 🔍 audit.
+
+**Test count after Day-9.8**: 438 (was 370 at Day-9.5).
+
 ## (kept for reference) ORIGINAL Step 2 spec
 
 Spec below. Every tool MUST accept `tournament_id` as a parameter so the
@@ -222,10 +297,15 @@ Required test cases (one per tool, all green on `pytest -q`):
 | `test_update_preferences_skips_unspecified_fields` | only passed kwargs go into the updateMask |
 | `test_tournament_id_required_when_not_in_env` | calling `toto_get_standings(None)` with no `NEGEV_TOURNAMENT_ID` raises a clear ValueError |
 
-## ⏳ Step 3 — `core/data/toto.py` (the prediction-system bridge)
+## (kept for reference) ORIGINAL Step 3 spec — superseded by Day-9.8 sync workflow above
 
-**Not yet built.** Once Step 2's typed tools exist, add a thin client at
-`core/data/toto.py` that imports them and exposes:
+**Superseded.** The original plan was to push every predictor read through
+Negev (`core/data/toto.py`). The Day-9.8 sync workflow above is the actual
+implementation: we keep our pipeline authoritative for input and use Negev
+as the point-counting truth via `tools/sync_negev_standings.py` +
+`tools/post_match_audit.py` instead of inline calls.
+
+The original spec is below for archival purposes only:
 
 ```python
 def results(tournament_id: str | None = None) -> list[dict]:
@@ -278,20 +358,17 @@ Add a 24h disk-cache where the data is stable (e.g. tournament settings).
 Add `negev_toto` to `config/observability.py::PROVIDER_LIMITS` and `PRICING`
 during Step 3 (polite throttle ~10/min, $0 cost).
 
-## Open blockers (must be resolved by the founder, not by us)
+## Open blockers — RESOLVED 2026-06-07
 
-1. **Mondial 2026 tournament does not exist.** Once it's created, ask the
-   founder for the tournament id, paste into `.env` as `NEGEV_TOURNAMENT_ID=`,
-   and the typed tools work end-to-end.
-2. **Per-match prediction doc path is unknown.** Open Chrome/Safari DevTools →
-   Network tab on `negev-toto.web.app`. Make one prediction in the UI. Capture
-   the resulting `PATCH` (Firestore) or `POST` (Cloud Function) request URL +
-   body. That's the canonical write path. Add to `SCHEMA_negev.md` and only
-   then implement `toto_submit_match_prediction`.
-3. **Side-bet answer doc path is unknown.** Same procedure — make one Y/N
-   answer in the app, capture the network request, document it, implement.
-4. Optional: request `listCollectionIds` read permission from the founder so
-   future discovery is deterministic instead of guesswork.
+1. ~~Mondial 2026 tournament does not exist~~ → **`NEGEV_TOURNAMENT_ID=n40ykJlOIA9Mg839hz91` (Negev Toto 2026, ₪32,426 prize pool, 63 humans + 3 bots)**.
+2. ~~Per-match prediction doc path is unknown~~ → captured Day 9.6 and
+   wired to `toto_submit_match_prediction`. Verified live with Mexico 2-1.
+3. ~~Side-bet answer doc path is unknown~~ → side bets are unresolved as of
+   2026-06-07 (founder hasn't filled questions). Path discovered but write
+   tool not yet shipped. Add `toto_submit_side_bet_answer` when first side
+   bet is published.
+4. `listCollectionIds` still blocked by security rules — non-blocking since
+   subcollection paths are documented in `SCHEMA_negev.md`.
 
 ## What we can do today, even without the Mondial tournament
 

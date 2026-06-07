@@ -377,11 +377,29 @@ under each free-tier limit.
 | **Stuck jobs** | `⚠ Stuck jobs` | `watchdog.check_stuck` (called every tick) | A run started but never finished after 20 min. Body lists match_id + window + started_at. Usually means a hung HTTP call slipped past obs.external_call's rate_timeout. |
 | **Daily summary** ☀️ | `☀️ Daily summary — YYYY-MM-DD` | `schedule.daily_summary.send_if_due` (calls `delivery.summary`, NOT `delivery.alert` → no ⚠️ prefix) | 09:00 Asia/Jerusalem, once per day. Today's games + recent results + your score + budget. Doubles as a positive heartbeat — if you don't see it, the daemon is dead. |
 | **Negev standings sync** 📊 | `📊 Negev standings — YYYY-MM-DD HH:MM IDT` | `tools/sync_negev_standings.py --telegram` (cron, 07:00 IDT; calls `delivery.summary`) | 07:00 Asia/Jerusalem, once per day. Top-5 + your rank + "Around you" window + gap to leader. Day-9.6 addition; arrives 2h before the daily summary. |
+| **Post-match audit** 🔍 | `🔍 Post-match audit` | `tools/post_match_audit.py --telegram` (cron, 08:00 IDT; calls `delivery.summary`) | 08:00 Asia/Jerusalem. Cross-checks our score_match() vs Negev's awarded points; retries 5×30s if Negev's `processedAt` not set. **Silent if Δ=0 on all matches**, sends ONLY when at least one discrepancy > 0.01 pts. Day-9.8 addition. |
 
 All go to the **same** `TELEGRAM_CHAT_ID`. They're visually distinct:
 - Cards start with `⚽` and are 7-9 lines.
 - Alerts start with `⚠` and are 1-3 lines (use `delivery.alert`).
-- Informational summaries start with `☀️` / `📊` (use `delivery.summary` to avoid the ⚠️ prefix).
+- Informational summaries start with `☀️` / `📊` / `🔍` (use `delivery.summary` to avoid the ⚠️ prefix).
+
+### Day-9.8 cron schedule (4 lines)
+
+Canonical at `infra/mondial2026.crontab` (single source of truth; bootstrap
+installs from this file). Install/refresh manually:
+```bash
+sudo -u mondial crontab /home/mondial/mondial2026/infra/mondial2026.crontab
+```
+
+| Time IDT | Job | What |
+|---|---|---|
+| 03:15 | `infra/backup.sh` | nightly SQLite snapshot |
+| 07:00 | `sync_negev_standings.py --telegram` | Negev pull + 📊 |
+| 08:00 | `post_match_audit.py --telegram` | 🔍 audit (silent if all OK) |
+| 16/18/20/22/00/02 | `sync_negev_standings.py --quiet` | silent evening syncs |
+
+Plus the daemon's tick fires the ☀️ daily summary at 09:00 IDT (not cron).
 
 ### What it does NOT alert on (and why that's OK)
 

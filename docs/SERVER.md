@@ -329,6 +329,64 @@ ls -lh /home/mondial/mondial2026/store/backup/
 Restore: `gunzip -c store/backup/mondial-YYYY-MM-DD.db.gz > store/mondial.db`
 (stop the daemon first).
 
+### Cron — canonical 4 lines (Day-9.8)
+
+Single source of truth: `infra/mondial2026.crontab` (in the repo).
+Install / refresh / dedupe with one command:
+
+```bash
+sudo -u mondial crontab /home/mondial/mondial2026/infra/mondial2026.crontab
+crontab -u mondial -l    # verify exactly 4 active lines (+ comments)
+```
+
+| Time IDT | Job | What |
+|---|---|---|
+| 03:15 | `infra/backup.sh` | Nightly online SQLite snapshot + 7-day rotation |
+| 07:00 | `sync_negev_standings.py --quiet --telegram` | Pull Negev results + standings → UPSERT local DB → 📊 Telegram leaderboard |
+| 16/18/20/22/00/02 | `sync_negev_standings.py --quiet` | Silent match-day evening syncs (≤2h freshness on points) |
+| 08:00 | `post_match_audit.py --telegram` | Cross-check our score_match() vs Negev's awarded points; retries 5×30s if Negev's processedAt missing; sends 🔍 only if any Δ > 0.01 |
+
+Plus the daemon's `_maybe_daily_summary` fires the ☀️ summary at 09:00 IDT
+from inside the tick loop (not cron).
+
+### Day-9.8 post-match flow (synchronization end-to-end)
+
+```
+T+0:00   Match ends 22:00 IDT
+T+0:05   Negev's Cloud Function: matches/{tid_apifid}.status=FT, scores
+         each bet, updates each user's pointsTotal (server-side, seconds)
+T+0:30   football-data.org publishes status=FINISHED + final goals
+T+0:30→+60s
+         Our daemon's _maybe_ingest UPSERTs matches table
+         (status='FINISHED', goals)
+         _maybe_update_standings re-scores via score_match() against
+         locked T-7m odds → standings table for me
+T+≤2h    Next even-hour cron (16/18/20/22/00/02) runs
+         sync_negev_standings.py → sync_match_results() + sync_standings()
+         OVERWRITE our standings table with Negev's authoritative numbers
+T+next 07:00 IDT
+         📊 Telegram standings (now with real numbers)
+T+next 08:00 IDT
+         🔍 Telegram audit — silent if our calc matches Negev's, alert
+         otherwise (with per-match table showing Δ)
+T+next 09:00 IDT
+         ☀️ Daily summary reflects everything
+```
+
+### Day-9.6 Negev MCP integration (22 tools)
+
+`integrations/negev_toto_mcp.py` exposes 22 `@mcp.tool()` functions: 5 generic
+(low-level Firestore CRUD), 14 typed reads, 3 typed writes. The 4 mutating
+tools (generic `toto_patch_document` + 3 typed) are triple-gated by
+`NEGEV_ALLOW_WRITES=1`. Routing-by-natural-language table in
+`integrations/README_negev_toto.md`. Live smoke-test:
+
+```bash
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/verify_negev_live.py'
+```
+14 checks, exit 0 if all pass. Includes scoring-grid cross-check vs config/rules.py
+(Day-9.7 fix verifies 147/147 cells now match Negev).
+
 ### Inspect the live system via SQL
 
 ```bash
@@ -460,7 +518,7 @@ To pick up the project:
 
 To make a change:
 
-1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 370+ passing).
+1. On the user's Mac: edit code, run `pytest tests/ -q` (must show 438+ passing).
 2. Commit + push to `main` on GitHub.
 3. On the VM: `/home/mondial/mondial2026/infra/update.sh`.
 4. Verify with `journalctl -u mondial2026 -f` and the queries in §7.

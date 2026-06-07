@@ -33,7 +33,7 @@ You are helping build a World Cup prediction system. Read this before working.
     model+odds+news → model-only → Elo+market → neutral-news → (last resort) alert.
     It must NEVER raise; call `news_agent.analyze_safe`, check `ledger.over_budget`
     before odds pulls, normalize teams via `teams.normalize`, and devig defensively.
-11. Run `pytest tests/ -q` after every change (370 tests should stay green as of c461907).
+11. Run `pytest tests/ -q` after every change (438 tests should stay green as of 0075e7d).
 
 ## Current state — infrastructure already built (don't rebuild)
 These layers exist, are tested, and run today with no API keys. Your job is to
@@ -294,6 +294,44 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.8 — full post-match sync workflow (DONE — 438 total).**
+      Closes every gap between "match finishes" and "our DB knows + Negev's
+      official scoring is reflected". Deliverables:
+      - `toto_get_matches` is now TOURNAMENT-SCOPED (was reading global
+        matches across all tournaments — Negev's catalog mixes J-League /
+        Allsvenskan / side pools).
+      - `toto_get_match_details(home, away)` — combines match + my pick +
+        friends' picks + applicable exact-PTS grid + bingoMultiplier.
+      - `toto_next_match()` — workflow helper: tells which match comes
+        next, what stage_type it is, whether penalty info is needed.
+      - `toto_submit_match_prediction(home, away, h, a, advances_team?)` —
+        save my per-match pick. `advances_team` for KO + predicted-draw
+        cases (you pick which team wins on pens).
+      - `toto_update_match_result(...)` — admin path for actual final
+        score; supports KO + penalty_home/penalty_away + winner_team.
+      - `tools/sync_negev_standings.py::sync_match_results()` — pulls
+        Negev's FT/PEN matches → UPDATEs local matches table.
+      - `tools/post_match_audit.py` — for each FINISHED match in our DB,
+        compares our `score_match()` calc vs Negev's awarded points;
+        retries 5×30s if Negev's `processedAt` not yet set; Telegram 🔍
+        alert ONLY if Δ > 0.01.
+      - `tools/verify_negev_live.py` — one-command 14-check smoke test
+        for the MCP.
+      - Cron expanded: 03:15 backup, 07:00 main sync + 📊, 08:00 audit,
+        16/18/20/22/00/02 silent syncs (≤2h freshness on match-day evenings).
+      - `infra/mondial2026.crontab` — single source of truth for the cron
+        lines; bootstrap.sh installs from this file (idempotent).
+      Live: opener prediction Mexico 2-1 saved successfully to
+      `bets/n40ykJlOIA9Mg839hz91_1489369_nsauuOzpJXdVP93djMjIjCeUeMJ3`.
+- [x] **Day 9.7 — scoring grid alignment to Negev (DONE — 422 total).**
+      Negev consistency audit caught 3 group-stage cells (1-0, 2-0, 3-0)
+      that disagreed between our `config/rules.py::_GROUP[0]` and Negev's
+      authoritative server-side `managerTables.grids.groupStage`.
+      Pattern Negev uses (now ours too): 1-0 ↔ 2-1 = 1.5 (same difficulty);
+      2-0 ↔ 3-1 = 2.25; 3-0 ↔ 4-1 = 3.25. Updated `_GROUP[0]` to
+      `[2.75, 1.5, 2.25, 3.25, 4.5, 4.5, 4.5, 4.5]` + 3 regression tests
+      pinning the new values. All 147 of 147 cells now match Negev across
+      groupStage, round16AndQuarter, semiAndFinal.
 - [x] **Day 9.6 — Negev Toto MCP typed tools + daily standings sync (DONE — +30 tests, 400 total).**
       Closes the manual-standings-entry gap: the friends' Negev Toto app is
       now the live source of truth for participant points; the local
@@ -468,7 +506,7 @@ keys (placeholder inputs) so you can always eyeball the pipeline.
 
 The system was deployed to the Hetzner VM on 2026-06-07. Between deploy and
 the first match (2026-06-11 22:00 Israel) the daemon idle-ticks — no jobs
-fire, no cards emit. This is by design. The following are pinned by 370
+fire, no cards emit. This is by design. The following are pinned by 438
 unit/integration tests but will only be confirmed in production from the
 opener onwards:
 
