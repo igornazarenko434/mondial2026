@@ -5,20 +5,38 @@ Free tier: 100 req/day. Wired calls (each ≤ 1 credit):
                                                   id for one WC 2026 match
   - fetch_lineups(fixture_id)                  — confirmed XI per team
   - fetch_injuries(team_id, season=2026)       — active injuries / suspensions
+  - find_team_id(team_name)                    — name → numeric id
 
-Day-8 cost pattern per match-window (T-60m + T-15m):
-  1× find_fixture_id (skipped if cached) + 1× lineups + 2× injuries = ~4 credits
-  → 4 × 104 matches × 2 active windows = ~830 over the tournament (well over 100
-    if not spread). Per-day average ~28 over 30 days — safe under 100/day cap.
+Day-9.20 caching strategy:
+  - find_team_id: PERMANENT disk cache at store/api_football_team_ids.json
+    (team ids never change). One-shot populate via
+    tools/populate_api_football_team_ids.py wins all 48 team ids in ~48
+    credits; from then on the daemon makes ZERO team-id calls per match.
+  - fetch_injuries: 30-MIN in-memory cache. Within a match-window pass
+    (T-60m + T-15m for 4 matches), 8 calls collapse to 4 (one per team).
+  - find_fixture_id: 12-HOUR in-memory cache. The (home, away, date) pair
+    is stable so reusing within a window costs nothing.
+  - fetch_lineups: NOT cached — lineups change until kickoff.
 
-Every call is:
-  * budget-guarded BEFORE the HTTP request (so a 401 / over-budget never blows up
-    a card-window job)
-  * wrapped in obs.external_call('api_football', ...) for rate-limit + ledger
-  * graceful — returns None / [] on failure, logs at INFO/WARNING, never raises
+Worst-case match day (4 simultaneous matches, group stage final day):
+  Without caches: 4 × (1 fixture + 1 lineups + 2 team_id + 2 injuries)
+                = 24 per window × 2 windows = 48 per day. Near cap.
+  With Day-9.20: 4 × (1 fixture + 1 lineups + 0 team_id + 2 injuries
+                       deduped to once per team across the 4 matches)
+                = ~10 per window × 2 = 20/day. Comfortable.
+
+Quota-aware skip:
+  - `_budget_clear()` short-circuits BEFORE the HTTP if api_football is
+    over its 100/day budget. The caller (news_agent.gather_context) then
+    falls back to api-football data from CACHE (still present in
+    _INJURIES_CACHE) plus Brave search results. No card is ever blocked
+    on api-football availability.
 """
 from __future__ import annotations
+import json
 import os
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 import requests
@@ -31,6 +49,21 @@ log = get_logger("data.api_football")
 API_BASE = "https://v3.football.api-sports.io"
 WC_LEAGUE_ID = 1                # FIFA World Cup competition id on api-football
 DEFAULT_SEASON = 2026
+
+# Day-9.20 in-memory + on-disk caches.
+_TEAM_ID_CACHE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "store", "api_football_team_ids.json")
+_TEAM_ID_CACHE: dict[str, int] | None = None
+_TEAM_ID_LOCK = threading.RLock()
+
+# {team_id: (timestamp_unix, [injury, ...])}
+_INJURIES_CACHE: dict[int, tuple[float, list[dict]]] = {}
+INJURIES_TTL_SEC = int(os.environ.get("API_FOOTBALL_INJURIES_TTL", "1800"))  # 30 min
+
+# {(home_canon, away_canon, date_str): (timestamp_unix, fixture_id)}
+_FIXTURE_ID_CACHE: dict[tuple[str, str, str], tuple[float, int]] = {}
+FIXTURE_ID_TTL_SEC = int(os.environ.get("API_FOOTBALL_FIXTURE_TTL", "43200"))  # 12 h
 
 
 def _headers() -> dict:
@@ -71,6 +104,48 @@ def _get(endpoint: str, params: dict, *, label: str | None = None) -> dict | Non
         return None
 
 
+def _load_team_id_cache() -> dict[str, int]:
+    """Day-9.20: load the on-disk team-id cache (populated once via
+    tools/populate_api_football_team_ids.py). Returns {} if missing."""
+    global _TEAM_ID_CACHE
+    with _TEAM_ID_LOCK:
+        if _TEAM_ID_CACHE is not None:
+            return _TEAM_ID_CACHE
+        try:
+            with open(_TEAM_ID_CACHE_PATH) as f:
+                _TEAM_ID_CACHE = json.load(f).get("teams", {})
+        except Exception:                               # noqa: BLE001
+            _TEAM_ID_CACHE = {}
+        return _TEAM_ID_CACHE
+
+
+def _save_team_id_cache() -> None:
+    """Persist current cache to disk atomically (write-then-rename)."""
+    global _TEAM_ID_CACHE
+    with _TEAM_ID_LOCK:
+        if _TEAM_ID_CACHE is None:
+            return
+        os.makedirs(os.path.dirname(_TEAM_ID_CACHE_PATH), exist_ok=True)
+        tmp = _TEAM_ID_CACHE_PATH + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump({"teams": _TEAM_ID_CACHE,
+                           "updated_at": datetime.now(timezone.utc).isoformat()},
+                          f, indent=2, ensure_ascii=False)
+            os.replace(tmp, _TEAM_ID_CACHE_PATH)
+        except Exception as e:                          # noqa: BLE001
+            log.warning("team-id cache save failed: %s", e)
+
+
+def _cache_team_id(canon_name: str, team_id: int) -> None:
+    global _TEAM_ID_CACHE
+    with _TEAM_ID_LOCK:
+        if _TEAM_ID_CACHE is None:
+            _load_team_id_cache()
+        _TEAM_ID_CACHE[canon_name] = team_id
+        _save_team_id_cache()
+
+
 def find_fixture_id(home: str, away: str, kickoff_utc: str,
                     league_id: int = WC_LEAGUE_ID,
                     season: int = DEFAULT_SEASON) -> int | None:
@@ -95,6 +170,16 @@ def find_fixture_id(home: str, away: str, kickoff_utc: str,
         log.info("find_fixture_id: cannot parse kickoff_utc=%r", kickoff_utc)
         return None
     h_canon, a_canon = normalize(home), normalize(away)
+
+    # Day-9.20: 12h in-memory cache. Same (home, away, date) within a window
+    # pass costs nothing.
+    cache_key = (h_canon or "", a_canon or "", date_str)
+    now = time.time()
+    if cache_key in _FIXTURE_ID_CACHE:
+        ts, fid = _FIXTURE_ID_CACHE[cache_key]
+        if now - ts < FIXTURE_ID_TTL_SEC:
+            return fid
+
     body = _get("/fixtures",
                 {"league": league_id, "season": season, "date": date_str},
                 label="fixtures:lookup")
@@ -107,7 +192,9 @@ def find_fixture_id(home: str, away: str, kickoff_utc: str,
         ah = normalize((teams.get("home") or {}).get("name", "")) or ""
         aa = normalize((teams.get("away") or {}).get("name", "")) or ""
         if ah == h_canon and aa == a_canon:
-            return int(f.get("fixture", {}).get("id"))
+            fid = int(f.get("fixture", {}).get("id"))
+            _FIXTURE_ID_CACHE[cache_key] = (now, fid)
+            return fid
     log.info("find_fixture_id: %s vs %s not in api-football's list for %s",
               h_canon, a_canon, date_str)
     return None
@@ -154,22 +241,45 @@ def fetch_lineups(fixture_id: int) -> list[dict] | None:
 
 
 def fetch_injuries(team_id: int, season: int = DEFAULT_SEASON,
-                   league_id: int = WC_LEAGUE_ID) -> list[dict] | None:
+                   league_id: int = WC_LEAGUE_ID,
+                   force_refresh: bool = False) -> list[dict] | None:
     """GET /injuries?team=<team_id>&season=<season>&league=<league_id>.
+
+    Day-9.20: in-memory cache with INJURIES_TTL_SEC (default 30 min). Within
+    a window pass for 4 simultaneous matches we collapse 8 injury calls
+    (2 teams × 4 matches) into ~4 (one per unique team). Across the T-60m +
+    T-15m windows for the same match, second call hits the cache.
+
+    When api-football quota is exhausted (`_budget_clear()` returns False)
+    we STILL return the cached value if present — gracefully degrading to
+    stale data rather than NO data.
 
     Returns a list:
         [{"player": "Mbappé", "position": "Attacker",
           "type": "Knock", "reason": "Hamstring", "match_date": "..."}]
-    Filtered to ACTIVE issues (status type contains 'Missing' / 'Doubtful' /
-    'Suspended') — historical injuries that have resolved are excluded.
     """
     if not team_id:
         return None
+    now = time.time()
+    cached = _INJURIES_CACHE.get(int(team_id))
+    if cached and not force_refresh:
+        ts, value = cached
+        if now - ts < INJURIES_TTL_SEC:
+            return value
+        # Cache expired but quota out — return stale rather than nothing
+        if not _budget_clear():
+            log.warning("api_football over budget; serving STALE injuries for "
+                        "team_id=%d (age %.0fs)", team_id, now - ts)
+            return value
+
     body = _get("/injuries",
                 {"team": int(team_id), "season": int(season), "league": int(league_id)},
                 label="injuries")
     if not body or not body.get("response"):
-        return None
+        # Cache the empty result too — saves repeating the call for the
+        # same team within the window
+        _INJURIES_CACHE[int(team_id)] = (now, [])
+        return []
     out = []
     for row in body["response"]:
         player = row.get("player") or {}
@@ -183,34 +293,77 @@ def fetch_injuries(team_id: int, season: int = DEFAULT_SEASON,
             "reason": meta.get("reason", ""),
             "match_date": (row.get("fixture") or {}).get("date", ""),
         })
+    _INJURIES_CACHE[int(team_id)] = (now, out)
     return out
+
+
+# Day-9.20: alternate api-football naming conventions per canonical team.
+# Order: most-likely first. We try each variant against api-football until
+# one returns a match. Caches the winning team_id so we never re-do this.
+_TEAM_NAME_VARIANTS: dict[str, list[str]] = {
+    "Czechia": ["Czechia", "Czech Republic"],
+    "Bosnia-Herzegovina": ["Bosnia", "Bosnia and Herzegovina",
+                            "Bosnia & Herzegovina", "Bosnia-Herzegovina"],
+    "South Korea": ["Korea Republic", "South Korea", "Republic of Korea"],
+    "Türkiye": ["Türkiye", "Turkey"],
+    "United States": ["USA", "United States", "United States of America"],
+    "Ivory Coast": ["Ivory Coast", "Côte d'Ivoire", "Cote d'Ivoire"],
+    "Congo DR": ["DR Congo", "Congo DR", "Democratic Republic of Congo"],
+    "Cape Verde": ["Cape Verde Islands", "Cape Verde", "Cabo Verde"],
+    "Iran": ["Iran", "IR Iran"],
+    "Curacao": ["Curaçao", "Curacao"],
+}
 
 
 def find_team_id(team_name: str, league_id: int = WC_LEAGUE_ID,
                  season: int = DEFAULT_SEASON) -> int | None:
     """Resolve our canonical team name → api-football's numeric team_id.
 
-    /teams?league=<id>&season=<season>&search=<team>  — search-narrowed lookup.
-    Returns None if the season isn't populated yet (still True for WC 2026 at
-    the time of this writing — we verified).
+    Day-9.20:
+      1. Hit the PERMANENT disk cache (store/api_football_team_ids.json)
+         first — if present, return without burning quota.
+      2. Otherwise try each api-football naming variant from
+         _TEAM_NAME_VARIANTS (handles "Czechia" ↔ "Czech Republic",
+         "Bosnia-Herzegovina" ↔ "Bosnia" / "Bosnia and Herzegovina", etc.)
+      3. Cache the winning team_id to disk so future calls cost 0.
+
+    Run `tools/populate_api_football_team_ids.py` once after quota resets
+    to pre-warm all 48 WC2026 team ids (~48 credits one-shot). After that
+    the daemon makes zero team-id calls per card-window.
     """
     canon = normalize(team_name) or team_name
-    body = _get("/teams",
-                {"league": league_id, "season": season, "search": canon},
-                label="teams:search")
-    if not body or not body.get("response"):
-        # Fall back to unfiltered search
-        body = _get("/teams", {"search": canon}, label="teams:search_global")
+    cache = _load_team_id_cache()
+    if canon in cache:
+        return int(cache[canon])
+
+    # Build the search candidate list: known variants then plain canonical
+    variants = list(_TEAM_NAME_VARIANTS.get(canon, []))
+    if canon not in variants:
+        variants.insert(0, canon)
+
+    for variant in variants:
+        body = _get("/teams",
+                    {"league": league_id, "season": season, "search": variant},
+                    label="teams:search")
         if not body or not body.get("response"):
-            return None
-    for row in body["response"]:
-        team = row.get("team") or {}
-        if normalize(team.get("name", "")) == canon:
-            return int(team.get("id"))
-    # Last-ditch: return the first result if the name closely matches
-    first = body["response"][0].get("team") or {}
-    if first.get("id"):
-        return int(first["id"])
+            # Fall back to unfiltered search
+            body = _get("/teams", {"search": variant},
+                        label="teams:search_global")
+        if not body or not body.get("response"):
+            continue
+        for row in body["response"]:
+            team = row.get("team") or {}
+            if normalize(team.get("name", "")) == canon:
+                tid = int(team.get("id"))
+                _cache_team_id(canon, tid)
+                return tid
+        # First-result heuristic — same as before but only on first variant
+        if variant == variants[0]:
+            first = body["response"][0].get("team") or {}
+            if first.get("id"):
+                tid = int(first["id"])
+                _cache_team_id(canon, tid)
+                return tid
     return None
 
 

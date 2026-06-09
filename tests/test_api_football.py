@@ -7,6 +7,21 @@ import pytest
 import core.data.api_football as af
 
 
+@pytest.fixture(autouse=True)
+def _bypass_budget_guard_and_caches(monkeypatch):
+    """Day-9.20: tests mock requests.get directly; force _budget_clear to
+    True so they don't depend on cost-ledger state, and clear in-memory
+    caches between tests so they don't bleed state across runs."""
+    monkeypatch.setattr(af, "_budget_clear", lambda: True)
+    af._TEAM_ID_CACHE = None
+    af._INJURIES_CACHE.clear()
+    af._FIXTURE_ID_CACHE.clear()
+    yield
+    af._TEAM_ID_CACHE = None
+    af._INJURIES_CACHE.clear()
+    af._FIXTURE_ID_CACHE.clear()
+
+
 # ---------- helpers ----------
 
 def _resp(json_body, ok=True, status=200):
