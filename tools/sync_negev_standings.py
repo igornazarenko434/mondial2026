@@ -77,10 +77,16 @@ def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
 def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, str]:
     """Compose a Telegram-safe plain-text leaderboard summary.
 
+    Day-9.15: `rows` is the FULL roster (with bots) so the `rank` number
+    matches what the user sees in the Negev app. Top 5 / gap-to-leader
+    sections filter bots first so we don't show phantoms in the human
+    leaderboard.
+
     Returns: (title, body). 8-12 lines body. Highlights:
-      • Top 5 by rank
-      • YOU + the 2 above/below you (context)
-      • Your gap to leader + to 2nd
+      • Top 5 humans by rank (bots filtered)
+      • YOU with the app-equivalent rank
+      • Gap to the real leader (bot-filtered)
+      • "Around you" window of 2 above + 2 below
     """
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
@@ -91,11 +97,12 @@ def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, 
     by_name = {r["player"]: r for r in rows}
     me_row = by_name.get(me)
     n = len(rows)
+    # Bot-filtered list for "real competitor" sections (Top 5 + gap math)
+    humans = [r for r in rows if r.get("role") != "bot"]
+    leader_row = humans[0] if humans else rows[0]
 
     if me_row:
-        gap_leader = rows[0]["total"] - me_row["total"]
-        gap_next = (rows[me_row["rank"] - 2]["total"] - me_row["total"]
-                    if me_row["rank"] > 1 else 0)
+        gap_leader = leader_row["total"] - me_row["total"]
         lines.append(
             f"You: rank {me_row['rank']}/{n}  •  {me_row['total']:.1f} pts  "
             f"•  gap to leader: {gap_leader:.1f}")
@@ -104,7 +111,7 @@ def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, 
 
     lines.append("")
     lines.append("Top 5:")
-    for r in rows[:5]:
+    for r in humans[:5]:
         marker = "  ← you" if r["player"] == me else ""
         lines.append(f"  {r['rank']:>2}. {r['player']:<16}  {r['total']:>6.1f}{marker}")
 
@@ -191,9 +198,15 @@ def sync_standings(*, tournament_id: str | None = None,
     me = os.environ.get("MY_PARTICIPANT", "").strip()
 
     try:
+        # Day-9.15: fetch the FULL roster (bots + managers + players) so the
+        # ranks in `rows` match what the Negev web app shows (Igor at 56/67,
+        # not 26/63). The DB upsert below filters bots out so the strategy
+        # layer's "gap to leader" math still compares only to real
+        # competitors. Telegram message uses the full `rows` so the rank
+        # number shown matches what the user sees in the app.
         with obs.external_call("negev_toto", "get_standings"):
             rows = ntm.toto_get_standings(tournament_id=tid,
-                                           include_bots=include_bots)
+                                           include_bots=True)
     except Exception as e:                             # noqa: BLE001
         log.error("Negev fetch failed: %s", e)
         return {"ok": False, "error": str(e)[:200]}
@@ -201,8 +214,30 @@ def sync_standings(*, tournament_id: str | None = None,
     if not rows:
         return {"ok": False, "error": "Negev returned 0 rows — auth failed or tournament empty"}
 
+    # Day-9.15: filter bots from DB upsert so strategy stays clean. The
+    # `include_bots` CLI flag, when True, keeps bots in the DB too — useful
+    # for debug only; default flow strips them.
+    rows_for_db = rows if include_bots else [r for r in rows
+                                              if (r.get("role") != "bot")]
+
+    # Day-9.15: NEW MEMBER DETECTION — compare Negev's roster to our DB,
+    # find any displayName that's NEW (in Negev but not yet in our standings
+    # table), and surface them in the result so the operator + Telegram
+    # message can flag the addition. Auto-upserts new members alongside
+    # existing ones — they appear in the next 📊 message automatically.
+    new_members: list[str] = []
+    if conn is not None and not dry:
+        try:
+            existing = {row[0] for row in conn.execute(
+                "SELECT participant FROM standings").fetchall()}
+            for r in rows_for_db:
+                if r["player"] not in existing:
+                    new_members.append(r["player"])
+        except sqlite3.Error as e:
+            log.warning("new-member detection failed: %s", e)
+
     n_upserted = 0
-    for r in rows:
+    for r in rows_for_db:
         try:
             _upsert_standings(conn, r, dry)
             n_upserted += 1
@@ -210,20 +245,31 @@ def sync_standings(*, tournament_id: str | None = None,
             log.warning("upsert %r failed: %s", r.get("player"), e)
     if not dry:
         conn.commit()
+    if new_members:
+        log.info("NEW MEMBERS detected and added to standings: %s", new_members)
 
-    leader = rows[0]
+    # `leader` / `gap to leader`: use the bot-filtered list so we don't
+    # chase a phantom (bots randomly score every match — they'd top the
+    # standings briefly and our strategy would tilt incorrectly).
+    leader_rows = [r for r in rows if r.get("role") != "bot"]
+    leader = leader_rows[0]
     my_row = next((r for r in rows if r["player"] == me), None)
     result = {
         "ok": True, "tournament_id": tid,
         "participants": len(rows), "upserted": n_upserted,
         "leader": leader["player"], "leader_total": leader["total"],
-        "second_total": rows[1]["total"] if len(rows) > 1 else None,
+        "second_total": leader_rows[1]["total"] if len(leader_rows) > 1 else None,
     }
     if my_row:
+        # `my_rank` matches the APP's rank (with bots in the list, sorted by
+        # uid). `my_gap_to_leader` is vs the bot-filtered leader so the
+        # number represents the gap to a real competitor.
         result.update({"my_rank": my_row["rank"], "my_total": my_row["total"],
                        "my_gap_to_leader": leader["total"] - my_row["total"]})
     else:
         result["warning"] = f"MY_PARTICIPANT={me!r} not in standings"
+    if new_members:
+        result["new_members"] = new_members      # Day-9.15
 
     # Day-9.8: also sync Negev's match results into our matches table. This
     # gives us a second source of truth (football-data is primary, but Negev
@@ -243,6 +289,10 @@ def sync_standings(*, tournament_id: str | None = None,
         try:
             from core import delivery
             title, body = _format_telegram_summary(rows, me, tid)
+            # Day-9.15: prepend a "new members joined" note when applicable
+            if new_members:
+                body = (f"👋 New member(s) joined: {', '.join(new_members)}\n\n"
+                        + body)
             # `summary` (not `alert`) — keeps 📊 clean without ⚠️ prefix
             ok = delivery.summary(title, body)
             result["telegram_delivered"] = bool(ok)

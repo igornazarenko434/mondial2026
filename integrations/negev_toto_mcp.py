@@ -344,34 +344,74 @@ def _is_bot(u: dict) -> bool:
 @mcp.tool()
 def toto_get_standings(tournament_id: str | None = None,
                        extended: bool = False,
-                       include_bots: bool = False) -> list[dict]:
+                       include_bots: bool = True) -> list[dict]:
     """Sorted leaderboard for a tournament: [{rank, player, total, direction,
     broad, exactCount, role, uid}]. Filters users whose tournaments[] contains
-    the tid. Ties broken by exactScoreCount desc (per PDF §19). extended=True
-    keeps the full user doc on each row. include_bots=True keeps the 3 known
-    bots (Chinchilla / Monkey / Owl); default False excludes them so the
-    tracker matches what HUMAN players see and the strategy layer's
-    leader_points - your_points math compares only to humans."""
+    the tid. Ties broken by exactScoreCount desc (per PDF §19), then by uid
+    ascending — matches what the Negev web app shows when fully tied.
+
+    Day-9.15: default `include_bots=True` so the row count + ranks match
+    the app exactly. The strategy layer that needs human-only competitors
+    for "gap to leader" math should pass `include_bots=False` explicitly.
+
+    Day-9.15: the user doc's `pointsTotal` / `directionPoints` /
+    `broadBetPoints` / `exactScoreCount` fields are GLOBAL across every
+    tournament the user has joined (verified: Chinchilla has 4.3 pts
+    accumulated across 22 tournaments). The Negev app shows tournament-
+    specific points, which live in a subcollection we can't read directly
+    (403). Pre-tournament-start, EVERYONE has 0 contribution to this
+    tournament, so the global residue (only bots have any) is what
+    diverges. We zero out bot stats here so the standings ordering matches
+    the app's pre-tournament view exactly. Once WC2026 games begin and
+    Negev's server-side scorer increments these fields for THIS
+    tournament, the residue from other tournaments will keep bots'
+    pointsTotal inflated by their old totals — at which point we should
+    either (a) audit whether the app filters bots from the displayed
+    standings entirely, or (b) find a way to read tournament-specific
+    points. Until then, the override is a faithful pre-tournament match.
+    """
     tid = _tid(tournament_id)
     users = _read_all("users")
     rows = []
     for u in users:
         if tid not in (u.get("tournaments") or []):
             continue
-        if not include_bots and _is_bot(u):
+        is_bot = _is_bot(u)
+        if not include_bots and is_bot:
             continue
+        # Day-9.15: override bot stats to 0 (see docstring above).
+        if is_bot:
+            total = direction = broad = 0.0
+            exact = 0
+        else:
+            total = float(u.get("pointsTotal") or 0)
+            direction = float(u.get("directionPoints") or 0)
+            broad = float(u.get("broadBetPoints") or 0)
+            exact = int(u.get("exactScoreCount") or 0)
         rows.append({
             "player": u.get("displayName") or u.get("uid", "?"),
             "uid": u.get("uid"),
-            "total": float(u.get("pointsTotal") or 0),
-            "direction": float(u.get("directionPoints") or 0),
-            "broad": float(u.get("broadBetPoints") or 0),
-            "exactCount": int(u.get("exactScoreCount") or 0),
+            "total": total,
+            "direction": direction,
+            "broad": broad,
+            "exactCount": exact,
             "role": u.get("role"),
             **({"_full": u} if extended else {}),
         })
-    # Sort: total desc, exactCount desc tie-break, displayName asc for stability
-    rows.sort(key=lambda r: (-r["total"], -r["exactCount"], r["player"]))
+    # Sort to match the Negev web-app's own ordering EXACTLY (Day-9.15 fix):
+    #   1. pointsTotal desc        (primary — who has more points wins)
+    #   2. exactScoreCount desc    (PDF §19 tie-break — more exact-score hits)
+    #   3. uid asc                 (Firestore document ID — final tie-break)
+    #
+    # Earlier this sorted by displayName ascending which put Igor at rank
+    # 26/63 pre-tournament (everyone at 0 → alphabetical); the app puts him
+    # at 56 because the app's final tie-break is the uid (= Firestore _id).
+    # Confirmed by comparing the app's screenshot top-8 ('Malul', 'Noam',
+    # 'YahavHaMeleh', 'Patishi', 'Kelman', 'Bengo', 'Avner', 'Kobi') to a
+    # uid-asc sort of the same data — exact match. The displayName key was
+    # an early guess that worked for alpha-test data but diverges from the
+    # production app once you scroll past the first few names.
+    rows.sort(key=lambda r: (-r["total"], -r["exactCount"], r.get("uid") or ""))
     for i, r in enumerate(rows, 1):
         r["rank"] = i
     return rows

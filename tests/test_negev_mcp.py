@@ -134,29 +134,86 @@ def _seed_standings(state, tid):
     ]
 
 
-def test_get_standings_filters_by_tournament_and_excludes_bots_by_default(fake_firestore):
+def test_get_standings_filters_by_tournament_and_excludes_bots_when_asked(fake_firestore):
+    """include_bots=False excludes the bot and the user from a different tournament."""
     _seed_standings(fake_firestore, "tid-x")
-    rows = ntm.toto_get_standings("tid-x")
+    rows = ntm.toto_get_standings("tid-x", include_bots=False)
     names = [r["player"] for r in rows]
     assert names == ["Bob", "Alice", "Igor"]                 # tied 20 → exactCount tie-break
-    assert "Chinchilla" not in names                          # bot excluded
+    assert "Chinchilla" not in names                          # bot excluded by flag
     assert "OutsideUser" not in names                         # other tournament excluded
-    # Ranks 1..3 assigned
     assert [r["rank"] for r in rows] == [1, 2, 3]
 
 
 def test_get_standings_tie_break_by_exact_score_count(fake_firestore):
     _seed_standings(fake_firestore, "tid-x")
-    rows = ntm.toto_get_standings("tid-x")
+    rows = ntm.toto_get_standings("tid-x", include_bots=False)
     # Alice and Bob both 20 pts; Bob has exactCount=5 > Alice 3 → Bob ranks first
     assert rows[0]["player"] == "Bob" and rows[0]["exactCount"] == 5
     assert rows[1]["player"] == "Alice"
 
 
-def test_get_standings_include_bots_flag(fake_firestore):
+def test_get_standings_default_includes_bots_with_zeroed_points(fake_firestore):
+    """Day-9.15: default include_bots=True matches what the Negev web app
+    shows (the app displays bots in the standings list). But the user
+    doc's pointsTotal is GLOBAL (across all the bot's previous
+    tournaments), so we override bot stats to 0 — the bot sits at the
+    bottom of the all-tied-at-0 list, not at the top with its 999-pt
+    historical residue."""
     _seed_standings(fake_firestore, "tid-x")
-    rows = ntm.toto_get_standings("tid-x", include_bots=True)
-    assert rows[0]["player"] == "Chinchilla"                 # bot ranks #1 with 999 pts
+    rows = ntm.toto_get_standings("tid-x")  # default: include_bots=True
+    chinchilla = next(r for r in rows if r["player"] == "Chinchilla")
+    # Chinchilla's seed data has pointsTotal=999 but Day-9.15 overrides to 0
+    assert chinchilla["total"] == 0, \
+        f"bot total should be zeroed; got {chinchilla['total']}"
+    assert chinchilla["exactCount"] == 0
+    # And it should NOT rank #1 anymore — Bob (20 pts) is ahead
+    assert rows[0]["player"] == "Bob"
+
+
+def test_get_standings_include_bots_explicit_false_excludes_them(fake_firestore):
+    _seed_standings(fake_firestore, "tid-x")
+    rows = ntm.toto_get_standings("tid-x", include_bots=False)
+    assert all(r.get("role") != "bot" for r in rows)
+
+
+def test_get_standings_fully_tied_falls_back_to_uid_asc(fake_firestore):
+    """Day-9.15: when pointsTotal AND exactScoreCount are both equal across
+    users (the pre-tournament state — everyone at 0/0), the app sorts by
+    uid ascending. We MUST match that or our rank diverges from what the
+    user sees in the Negev web app.
+
+    Confirmed against the live Negev app on 2026-06-09 — top-8 by uid asc
+    matched the app's displayed order exactly (Malul, Noam, YahavHaMeleh,
+    Patishi, Kelman, Bengo, Avner, Kobi)."""
+    tid = "tid-tied"
+    fake_firestore["collections"]["users"] = [
+        # 3 users all at 0/0 with uids that should sort: 'aaa' < 'mmm' < 'zzz'
+        {"path": "users/zzz", "fields": {"uid": "zzz",
+                                          "displayName": "Charlie",
+                                          "role": "player",
+                                          "tournaments": [tid],
+                                          "pointsTotal": 0,
+                                          "exactScoreCount": 0}},
+        {"path": "users/aaa", "fields": {"uid": "aaa",
+                                          "displayName": "Bob",
+                                          "role": "player",
+                                          "tournaments": [tid],
+                                          "pointsTotal": 0,
+                                          "exactScoreCount": 0}},
+        {"path": "users/mmm", "fields": {"uid": "mmm",
+                                          "displayName": "Alice",
+                                          "role": "player",
+                                          "tournaments": [tid],
+                                          "pointsTotal": 0,
+                                          "exactScoreCount": 0}},
+    ]
+    rows = ntm.toto_get_standings(tid)
+    # Order must follow uid asc, NOT displayName asc.
+    # uid asc → 'aaa' (Bob) < 'mmm' (Alice) < 'zzz' (Charlie)
+    # If we had used displayName: Alice < Bob < Charlie (WRONG)
+    assert [r["player"] for r in rows] == ["Bob", "Alice", "Charlie"]
+    assert [r["rank"] for r in rows] == [1, 2, 3]
 
 
 def test_get_standings_extended_returns_full_user_doc(fake_firestore):
@@ -170,7 +227,11 @@ def test_get_standings_resolves_tid_from_env(fake_firestore, monkeypatch):
     _seed_standings(fake_firestore, "tid-from-env")
     monkeypatch.setenv("NEGEV_TOURNAMENT_ID", "tid-from-env")
     rows = ntm.toto_get_standings()                          # no tid arg
-    assert len(rows) == 3
+    # Default include_bots=True (Day-9.15): 3 humans + 1 bot = 4
+    assert len(rows) == 4
+    # Same call with include_bots=False returns 3
+    rows_no_bots = ntm.toto_get_standings(include_bots=False)
+    assert len(rows_no_bots) == 3
 
 
 def test_get_standings_raises_when_no_tid(fake_firestore, monkeypatch):
@@ -626,18 +687,25 @@ def test_get_standings_excludes_all_three_known_negev_bots(fake_firestore):
             "pointsTotal": 0, "directionPoints": 0, "broadBetPoints": 0,
             "exactScoreCount": 0}},
     ]
-    # Default: bots excluded
-    rows = ntm.toto_get_standings(tid)
+    # Explicit opt-OUT: bots filtered (used for strategy gap math)
+    rows = ntm.toto_get_standings(tid, include_bots=False)
     names = {r["player"] for r in rows}
     assert names == {"Igor"}                                 # only the human
     # Critically: Chinchilla's 4.3 pts must NOT be reflected as a "leader" —
     # if it leaked through, Igor's gap would be 4.3 instead of 0, and the
     # strategy layer would tilt for variance when there's no actual leader
     assert rows[0]["total"] == 0
-    # Explicit opt-in: bots included
-    rows_with_bots = ntm.toto_get_standings(tid, include_bots=True)
+    # Day-9.15 default (include_bots=True): bots ARE in the list to match
+    # the Negev app, but their global pointsTotal is overridden to 0 so
+    # Chinchilla's 4.3-point residue from PREVIOUS tournaments doesn't
+    # incorrectly place it above the human players for THIS tournament.
+    rows_with_bots = ntm.toto_get_standings(tid)             # default True
     names_with_bots = {r["player"] for r in rows_with_bots}
     assert names_with_bots == {"Igor", "The Chinchilla", "The Monkey", "The Owl"}
+    chinchilla = next(r for r in rows_with_bots if r["player"] == "The Chinchilla")
+    assert chinchilla["total"] == 0, \
+        "bot pointsTotal must be zeroed for the WC2026 view"
+    assert chinchilla["exactCount"] == 0
 
 
 # ─────────────────────── toto_get_scoring_grids ───────────────────────

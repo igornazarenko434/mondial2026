@@ -110,6 +110,39 @@ def test_sync_excludes_bots_by_default(conn, fake_ntm, monkeypatch):
     assert players == {"Igor"}                                  # bot excluded
 
 
+def test_sync_detects_new_members_and_returns_them(conn, fake_ntm, monkeypatch):
+    """Day-9.15: when a NEW user appears in Negev (joined since last sync),
+    we must add them to the standings DB AND surface their name in the
+    result so the operator + Telegram message can flag the addition."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+
+    # First sync — Igor + Aharony exist
+    rows_v1 = [
+        {"player": "Igor",    "rank": 1, "total": 0, "direction": 0, "broad": 0,
+         "exactCount": 0, "role": "player"},
+        {"player": "Aharony", "rank": 2, "total": 0, "direction": 0, "broad": 0,
+         "exactCount": 0, "role": "player"},
+    ]
+    r1 = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows_v1))
+    assert r1.get("ok")
+    # First sync: BOTH names are "new" because the DB was empty
+    assert sorted(r1.get("new_members", [])) == ["Aharony", "Igor"]
+
+    # Second sync — same two PLUS a new member YahavHaMeleh
+    rows_v2 = rows_v1 + [
+        {"player": "YahavHaMeleh", "rank": 3, "total": 0, "direction": 0,
+         "broad": 0, "exactCount": 0, "role": "player"},
+    ]
+    r2 = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows_v2))
+    assert r2.get("ok")
+    assert r2.get("new_members") == ["YahavHaMeleh"], \
+        f"only YahavHaMeleh should be flagged as new; got {r2.get('new_members')}"
+
+    # Third sync — no new members → empty/absent
+    r3 = sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows_v2))
+    assert not r3.get("new_members")
+
+
 def test_sync_warns_when_my_participant_missing(conn, fake_ntm, monkeypatch):
     monkeypatch.setenv("MY_PARTICIPANT", "GhostName")
     out = sns.sync_standings(tournament_id="tid", conn=conn,
