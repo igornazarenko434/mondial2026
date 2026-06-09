@@ -248,6 +248,56 @@ def test_parse_tier_doesnt_corrupt_legitimate_negative_numbers():
     assert "Mexico already qualified -0.30" in data["notes"][0]
 
 
+# ─── Day-9.19: web-search pipeline trim audit ─────────────────────────────────
+
+def test_web_search_trim_strips_html_tags():
+    """Day-9.19: Brave returns descriptions with HTML markup
+    (<strong>Mexico</strong>); strip at source so the LLM doesn't see noise."""
+    from core.data.web_search import _trim
+    s = _trim("<strong>Mexico (co-host)</strong>, South Africa, "
+              "<em>South Korea</em>, and Czechia.", 200)
+    assert "<strong>" not in s
+    assert "</strong>" not in s
+    assert "<em>" not in s
+    assert "Mexico (co-host), South Africa, South Korea, and Czechia." in s
+
+
+def test_web_search_trim_decodes_html_entities():
+    """Day-9.19: also decode common HTML entities Brave includes."""
+    from core.data.web_search import _trim
+    s = _trim("Mexico &amp; South Africa won&#39;t face &lt;3 goals", 200)
+    assert "&amp;" not in s
+    assert "&#39;" not in s
+    assert "&lt;" not in s
+    assert "Mexico & South Africa won't face <3 goals" in s
+
+
+def test_web_search_trim_preserves_inner_text_with_nested_tags():
+    from core.data.web_search import _trim
+    s = _trim("<p>Mbappé <strong>OUT</strong> with <em>knee</em> injury</p>", 200)
+    assert "<p>" not in s
+    assert "<strong>" not in s
+    assert "Mbappé OUT with knee injury" in s
+
+
+def test_web_search_trim_caps_after_html_strip():
+    """Cap applies to the CLEANED text, so we don't waste budget on tags."""
+    from core.data.web_search import _trim
+    s = _trim("<strong>" + "X" * 300 + "</strong>", 50)
+    assert len(s) == 50
+    assert "<strong>" not in s
+
+
+def test_fmt_web_results_respects_explicit_cap():
+    from orchestrator.agents.news_agent import _fmt_web_results
+    results = [{"title": f"Article {i}", "snippet": "x", "date": "2026-06-09"}
+               for i in range(20)]
+    out = _fmt_web_results(results, snippet_len=250, cap=5)
+    assert out.count("- [") == 5
+    out = _fmt_web_results(results, snippet_len=250, cap=15)
+    assert out.count("- [") == 15
+
+
 # ─────────────────────── news_agent stamping ──────────────────────
 
 def test_analyze_stamps_parse_tier_and_excerpt_on_unparseable_output(monkeypatch):

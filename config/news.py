@@ -12,9 +12,20 @@ DELTA_CLAMP = float(os.environ.get("NEWS_DELTA_CLAMP", "0.6"))
 # Day-8 additions — token-budget control on the gathered context that we
 # pass to the LLM. Caps prevent a single long Brave snippet from blowing the
 # per-call token budget.
-SNIPPET_LEN       = int(os.environ.get("NEWS_SNIPPET_LEN",       "250"))
-CONTEXT_MAX_CHARS = int(os.environ.get("NEWS_CONTEXT_MAX_CHARS", "1800"))
-PER_QUERY_RESULTS = int(os.environ.get("NEWS_PER_QUERY_RESULTS", "3"))
+#
+# Day-9.19 audit: the original limits (250 / 1800 / 3) were tuned for early
+# prototyping. Modern LLM input budgets are 128K-1M tokens; 1800 chars ≈ 450
+# tokens uses 0.05% of even Claude Haiku's 200K window. Bumping these gives
+# the LLM richer context AT NO COST — Brave bills per QUERY not per result,
+# so PER_QUERY_RESULTS is free; the extra input tokens to the LLM cost a
+# fraction of a cent. See docs/NEWS_AGENT_PLAYBOOK.md for trade-off math.
+SNIPPET_LEN       = int(os.environ.get("NEWS_SNIPPET_LEN",       "400"))
+CONTEXT_MAX_CHARS = int(os.environ.get("NEWS_CONTEXT_MAX_CHARS", "3000"))
+PER_QUERY_RESULTS = int(os.environ.get("NEWS_PER_QUERY_RESULTS", "5"))
+# How many UNIQUE Brave results from across all queries actually make it
+# into the context block (before final char cap). Was implicitly 8 in
+# _fmt_web_results; promoted to an explicit knob in Day-9.19.
+WEB_RESULTS_IN_CONTEXT = int(os.environ.get("NEWS_WEB_RESULTS_IN_CONTEXT", "15"))
 
 # Per-window query counts — used by news_agent.search_queries(...)
 # Calibrated to fit in Brave's $5/mo = 1,000-request free credit:

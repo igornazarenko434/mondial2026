@@ -137,9 +137,25 @@ def _headers() -> dict | None:
     }
 
 
+_HTML_TAG = __import__("re").compile(r"<[^>]+>")
+_HTML_ENT = {"&amp;": "&", "&lt;": "<", "&gt;": ">",
+             "&quot;": '"', "&#39;": "'", "&nbsp;": " "}
+
+
 def _trim(s: str, n: int) -> str:
-    """Compact snippet — strip whitespace + cap length."""
-    return " ".join((s or "").split())[:n]
+    """Compact snippet — strip HTML markup + collapse whitespace + cap length.
+
+    Day-9.19: Brave returns `description` with HTML markup like
+    `<strong>Mexico (co-host)</strong>` — these tags pass through unparsed
+    into the LLM context as ugly noise. We strip tags + decode the common
+    HTML entities (&amp;, &lt;, etc.) at the source so the LLM sees clean
+    prose only."""
+    if not s:
+        return s
+    s = _HTML_TAG.sub("", s)
+    for ent, ch in _HTML_ENT.items():
+        s = s.replace(ent, ch)
+    return " ".join(s.split())[:n]
 
 
 def _parse_date(s: str | None) -> str | None:

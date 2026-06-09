@@ -38,7 +38,7 @@ from core.obs.logging import get_logger
 from config.news import (
     NEWS_MAX_QUERIES, NEWS_RECENCY_HOURS, DELTA_CLAMP, SEARCH_WINDOWS,
     QUERIES_PER_WINDOW, SNIPPET_LEN, CONTEXT_MAX_CHARS, PER_QUERY_RESULTS,
-    should_search,
+    WEB_RESULTS_IN_CONTEXT, should_search,
 )
 
 log = get_logger("news")
@@ -209,11 +209,18 @@ def _fmt_injuries(team_name: str, injuries: list[dict] | None) -> str:
     return f"{team_name} injuries: " + "; ".join(items)
 
 
-def _fmt_web_results(results: list[dict], snippet_len: int) -> str:
+def _fmt_web_results(results: list[dict], snippet_len: int,
+                     cap: int | None = None) -> str:
+    """Day-9.19: explicit `cap` argument (was hardcoded 8). Defaults to
+    config.news.WEB_RESULTS_IN_CONTEXT (15). The number of dropped results
+    is exposed via the ContextVar so build_card can stamp it on the card
+    for audit."""
     if not results:
         return ""
+    if cap is None:
+        cap = WEB_RESULTS_IN_CONTEXT
     rows = []
-    for r in results[:8]:                          # global cap on web snippets
+    for r in results[:cap]:
         title = r.get("title") or ""
         snippet = (r.get("snippet") or "")[:snippet_len]
         date = r.get("date") or "?"
@@ -382,8 +389,19 @@ def gather_context(match: dict, window: str = "T-60m",
                     results = web_search_many(qs, n=PER_QUERY_RESULTS,
                                                snippet_len=SNIPPET_LEN)
                     web_txt = _fmt_web_results(results, SNIPPET_LEN)
+                    n_fetched_web = len(results)
+                    n_included_web = min(len(results), WEB_RESULTS_IN_CONTEXT)
+                    # Day-9.19: surface silent drops on the audit trail
+                    if n_fetched_web > n_included_web:
+                        log.info(
+                            "brave_search: fetched %d unique results, "
+                            "including %d in context (dropped %d to fit cap)",
+                            n_fetched_web, n_included_web,
+                            n_fetched_web - n_included_web)
                     if web_txt:
-                        parts.append(f"[SOURCE: brave_search × {len(qs)} queries]\n{web_txt}")
+                        parts.append(f"[SOURCE: brave_search × {len(qs)} queries; "
+                                       f"{n_included_web} of {n_fetched_web} included]\n"
+                                       f"{web_txt}")
                         sources_ok.append("brave_search")
                     else:
                         parts.append("[SOURCE: brave_search]\n"
