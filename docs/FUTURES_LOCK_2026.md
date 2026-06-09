@@ -1,7 +1,92 @@
-# Futures lock — Mondial 2026 (UPDATED 2026-06-06)
+# Futures lock — Mondial 2026 (UPDATED 2026-06-09 — verified live)
 
 **Deadline: Thu 11 Jun 2026, 21:59 Israel.** After this, picks are frozen for
 the whole tournament.
+
+---
+
+## ✅ STATUS — saved live in Negev as of 2026-06-07 21:30 IDT
+
+| Category | Pick | Negev id | App displays |
+|---|---|---|---|
+| Winner | **Portugal** | `team_Portugal` | Portugal |
+| Cinderella | **Uzbekistan** | `team_Uzbekistan` | Uzbekistan |
+| Golden Boot | **Mbappé** | `1780696074187` | Mbappe |
+| Best Placed Player | **Arkadi** | `roster_q2HO78NvnRUsmiTJBf1YtUXUquh2` | Arkadi |
+
+Round-trip verified via `tools/show_my_broad_bets.py` → `✓ roster_ prefix` confirmed.
+
+---
+
+## 🔁 2026-06-09 11:25 IDT re-run (live odds_api fetch + 20k MC sims)
+
+All 3 computed picks **unchanged**; safety margins on 2/3 markets **widened**:
+
+| Market | Top pick | EV | #2 | EV | Margin | Δ vs 06 Jun lock | Source |
+|---|---|---|---|---|---|---|---|
+| Winner | **Portugal** | 3.339 | England | 2.862 | **+0.477** | **widened +0.34** | the-odds-api market |
+| Cinderella | **Uzbekistan** | 1.002 | Iraq | 0.256 | **+0.746** | **widened +0.13** | 20k MC sim |
+| Scorer | **Mbappé** | 3.378 | Harry Kane | 2.995 | **+0.383** | narrowed −0.04 | MC fallback (top-scorer market not on free tier) |
+
+**Conclusion**: the 06 Jun lock was correct. The 09 Jun re-check confirmed all three picks remain optimal with comfortable margins. No save action needed unless the Wed 10 Jun or Thu 11 Jun re-runs show movement.
+
+### Live winner-market top 15 (2026-06-09 — sharpest decimal across Pinnacle + Betfair)
+
+| Team | Decimal odds | Implied prob (vig in) |
+|---|---:|---:|
+| Spain | 5.50 | 18.2% |
+| France | 5.50 | 18.2% |
+| England | 7.00 | 14.3% |
+| **Portugal** | **9.00** | **11.1%** ← shortened from ~7.79% on 06 Jun |
+| Brazil | 9.00 | 11.1% |
+| Argentina | 10.00 | 10.0% |
+| Germany | 15.00 | 6.7% |
+| Netherlands | 17.00 | 5.9% |
+| Norway | 29.00 | 3.4% |
+| Belgium | 29.00 | 3.4% |
+| Colombia | 34.00 | 2.9% |
+| Morocco | 51.00 | 2.0% |
+| Japan | 51.00 | 2.0% |
+| Switzerland | 51.00 | 2.0% |
+| Mexico | 67.00 | 1.5% |
+
+**The market shortened Portugal materially** between 06 Jun and 09 Jun — that's why the EV-margin widened. Portugal at decimal 9.00 implies the sharps now give Portugal ~11% to win (was ~8% three days ago) — public + sharp consensus is moving toward Portugal as a contender, not against it.
+
+---
+
+## 🐛 Bug found + fixed during the 2026-06-09 audit
+
+**`fetch_winner_outright()` was silently returning `None` for every call** since the Day-9.11 rate-limit fail-closed change. Root cause: `obs.external_call` was passing `units=2` (the credit cost for a 2-region outright call) to BOTH the ratelimit-bucket acquire AND the ledger record. The bucket capacity is 1, so a 2-token acquire could never succeed — `RateLimitTimeout` raised, call returned `None`, the lock script silently fell back to the MC for winner.
+
+Fixed in commit `6ec62f5` (Day-9.13): rate-limit always asks for `n=1` (one HTTP request); credit accounting (`units`) stays separate via the ledger. Regression-pinned by `test_external_call_ratelimit_uses_n_1_regardless_of_credit_units`. This is the kind of integration bug you don't catch without running the pipeline end-to-end against the live market — which is exactly what the 09 Jun audit did.
+
+---
+
+## 🔎 Name-mapping audit (2026-06-09) — all 5 known mismatches now handled
+
+Verified against the live Negev app categories:
+
+| Category | Our `config/rules.py` | Negev app option name | Tier that resolves it |
+|---|---|---|---|
+| Winner | `United States` (170 pts) | `USA` | tier-5 (alias via `teams.normalize`) |
+| Cinderella | `Cape Verde` (22 pts) | `Cape Verde Islands` | tier-5 (alias) |
+| Cinderella | `Curacao` (75 pts) | `Curaçao` | tier-3 (accent-fold) |
+| Golden Boot | `Vinicius` (39 pts) | `Vinicius Jr.` | tier-4 (suffix strip) |
+| Golden Boot | `Lautaro Martinez` (40 pts) | `Lautaro Martínez` | tier-3 (accent-fold) |
+
+**Match-level + Group audit**: 48/48 teams in Negev's WC2026 matches catalog ↔ 48/48 teams in `data/wc2026_groups.csv`. Zero mismatches.
+
+`_resolve_option_id` was extended (Day-9.14) with **5 tiers**:
+
+1. Exact id match (`"team_Portugal"`)
+2. Exact name match (case-insensitive)
+3. Accent-fold + drop non-alphanumeric (`"Curaçao"` ↔ `"Curacao"`, `"Lautaro Martínez"` ↔ `"Lautaro Martinez"`)
+4. Common-suffix strip then tier-3 (`"Vinicius Jr."` ↔ `"Vinicius"`, `"Cape Verde Islands"` ↔ `"Cape Verde"`)
+5. `core.data.teams.normalize()` on both sides then tier-3 (`"USA"` ↔ `"United States"`, `"Cabo Verde"` ↔ `"Cape Verde"`)
+
+Pinned by 7 unit tests + 7 live-Negev round-trip checks. No future spelling drift can silently mis-save a futures pick.
+
+---
 
 **Goal:** *win* the friends' Toto pool (not just place in the top half).
 Top-heavy prizes (23% / 15% / 12.5%) means we balance EV with differentiation.

@@ -102,6 +102,74 @@ def test_best_player_option_id_has_roster_prefix():
             f"bestPlayer option {o['name']!r} id {o['id']!r} missing roster_ prefix"
 
 
+# ─────── Day-9.14 — name-variant resolution (every known mismatch pinned) ──
+
+_VARIANT_FIXTURE = {
+    "categories": [
+        {"id": "winner", "options": [
+            {"id": "team_Portugal", "name": "Portugal", "points": 39, "isKilled": False},
+            {"id": "team_USA",      "name": "USA",      "points": 170, "isKilled": False},
+        ]},
+        {"id": "cinderella", "options": [
+            {"id": "team_CapeVerdeIslands", "name": "Cape Verde Islands", "points": 22, "isKilled": False},
+            {"id": "team_Curacao",          "name": "Curaçao",            "points": 75, "isKilled": False},
+        ]},
+        {"id": "goldenBoot", "options": [
+            {"id": "p_lautaro",  "name": "Lautaro Martínez", "points": 40, "isKilled": False},
+            {"id": "p_vinicius", "name": "Vinicius Jr.",     "points": 39, "isKilled": False},
+            {"id": "p_mbappe",   "name": "Mbappe",           "points": 20, "isKilled": False},
+        ]},
+    ],
+}
+
+
+def test_resolve_united_states_to_usa():
+    """'United States' (our config canonical) must resolve to the app's
+    'USA' option via tier-5 alias mapping (teams.normalize)."""
+    assert ntm._resolve_option_id("winner", "United States", _VARIANT_FIXTURE) == "team_USA"
+    assert ntm._resolve_option_id("winner", "USA", _VARIANT_FIXTURE) == "team_USA"
+
+
+def test_resolve_cape_verde_variants():
+    """All 3 spellings hit the same option: 'Cape Verde' (config),
+    'Cape Verde Islands' (app), 'Cabo Verde' (the-odds-api Portuguese)."""
+    for variant in ("Cape Verde", "Cape Verde Islands", "Cabo Verde"):
+        rid = ntm._resolve_option_id("cinderella", variant, _VARIANT_FIXTURE)
+        assert rid == "team_CapeVerdeIslands", \
+            f"variant {variant!r} → {rid!r}, expected team_CapeVerdeIslands"
+
+
+def test_resolve_curacao_accent_strip():
+    """'Curacao' (ASCII) ↔ 'Curaçao' (cedilla) via tier-3 accent-fold."""
+    assert ntm._resolve_option_id("cinderella", "Curacao", _VARIANT_FIXTURE) == "team_Curacao"
+    assert ntm._resolve_option_id("cinderella", "Curaçao", _VARIANT_FIXTURE) == "team_Curacao"
+
+
+def test_resolve_lautaro_martinez_accent_strip():
+    """'Lautaro Martinez' (ASCII config) ↔ 'Lautaro Martínez' (accented app)."""
+    assert ntm._resolve_option_id("goldenBoot", "Lautaro Martinez", _VARIANT_FIXTURE) == "p_lautaro"
+    assert ntm._resolve_option_id("goldenBoot", "Lautaro Martínez", _VARIANT_FIXTURE) == "p_lautaro"
+
+
+def test_resolve_vinicius_jr_suffix_strip():
+    """'Vinicius' (no suffix) ↔ 'Vinicius Jr.' (app) via tier-4 suffix strip."""
+    assert ntm._resolve_option_id("goldenBoot", "Vinicius",     _VARIANT_FIXTURE) == "p_vinicius"
+    assert ntm._resolve_option_id("goldenBoot", "Vinicius Jr.", _VARIANT_FIXTURE) == "p_vinicius"
+    assert ntm._resolve_option_id("goldenBoot", "Vinicius Jr",  _VARIANT_FIXTURE) == "p_vinicius"
+
+
+def test_resolve_exact_match_still_takes_tier2_priority():
+    """Day-9.14 added tiers must not break the happy path: an exact-name
+    match still wins at tier 2 before any folding kicks in."""
+    assert ntm._resolve_option_id("goldenBoot", "Mbappe", _VARIANT_FIXTURE) == "p_mbappe"
+
+
+def test_resolve_unknown_still_returns_none():
+    """A name not matching any tier still returns None — no false-positive
+    fuzzy matches just because folding got aggressive."""
+    assert ntm._resolve_option_id("winner", "Atlantis", _VARIANT_FIXTURE) is None
+
+
 # ──────────────── toto_save_broad_bets — dry-run path ──────────────────────
 
 def test_save_broad_bets_dry_run_resolves_all_four(categories, fake_uid):

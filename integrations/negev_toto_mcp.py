@@ -1024,10 +1024,21 @@ def _resolve_option_id(category: str, choice: str, categories: dict) -> str | No
     """Match the caller's choice (either a literal option id or a human name)
     against the options for one category. Returns the matched id or None.
 
-    Lookup order (case-insensitive, whitespace-insensitive):
+    Lookup order (each tier independently — first match wins):
       1. Exact `option.id` match (e.g. "team_Portugal")
-      2. Exact `option.name` match (e.g. "Portugal")
-      3. `option.name` after stripping accents / case / spaces
+      2. Exact `option.name` match (case-insensitive)
+      3. Fold-equal: accent-strip + lowercase + drop non-alphanumeric
+         (handles "Curaçao" ↔ "Curacao", "Lautaro Martínez" ↔ "Lautaro Martinez")
+      4. Suffix-strip: tier 3 + drop common name suffixes
+         ("jr", "jr.", "junior", "islands", "republic of korea", etc.)
+         Handles "Vinicius Jr." ↔ "Vinicius", "Cape Verde Islands" ↔ "Cape Verde"
+      5. Alias-equal: route both sides through `core.data.teams.normalize()`
+         and re-apply tier 3. Handles "USA" ↔ "United States",
+         "Cabo Verde" ↔ "Cape Verde" — every alias _ALIASES knows about.
+
+    Day-9.14: tiers 3-5 cover the 5 known mismatches between
+    config/rules.py keys and Negev's published option names. The full
+    matrix is verified by tests/test_resolve_option_id_name_variants.
     """
     if not choice:
         return None
@@ -1038,6 +1049,7 @@ def _resolve_option_id(category: str, choice: str, categories: dict) -> str | No
     options = target.get("options") or []
     needle = str(choice).strip()
     needle_l = needle.lower()
+
     # tier 1: exact id
     for o in options:
         if o.get("id") == needle:
@@ -1046,12 +1058,48 @@ def _resolve_option_id(category: str, choice: str, categories: dict) -> str | No
     for o in options:
         if (o.get("name") or "").strip().lower() == needle_l:
             return o["id"]
-    # tier 3: relaxed (strip whitespace + punctuation)
+
     import re
-    needle_relaxed = re.sub(r"[^a-z0-9]+", "", needle_l)
+    import unicodedata
+
+    def _fold(s: str) -> str:
+        """Accent-strip + lowercase + drop non-alphanumeric — Curaçao → curacao."""
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+        return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+    needle_fold = _fold(needle)
+    # tier 3: fold-equal
     for o in options:
-        name_relaxed = re.sub(r"[^a-z0-9]+", "", (o.get("name") or "").lower())
-        if name_relaxed and name_relaxed == needle_relaxed:
+        if needle_fold and _fold(o.get("name") or "") == needle_fold:
+            return o["id"]
+
+    # tier 4: drop common suffixes from both sides, then fold-equal
+    _SUFFIXES_PAT = re.compile(
+        r"\s+(jr\.?|junior|sr\.?|senior|islands|repblic|republic|"
+        r"democratic\s+republic|dr|i+)$", re.IGNORECASE)
+    def _strip_suffix(s: str) -> str:
+        prev = None
+        cur = (s or "").strip()
+        while cur != prev:
+            prev = cur
+            cur = _SUFFIXES_PAT.sub("", cur).strip()
+        return cur
+    needle_sufx = _fold(_strip_suffix(needle))
+    for o in options:
+        if needle_sufx and _fold(_strip_suffix(o.get("name") or "")) == needle_sufx:
+            return o["id"]
+
+    # tier 5: route both sides through teams.normalize() so "USA" ↔
+    # "United States" and "Cabo Verde" ↔ "Cape Verde" match cleanly.
+    try:
+        from core.data.teams import normalize as _team_norm
+    except Exception:                                  # noqa: BLE001
+        _team_norm = lambda x: x
+    needle_canon = _fold(_team_norm(needle) or needle)
+    for o in options:
+        opt_canon = _fold(_team_norm(o.get("name") or "") or (o.get("name") or ""))
+        if needle_canon and opt_canon == needle_canon:
             return o["id"]
     return None
 
