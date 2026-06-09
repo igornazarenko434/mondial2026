@@ -25,6 +25,49 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _load_id_to_name_maps(ntm) -> dict[str, dict[str, str]]:
+    """ONE Negev call → four id→name dicts (winner / cinderella / goldenBoot /
+    bestPlayer). Falls back to {} on any failure; downstream printers should
+    .get() with the raw id as default so missing maps just leave IDs visible.
+
+    bestPlayer values are stored as either 'roster_<uid>' OR raw '<uid>'
+    depending on submission vintage — we register BOTH key shapes so either
+    form matches.
+    """
+    maps = {"winner": {}, "cinderella": {}, "goldenBoot": {}, "bestPlayer": {}}
+    try:
+        cats = ntm.toto_get_broad_bet_categories()
+    except Exception:                                     # noqa: BLE001
+        return maps
+    if "error" in (cats or {}):
+        return maps
+    for c in (cats.get("categories") or []):
+        cid = c.get("id")
+        if cid not in maps:
+            continue
+        for opt in (c.get("options") or []):
+            opt_id = opt.get("id")
+            name = opt.get("name") or opt_id
+            if not opt_id:
+                continue
+            maps[cid][opt_id] = name
+            # Day-9.11.d: bestPlayer option ids carry a 'roster_' prefix; also
+            # register the bare uid so older roster-less submissions match.
+            if cid == "bestPlayer" and opt_id.startswith("roster_"):
+                maps[cid][opt_id[len("roster_"):]] = name
+    return maps
+
+
+def _translate(maps: dict, cat: str, raw_id: str | None) -> str:
+    if not raw_id:
+        return "-"
+    name = maps.get(cat, {}).get(raw_id)
+    if name:
+        return name
+    # Show the raw id with a faint marker so we know the join didn't resolve
+    return f"{raw_id}?"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="show_pool_picks")
     p.add_argument("--match-id", default=None,
@@ -37,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Skip the broad-bets section")
     p.add_argument("--skip-match", action="store_true",
                    help="Skip the per-match picks section")
+    p.add_argument("--raw-ids", action="store_true",
+                   help="Skip the id→name join (faster; one less Negev call)")
     args = p.parse_args(argv)
 
     try:
@@ -62,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_broad:
         print()
         print("  ── 1. Broad bets (futures) — everyone who submitted ──────────")
+        # ONE extra Negev call → name maps for all 4 categories.
+        id_maps = {} if args.raw_ids else _load_id_to_name_maps(ntm)
         try:
             rows = ntm.toto_get_broad_bets()
         except Exception as e:                            # noqa: BLE001
@@ -77,27 +124,46 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  Submitted: {len(submitted)} player(s)   "
               f"Empty (not yet locked): {len(empty)}")
         print()
-        print(f"    {'displayName':<22} {'Winner':<16} {'Cinderella':<16} "
+        print(f"    {'displayName':<22} {'Winner':<14} {'Cinderella':<18} "
               f"{'GoldenBoot':<22} {'BestPlayer':<22}")
-        print(f"    {'-'*22} {'-'*16} {'-'*16} {'-'*22} {'-'*22}")
+        print(f"    {'-'*22} {'-'*14} {'-'*18} {'-'*22} {'-'*22}")
         for r in submitted:
             name = r.get("displayName") or "?"
             tag = (" ← you" if name == me
                     else (" ← tracked" if name in tracked else ""))
-            w = (r.get("winner") or "-")[:16]
-            ci = (r.get("cinderella") or "-")[:16]
-            gb = (r.get("goldenBoot") or "-")[:22]
-            bp = (r.get("bestPlayer") or "-")[:22]
-            # bestPlayer values often carry a "roster_" prefix in storage
-            if isinstance(bp, str) and bp.startswith("roster_"):
-                bp = bp[len("roster_"):]
-            print(f"    {name:<22} {w:<16} {ci:<16} {gb:<22} {bp:<22}{tag}")
+            if args.raw_ids:
+                w = (r.get("winner") or "-")[:14]
+                ci = (r.get("cinderella") or "-")[:18]
+                gb = (r.get("goldenBoot") or "-")[:22]
+                bp = (r.get("bestPlayer") or "-")[:22]
+                if isinstance(bp, str) and bp.startswith("roster_"):
+                    bp = bp[len("roster_"):]
+            else:
+                w = _translate(id_maps, "winner", r.get("winner"))[:14]
+                ci = _translate(id_maps, "cinderella", r.get("cinderella"))[:18]
+                gb = _translate(id_maps, "goldenBoot", r.get("goldenBoot"))[:22]
+                bp = _translate(id_maps, "bestPlayer", r.get("bestPlayer"))[:22]
+            print(f"    {name:<22} {w:<14} {ci:<18} {gb:<22} {bp:<22}{tag}")
 
         if empty:
             print()
             print(f"  Not yet submitted ({len(empty)}): "
                   + ", ".join((r.get("displayName") or "?") for r in empty[:30])
                   + ("..." if len(empty) > 30 else ""))
+
+        # Popularity summary across the pool
+        if id_maps and submitted:
+            from collections import Counter
+            cats = ("winner", "cinderella", "goldenBoot", "bestPlayer")
+            print()
+            print(f"  Pool popularity:")
+            for cat in cats:
+                c = Counter(_translate(id_maps, cat, r.get(cat))
+                              for r in submitted if r.get(cat))
+                top = c.most_common(5)
+                if top:
+                    parts = ", ".join(f"{name} ({n})" for name, n in top)
+                    print(f"    {cat:<12} {parts}")
 
     # ──────────────── 2. FIRST MATCH — per-player picks ────────────────
     if not args.skip_match:
