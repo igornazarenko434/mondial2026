@@ -185,3 +185,52 @@ def test_render_handles_minimal_card_without_crashing():
     txt = render_card(minimal)
     assert "X vs Y" in txt
     assert "Signals" in txt
+
+
+# ---------- Day-9.12 UX additions ----------
+
+def test_header_shows_window_tag_when_card_has_window_t7m():
+    """T-7m is the LOCK card — visually distinct from T-24h/T-60m/T-15m
+    previews so the reader knows this is the scoring-decisive one."""
+    txt = render_card(_base_card(window="T-7m"))
+    assert "[T-7m LOCK]" in txt.split("\n")[0]
+
+
+def test_header_shows_window_tag_for_previews():
+    for w, expected in (("T-24h", "[T-24h]"),
+                         ("T-60m", "[T-60m]"),
+                         ("T-15m", "[T-15m]")):
+        txt = render_card(_base_card(window=w))
+        assert expected in txt.split("\n")[0], \
+            f"window={w} expected {expected!r} in header, got: {txt.split(chr(10))[0]!r}"
+
+
+def test_header_omits_window_tag_when_card_has_no_window():
+    """Backward-compat: cards without a `window` field render the legacy
+    header (existing daemon flows + older tests untouched)."""
+    txt = render_card(_base_card())
+    header = txt.split("\n")[0]
+    assert "[T-" not in header
+
+
+def test_pick_line_shows_modal_fallback_marker_when_ev_pathway_is_modal_fallback():
+    """When odds_api is unavailable build_card falls back to modal-pick.
+    The card must visibly say so — otherwise the user can't tell whether
+    the pick is EV-optimal or degraded."""
+    txt = render_card(_base_card(ev_pathway="modal_fallback"))
+    pick_line = [ln for ln in txt.split("\n") if ln.startswith("► Pick:")][0]
+    assert "[no live odds]" in pick_line
+
+
+def test_pick_line_no_modal_fallback_marker_on_happy_path():
+    """ev_pathway='ev_optimized' (default in _base_card) → no fallback marker."""
+    txt = render_card(_base_card())     # ev_pathway='ev_optimized'
+    pick_line = [ln for ln in txt.split("\n") if ln.startswith("► Pick:")][0]
+    assert "[no live odds]" not in pick_line
+
+
+def test_t7m_lock_card_still_within_8_line_cap():
+    """The window tag must fit on the existing header line — adding it
+    must NOT push us past the 8-line cap on a normal card."""
+    txt = render_card(_base_card(window="T-7m"))
+    assert len(txt.split("\n")) <= MAX_LINES_NORMAL

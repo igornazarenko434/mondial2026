@@ -124,10 +124,18 @@ def render_card(card: dict) -> str:
     dir_label = {"H": f"{home} win", "D": "Draw",
                  "A": f"{away} win"}.get(dir_code, str(dir_code))
 
-    # 1. Header
+    # 1. Header — Day-9.12: surface the window label so the user can tell at
+    # a glance whether this card is the LOCK (T-7m, scoring-decisive) or one
+    # of the earlier previews. Only set when card.window is present (existing
+    # tests / older callers without `window` render the legacy header).
+    window = card.get("window")
+    win_tag = {"T-24h": "[T-24h]", "T-60m": "[T-60m]",
+                "T-15m": "[T-15m]", "T-7m":  "[T-7m LOCK]"}.get(window, "")
     header = f"⚽ {home} vs {away}"
     if when:
         header += f" — {when}"
+    if win_tag:
+        header += f" {win_tag}"
     header += f" ({stage}{(' ' + group) if group else ''}){det}"
     lines = [header]
 
@@ -144,9 +152,16 @@ def render_card(card: dict) -> str:
             f"{away} {_pct(prob.get('A'))}")
 
     # 4. Pick + Exact (combined onto one line)
+    # Day-9.12: when build_card had to fall back to modal-pick because live
+    # odds weren't available (ev_pathway == "modal_fallback"), append a tiny
+    # tag so the reader knows this pick is NOT EV-optimal — it's the most-
+    # likely score the model saw. Distinguishes a fully-fed card from one
+    # that ran on a degraded signal mix.
     pick_line = f"► Pick: {dir_label}"
     if pick:
         pick_line += f"    Exact: {home} {pick.get('home','?')} — {away} {pick.get('away','?')}"
+    if card.get("ev_pathway") == "modal_fallback":
+        pick_line += "  [no live odds]"
     lines.append(pick_line)
 
     # 5. Modal — show only if it differs from the pick (avoid noise)
