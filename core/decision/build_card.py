@@ -46,6 +46,41 @@ def _trim(s: str, n: int = 80) -> str:
     return out
 
 
+def _build_friend_picks_section(home: str | None, away: str | None) -> str | None:
+    """Fetch + render the per-match picks block for the card footer.
+
+    Skips entirely when no FRIEND_PARTICIPANTS configured (returns None).
+    With friends configured, fetches via Negev's toto_get_match_details +
+    renders via core.reporting.people.render_match_picks_block.
+
+    Costs ONE Negev call per card (per match × per window = 3-4 calls per
+    match per tournament — fully within Negev's no-budget tier). When the
+    fetch fails the caller logs but the card still ships.
+    """
+    if not home or not away:
+        return None
+    from core.reporting import people
+    tracked = people.tracked_participants()
+    # Pure self + no friends → no value in a "picks" block (would just
+    # echo "Pick:" line above). Skip.
+    if len(tracked) < 2:
+        return None
+    try:
+        from integrations import negev_toto_mcp as ntm
+        from core import obs
+        with obs.external_call("negev_toto", "get_match_details"):
+            details = ntm.toto_get_match_details(home=home, away=away)
+    except Exception as e:                          # noqa: BLE001
+        log.warning("toto_get_match_details(%r, %r) failed: %s", home, away, e)
+        return None
+    if "error" in (details or {}):
+        return None
+    picks = details.get("friendsPicks")
+    my_pred = details.get("myPrediction")
+    return people.render_match_picks_block(picks, my_pred, tracked,
+                                            home, away)
+
+
 def _utc_to_local(utc_iso: str | None, tz: str | None = None) -> str | None:
     """UTC ISO → local-time display string (Israel by default)."""
     if not utc_iso:
@@ -339,6 +374,18 @@ def build_card(match: dict, conn=None, *,
     missing = [s for s in ALL_SIGNALS if s not in covered]
     if missing:
         log.error("auditability violation in build_card: missing %s", missing)
+
+    # ───── 8.5. Tracked-friends picks footer (Day-9.22) ─────
+    # Pull mine + every friend's pick for THIS match so render_card can
+    # append a "👥 Picks" footer. Pure read; failures are swallowed so the
+    # card still ships if Negev is unreachable. Skipped silently when the
+    # operator hasn't declared any tracked participants.
+    try:
+        card["friend_picks_section"] = _build_friend_picks_section(
+            match.get("home"), match.get("away"))
+    except Exception as e:                          # noqa: BLE001
+        log.warning("friend_picks_section build failed: %s", e)
+        card["friend_picks_section"] = None
 
     # ───── 9. Match metadata ─────
     card["match_id"]    = match.get("match_id")

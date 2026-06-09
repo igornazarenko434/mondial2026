@@ -196,4 +196,11 @@ def render_card(card: dict) -> str:
             "render_card overflowed cap (%d > %d); truncating", len(lines), cap)
         lines = lines[:cap]
 
+    # Day-9.22: append tracked-friends' picks footer (when configured) AFTER
+    # the model cap. The cap exists to keep the model output compact; the
+    # picks footer is supplementary social context and shouldn't be truncated.
+    section = card.get("friend_picks_section")
+    if section:
+        lines.append(section)
+
     return "\n".join(lines)
