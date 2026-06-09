@@ -294,6 +294,53 @@ Side bets work today via `sidebets`. Everything else is enhancement.
         - ODDS_WINDOWS regression pin (T-24h excluded)
       Not done (explicitly optional per spec): Claude Agent SDK subagent
       wrap — adds complexity for no functional gain.
+- [x] **Day 9.22 — symmetric tracked-participants + T+1m kickoff card (DONE — 593 total).**
+      Adds first-class "track this friend" support across every Telegram
+      message + a brand new T+1m kickoff dispatch window. Each tracked
+      person (you + every name in `FRIEND_PARTICIPANTS`) appears with the
+      SAME rank/total/split/gap-to-leader audit YOU get, in:
+      📊 Negev standings sync (top-of-message blocks + Top-5 ← tracked marker)
+      ☀️ 09:00 daily summary (compact per-person line under Tracked 👥)
+      ⚽ T+1m kickoff card (NEW — per-match picks + standings + lineups)
+      🃏 T-60m/-15m/-7m match cards (NEW footer: "👥 Picks" block under EV pick)
+      Deliverables:
+      - `core/reporting/people.py` — `tracked_participants()` (env →
+        ordered list), `render_block` (multi-line audit), `render_compact`
+        (one-line), `render_match_picks_block` (per-match picks).  Single
+        source of truth reused by all four message sites.
+      - `tools/find_member.py` — Negev member lookup by substring (find
+        the exact `displayName` BEFORE pasting into `FRIEND_PARTICIPANTS`).
+      - `tools/smoke_test_messages.py` — fires ONE of every message type
+        at the channel so the operator can visually verify after a config
+        change.
+      - `schedule/kickoff_cards.py` — fires ~1 min after each kickoff in
+        the [T+1m, T+15m] catchup window. Idempotent via runs ledger
+        ('kickoff' window). Shared standings snapshot saves N-1 Negev
+        credits when N simultaneous kickoffs fire (group stage edge case).
+        Per-match exception isolation prevents one Negev/Telegram failure
+        from blocking sibling matches.
+      - `schedule/runner.py` — new `kickoff_card_fn` hook (None by default,
+        existing tests untouched), new `_maybe_kickoff_cards` tick step.
+      - `tools/sync_negev_standings.py::_format_telegram_summary` — new
+        "TRACKED 👥" header section; friends in Top-5 / Around-You get
+        ← tracked marker.
+      - `schedule/daily_summary.py::build_summary_text` — new "Tracked 👥:"
+        block, pulled fresh from Negev so ranks match the app exactly. Falls
+        back to the legacy local-DB "Your score" line when Negev unreachable.
+      - `core/decision/build_card.py::_build_friend_picks_section` — fetches
+        + renders the per-match picks footer. `core/delivery/base.py::
+        render_card` appends it AFTER the MAX_LINES cap (footer is
+        supplementary; never truncated).
+      - **Root-cause fix** for pre-existing test-ordering fragility: NEW
+        `tests/conftest.py` autouse fixture isolates `core.obs.runs._LEDGER`
+        and `core.obs.cost._LEDGER` to fresh `:memory:` per test. The
+        production singleton path is unchanged; only pytest sees the
+        isolated state. Fixes 7 previously-flaky tests in
+        test_runner_day9 + test_scheduler.
+      - `.env.example` — `FRIEND_PARTICIPANTS=` comma-separated.
+      Cost (per tournament): Negev ~520 calls (no budget), api-football
+      unchanged (kickoff lineups cached via Day-9.20). Tests: +111 (24
+      reporting + 18 kickoff + 9 card-footer + 7 daily/sync extensions).
 - [x] **Day 9.11 — LLM news-agent observability — structural attribution (DONE — 482 total).**
       Closes 10 patches from a fan-out workflow audit. Three structural
       blockers + seven important quality fixes:

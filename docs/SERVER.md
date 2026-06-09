@@ -150,6 +150,9 @@ Located at `/home/mondial/mondial2026/.env`. Mode `600`, owned `mondial:mondial`
 | Variable | Default | Meaning |
 |---|---|---|
 | `MY_PARTICIPANT` | `Igor` | Your display name in the Negev Toto app — used by writer + reader |
+| `FRIEND_PARTICIPANTS` | _empty_ | **Day-9.22.** Comma-separated Negev displayNames to also render in every Telegram message (📊 ☀️ ⚽ 🃏). Find exact spelling via `tools/find_member.py <substring>`. Empty → only YOU. |
+| `KICKOFF_DELAY_MIN` | `1` | T+N min after kickoff before firing the ⚽ KICKOFF card |
+| `KICKOFF_CATCHUP_MIN` | `15` | Catch-up: restart < N min after KO still sends the card |
 | `STRATEGY_TILT` | `0` | 0 = pure EV (default). 0.3-0.6 = position-aware. |
 | `STRATEGY_TOP_K` | `5` | Pool of EV candidates the tilt may choose from |
 | `STRATEGY_SWING` | `6.0` | Estimated swing pts per remaining game |
