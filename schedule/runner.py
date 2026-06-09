@@ -54,6 +54,7 @@ class SchedulerDaemon:
                  events_cache_fn: Callable[[], list] | None = None,
                  standings_update_fn: Callable[[], None] | None = None,
                  daily_summary_fn: Callable[..., bool] | None = None,
+                 kickoff_card_fn: Callable[..., int] | None = None,
                  strategy_context_fn: Callable[[], dict | None] | None = None,
                  strategy_tilt: float | None = None,
                  max_workers: int | None = None, poll_seconds: int | None = None,
@@ -66,6 +67,9 @@ class SchedulerDaemon:
         self.events_cache_fn = events_cache_fn   # () -> list[event_dict] | raises
         self.standings_update_fn = standings_update_fn   # () -> None (idempotent)
         self.daily_summary_fn = daily_summary_fn          # (*, now) -> bool sent?
+        # Day-9.22: T+1m kickoff cards — once per match, ~1 min after KO.
+        # None by default → existing tests + callers untouched.
+        self.kickoff_card_fn = kickoff_card_fn            # (*, now) -> int sent
         # Day-9.5 win-the-pool layer — both None by default so the daemon
         # produces pure-EV picks. Pass both to enable position-aware tilting.
         # See docs/STRATEGY.md.
@@ -143,6 +147,19 @@ class SchedulerDaemon:
         except Exception as e:               # noqa: BLE001
             log.warning("daily summary failed: %s", e)
 
+    def _maybe_kickoff_cards(self, now: datetime):
+        """Day-9.22: ~T+1m post-kickoff message with mine + tracked friends'
+        picks + lineups. Idempotent via runs ledger ('kickoff' window).
+        Failures must NEVER crash the loop."""
+        if not self.kickoff_card_fn:
+            return
+        try:
+            n = self.kickoff_card_fn(now=now)
+            if n:
+                log.info("kickoff card(s) sent: %d", n)
+        except Exception as e:               # noqa: BLE001
+            log.warning("kickoff card hook failed: %s", e)
+
     def _fetch_events_cache_if_needed(self, due: list[dict]) -> list | None:
         """Day-9: one fetch_all_odds() per tick is shared across every match
         whose window pulls odds (T-60m / T-15m / T-7m). On any failure we
@@ -166,6 +183,7 @@ class SchedulerDaemon:
         self._maybe_ingest(now)
         self._maybe_update_standings()                # Day-9: post-ingest scoring
         self._maybe_daily_summary(now)                # Day-9: morning summary
+        self._maybe_kickoff_cards(now)                # Day-9.22: T+1m kickoff
         matches = self.fixtures_fn()
         by_id = {m["match_id"]: m for m in matches}
         # persistent idempotency (survives restarts) + in-memory fast path
@@ -222,6 +240,7 @@ if __name__ == "__main__":
     from core.decision.build_card import build_card as real_build_card
     from core.scoring.standings_writer import update_standings
     from schedule.daily_summary import send_if_due as _send_daily_summary
+    from schedule.kickoff_cards import fire_due as _fire_kickoff_cards
     from config.strategy import DEFAULT_TILT
 
     init_db()
@@ -260,6 +279,9 @@ if __name__ == "__main__":
     def daily_summary_sender(*, now):
         return _send_daily_summary(conn, runs(), now=now)
 
+    def kickoff_card_sender(*, now):
+        return _fire_kickoff_cards(conn, runs(), now=now)
+
     def strategy_context_loader():
         # Re-read on each dispatch. Cheap (two SELECTs). Means a fresh
         # `tools/standings_set.py set ...` is picked up by the very next
@@ -271,5 +293,6 @@ if __name__ == "__main__":
                     events_cache_fn=events_cache_fetcher,
                     standings_update_fn=standings_updater,
                     daily_summary_fn=daily_summary_sender,
+                    kickoff_card_fn=kickoff_card_sender,
                     strategy_context_fn=strategy_context_loader,
                     strategy_tilt=DEFAULT_TILT).run_forever()
