@@ -584,13 +584,13 @@ def analyze(home: str, away: str, context_text: str,
     json_mode_fallback_used = False
     json_mode_error_class: str | None = None
     try:
-        raw = llm.complete(SYSTEM, prompt, json_mode=True, max_tokens=500)
+        raw = llm.complete(SYSTEM, prompt, json_mode=True, max_tokens=2048)
     except Exception as e_jm:                          # noqa: BLE001
         json_mode_fallback_used = True
         json_mode_error_class = type(e_jm).__name__
         log.warning("json_mode=True failed (%s: %s); retrying plain text",
                     json_mode_error_class, e_jm)
-        raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=500)
+        raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=2048)
     # Wrap parse+validate in a span — Honeycomb now shows "parse_validate"
     # under stage:news so the auditor sees WHERE in the agent it landed.
     try:
