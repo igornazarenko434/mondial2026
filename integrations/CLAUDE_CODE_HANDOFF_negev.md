@@ -360,7 +360,7 @@ during Step 3 (polite throttle ~10/min, $0 cost).
 
 ## Open blockers — RESOLVED 2026-06-07
 
-1. ~~Mondial 2026 tournament does not exist~~ → **`NEGEV_TOURNAMENT_ID=n40ykJlOIA9Mg839hz91` (Negev Toto 2026, ₪32,426 prize pool, 63 humans + 3 bots)**.
+1. ~~Mondial 2026 tournament does not exist~~ → **`NEGEV_TOURNAMENT_ID=n40ykJlOIA9Mg839hz91` (Negev Toto 2026, 63 humans + 3 bots)**.
 2. ~~Per-match prediction doc path is unknown~~ → captured Day 9.6 and
    wired to `toto_submit_match_prediction`. Verified live with Mexico 2-1.
 3. ~~Side-bet answer doc path is unknown~~ → side bets are unresolved as of

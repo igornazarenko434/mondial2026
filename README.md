@@ -13,8 +13,7 @@
 
 ## What this actually is
 
-A **friends' Toto pool** for the FIFA World Cup 2026 pays ₪32,426 to the
-top finisher. 67 players submit picks across:
+A **friends' Toto pool** for the FIFA World Cup 2026. 67 players submit picks across:
 - per-game exact scores (1X2 + score, scored against a fixed multiplier grid)
 - futures (winner / cinderella / golden boot / "best player")
 - daily side bets (yes/no, over/under)

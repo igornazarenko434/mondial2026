@@ -237,8 +237,8 @@ def toto_patch_document(path: str, fields_json: str) -> dict:
 # `tournament_id` is a parameter on every typed tool — never hard-coded —
 # so the connector works against any pool without code changes. When not
 # passed, falls back to NEGEV_TOURNAMENT_ID env var. Our live tournament is
-# "Negev Toto 2026" (id n40ykJlOIA9Mg839hz91, prize pool ₪32,426, top-10
-# paid — matches config/rules.py::PRIZE_LADDER exactly).
+# "Negev Toto 2026" (id n40ykJlOIA9Mg839hz91, top-10 paid — matches
+# config/rules.py::PRIZE_LADDER exactly).
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Stage label mapping: Negev free-text → our RULES_STAGE labels (config/rules.py).
