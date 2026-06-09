@@ -1,258 +1,248 @@
-# Mondial 2026 — Prediction Agent
+# Mondial 2026 — autonomous pick engine for the WC2026 Toto pool
 
-[![tests](https://github.com/igornazarenko434/mondial2026/actions/workflows/test.yml/badge.svg)](https://github.com/igornazarenko434/mondial2026/actions/workflows/test.yml)
-[![python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+> A self-hosted scheduling daemon that watches every World Cup 2026 match
+> and, at strict per-match windows (T-24h → T-7m), assembles a
+> degradation-safe probability model from four independent signals, runs
+> EV-optimization against the pool's exact-score multipliers, and pushes
+> the recommendation to Telegram. **Built in 9 days. 600 tests. $0/month
+> in operational cost. One human operator.**
 
-Decision-support agent for the friends' **Toto Mondial 2026** pool. For every
-World Cup match it gathers stats + Elo + injuries + live odds, models the
-score, and emits the **1X2 + exact-score pick that maximizes expected points**
-under the group's scoring rules — delivered to your phone ~7 min before
-kickoff. Plus a futures module (winner / top scorer / Cinderella / fighter)
-and a scoring/standings engine.
-
-> Advisor, not bettor: it tells you what to pick; you enter it in the Toto
-> app. For fun only — bookmaker odds are a data signal + the group's scoring
-> multiplier, no real-money wagering.
+[![tests](https://img.shields.io/badge/tests-600%20passing-brightgreen)]() [![python](https://img.shields.io/badge/python-3.12-blue)]() [![status](https://img.shields.io/badge/status-pre--tournament%20live-green)]() [![infra](https://img.shields.io/badge/infra-Hetzner%20CPX22%20%E2%82%AC5%2Fmo-orange)]() [![license](https://img.shields.io/badge/license-private-lightgrey)]()
 
 ---
 
-## Why this exists (the edge)
+## What this actually is
 
-The pool's scoring is non-trivial: `points = base × bookmaker_odds`, exact
-scores get a rare-scoreline multiplier, detonator matches double, group stage
-points get a −15% reset, and futures pay fixed payouts ranked by upset risk
-(USA 170, Curaçao 75, etc.). Under those rules **the optimal score to predict
-is often not the most-likely score** — it's whichever scoreline maximizes
-`P(score) × table_multiplier × odds`. That's a closed-form EV calculation, not
-intuition. This system runs it deterministically for every match.
+A **friends' Toto pool** for the FIFA World Cup 2026 pays ₪32,426 to the
+top finisher. 67 players submit picks across:
+- per-game exact scores (1X2 + score, scored against a fixed multiplier grid)
+- futures (winner / cinderella / golden boot / "best player")
+- daily side bets (yes/no, over/under)
 
-Verified against the rules PDF examples to **0.001 of brute force**: France 2-1
-→ 3.000, draw 1-1 → 5.625, final 2-2 → 12.5. See [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
+This system **automates the per-game and futures decisions** end-to-end —
+gathering live data, running a probabilistic model, picking the
+expected-points-maximizing option, and delivering it as a Telegram card
+~7 minutes before kickoff.
 
----
+It does **not** play poker against the pool's social dynamics. Every
+recommendation is the answer to one question:
 
-## What it produces
+> "Given everything I can know right now about this match, which exact
+> score gives me the highest expected points under the pool's published
+> scoring rules?"
 
-Three best-practice outputs, all "pure" (no standings tilt by default):
-
-1. **Per-game pick** — 1X2 + exact score that maximize expected points
-   (`core/decision/ev_optimizer.py`).
-2. **Futures / overall bets** — EV-ranked tables for winner / top scorer /
-   Cinderella / fighter (`core/decision/futures.py`). Lock once before
-   11.06.2026 21:59 Israel.
-3. **Daily side bets** — over/under and yes/no recommended from the day's
-   match models (`core/decision/sidebets.py`).
-
-A win-strategy variance tilt (`core/decision/strategy.py`) is wired but
-default-off; enable mid-tournament if you fall behind in the standings.
-
----
-
-## How it works (90-second tour)
+## The pick pipeline in one picture
 
 ```
- calendar (football-data.org)  ──┐
- stats + xG (FBref/Understat)  ──┤
- Elo (eloratings.net)          ──┤── Dixon-Coles + Elo + de-vigged market ──┐
- confirmed lineups + injuries  ──┤    (Pinnacle/Betfair) → blended matrix    │
- (API-Football + news LLM)     ──┘                                            │
-                                                                              ▼
-                                          ┌──────────────────────────────────────────┐
-                                          │  EV optimizer over every scoreline,      │
-                                          │  given the LOCKED bookmaker odds at T-7m │
-                                          │  → 1X2 + exact-score pick                 │
-                                          └────────────────────┬─────────────────────┘
-                                                               │
-                              file ─ console ─ Telegram  ◀── delivery + run-status ledger
+                                                  T-24h    T-60m    T-15m    T-7m  ← LOCK
+                                                    │        │        │       │
+            ┌────────────────┐                      └────────┴────────┴───────┘
+            │ schedule/runner│  ← scheduler daemon (Python 3.12, systemd, Hetzner CPX22)
+            └───────┬────────┘
+                    │  per-tick: ingest → standings → daily_summary → kickoff_cards
+                    │  per-window: due_jobs → batch fetch_all_odds → dispatch
+                    ▼
+        ┌───────────────────────────────────────────────────────────────────────┐
+        │                       core/decision/build_card.py                    │
+        │                                                                       │
+        │   ┌─────────────┐  ┌──────────┐  ┌─────────────┐  ┌─────────────────┐│
+        │   │ Dixon-Coles │  │   Elo    │  │  Market     │  │   News agent    ││
+        │   │             │  │          │  │             │  │  (LLM router)   ││
+        │   │ martj42 CSV │  │eloratings│  │ the-odds-api│  │  brave + api-   ││
+        │   │ → fit → λh,λa  │.net → P(H,│  │ → devig →   │  │  football →     ││
+        │   │             │  │ D,A)     │  │ P(H,D,A)    │  │  Gemini/Claude  ││
+        │   │   30% blend │  │ 20% blend│  │  50% blend  │  │  → ±0.6 δh,δa  ││
+        │   └──────┬──────┘  └─────┬────┘  └──────┬──────┘  └──────┬──────────┘│
+        │          └────────────┬──┴────────────┬─┘                 │           │
+        │                       ▼               ▼                   │           │
+        │              blended_matrix(λ+δ, elo_p, market_p)         │           │
+        │                       │                                  ▼           │
+        │                       ▼                                  fold into λ │
+        │            P(score) 0..6 × 0..6                                      │
+        │                       │                                              │
+        │                       ▼                                              │
+        │        ev_optimizer.recommend(matrix, Negev_multipliers)             │
+        │                       │                                              │
+        │                       ▼                                              │
+        │   {pick_direction, pick_exact_score, expected_points, audit_trail}   │
+        └───────────────────────────────┬──────────────────────────────────────┘
+                                        ▼
+                            core/delivery → 📲 Telegram channel
+                            (📊 standings, ☀️ daily, ⚽ kickoff, 🃏 card)
 ```
 
-Scheduler dispatches one job chain per match at **T-24h / T-60m / T-15m /
-T-7m (lock)** on a `ThreadPoolExecutor`, so simultaneous kickoffs run
-concurrently. A shared token-bucket throttler keeps every external call inside
-the free-tier quotas. Full architecture, data sources, and timing: [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md).
+## The 13 things that make this not toy software
 
----
-
-## Status
-
-Days 1–3 code-complete and tested (138 passing, 1 flaky concurrent-SQLite test
-tracked); structural infrastructure is built. Remaining work is wiring live
-data into it.
-
-| Day | Task | Status |
+| # | Engineering principle | Where it lives |
 |---|---|---|
-| 1 | Calendar ingest (football-data.org → SQLite, stage map, detonator tag) | ✅ code, tested offline |
-| 2 | Data agent (Elo + FBref loaders, daily cache, name normalize) | ✅ code, tested offline |
-| 3 | Model (Dixon-Coles fit + backtest + calibrate + assembler) | ✅ code, tested offline |
-| 4 | Odds (event→fixture match, Pinnacle/Betfair, snapshot lock) | ⏳ |
-| 5 | Standings (results → score_match → standings, -15% reset, prize split) | ⏳ |
-| 6 | `build_card` + delivery wiring (degradation ladder) | ⏳ |
-| 7 | Futures lock (EV ranker built; feed market or MC probs) — **before 11.06 21:59** | ⏳ |
-| 8 | News agent (web search + API-Football → structured deltas) | ⏳ |
-| 9 | Orchestrate live (daemon under launchd; real `build_card`) | ⏳ |
-| 10 | Harden (calibration, quota headroom, optional Jaeger trace) | ⏳ |
+| 1 | **Never raises** — every signal loader wrapped in try/except; pipeline always produces a card | `core/decision/build_card.py` |
+| 2 | **Audit trail mandatory** — `signals_used` ∪ `signals_failed` = `{dc, elo, market, news}`, pinned by parametrized tests | `test_build_card.py::test_auditability_golden_rule[...]` |
+| 3 | **Graceful degradation ladder** — DC+Elo+Market+News → fewer → modal pick → alert | `docs/FAILURE_MODES.md` |
+| 4 | **Single source of truth for scoring** — every multiplier in `config/rules.py`, pinned cell-by-cell to Negev's server-side grid | Day-9.7 audit + `tools/audit_negev_multipliers.py` |
+| 5 | **Real probabilities, not rules of thumb** — Dixon-Coles fit on 4,045 real internationals, blended with Pinnacle's devigged odds | `core/models/predict.py::score_distribution` |
+| 6 | **EV-optimization** — picks the score that maximizes `P(score) × points_multiplier`, not the modal score | `core/decision/ev_optimizer.recommend` |
+| 7 | **Per-provider quota guards** — every external call wrapped in `obs.external_call`; token-bucket + monthly/daily ledger; over-budget = graceful degrade | `core/obs/__init__.py`, `core/obs/cost.py` |
+| 8 | **Distributed tracing in production** — every card has a `correlation_id` traceable through Honeycomb (`WHERE correlation_id="match-1489369-T-7m"`) | `core/obs/tracing.py` (Day-9.11) |
+| 9 | **LLM-provider-agnostic** — router falls Gemini → Claude → OpenAI with 3-tier parse repair, fully observable | `core/llm/router.py` |
+| 10 | **Concurrent dispatch** — up to 4 simultaneous group-stage kickoffs run in parallel via `ThreadPoolExecutor`, idempotency via runs ledger | `schedule/runner.py` |
+| 11 | **Idempotent everywhere** — re-running ingest/scoring/standings sync is safe; runs-ledger prevents double-fire | `core/obs/runs.py`, `schedule/runner.py` |
+| 12 | **600 tests, mostly offline** — every external dependency injectable; CI-friendly; one autouse fixture isolates singleton ledgers per test | `tests/conftest.py` (Day-9.22) |
+| 13 | **One operator, zero ops cost** — €5/mo VM, $0/mo APIs (all free tiers), systemd auto-restart, watchdog alerts on stuck/silent | `docs/SERVER.md` |
 
-Day-by-day playbook and golden rules: [`CLAUDE.md`](CLAUDE.md).
+## Tech stack
 
----
+- **Python 3.12** — no async, just threads (work is I/O-bound; CPU work is microseconds)
+- **SQLite** — single-file DB for matches, predictions, odds snapshots, standings, runs ledger, cost ledger
+- **Firebase Firestore** — read/write to the Negev Toto app (friends pool) via a hand-rolled MCP-style connector
+- **OpenTelemetry** → Honeycomb — distributed tracing
+- **Long-polling Telegram Bot API** — message delivery
+- **Hetzner CPX22 / Ubuntu 24.04** — €5/mo, systemd-managed daemon
+- **No ML framework** — Dixon-Coles is closed-form; LLM only for news synthesis
+- **No web frontend** — UX is push notifications + browsable `reports/*.md`
 
-## Quickstart
+## Architecture at a glance
+
+| Layer | Modules | Purpose |
+|---|---|---|
+| **Scheduler** | `schedule/{runner,scheduler,watchdog,daily_summary,kickoff_cards}` | Tick loop, dispatch windows, watchdog, hooks |
+| **Decision** | `core/decision/{build_card,ev_optimizer,strategy,sidebets,futures}` | Per-game pick, win-the-pool tilt, side bets, futures |
+| **Models** | `core/models/{dixon_coles,elo,blend,fit,predict,montecarlo}` | Goal-rate fit, Elo, blend, score matrix, MC bracket sim |
+| **Data** | `core/data/{football_data,oddsapi,api_football,web_search,results_io,soccerdata_io,teams}` | All 11 external endpoints + canonicalization |
+| **Agents** | `orchestrator/agents/news_agent.py` | LLM-mediated context synthesis |
+| **LLM** | `core/llm/{router,providers}` | Gemini → Claude → OpenAI chain with parse repair |
+| **Observability** | `core/obs/{tracing,logging,cost,runs}` | Rate limit, budget, ledger, tracing, runs |
+| **Delivery** | `core/delivery/{base,channels}` | Telegram + file + console + render_card |
+| **Storage** | `store/{db,repo,schema.sql}` | SQLite I/O |
+| **Integrations** | `integrations/negev_toto_mcp.py` | Firestore connector + 30+ MCP tools |
+| **Tools** | `tools/*.py` (40+) | Operator CLIs (audit, sync, suggest, smoke-test, …) |
+
+## Data sources
+
+| Source | Auth | Free quota | Used for |
+|---|---|---|---|
+| football-data.org | API key | 10 req/min | Match calendar, fixtures, results |
+| the-odds-api.com | API key | 500 credits/mo | Decimal 1X2 + futures odds (Pinnacle preferred) |
+| api-football.com | API key | 100 req/day | Confirmed XI, injuries, fixture IDs |
+| brave search api | API key | 1000 req/mo | Web snippets for the news agent context |
+| Negev Firestore | refresh token | unlimited | Friends pool — standings, picks, side bets |
+| Google Gemini | API key | 1500 req/day | LLM primary (free tier) |
+| Anthropic Claude | API key | PAYG | LLM fallback |
+| OpenAI | API key | PAYG | LLM last-resort |
+| eloratings.net | scrape | none | Elo ratings per nation |
+| martj42 GitHub CSV | none | none | Historical international results for DC fit |
+| Telegram Bot API | bot token | 1 msg/sec/chat | Output delivery |
+
+**Total OOP cost ≈ $0/month.** Cost ledger tracks burn rate; budget-guards short-circuit before fees apply.
+
+## Live status — 2026-06-09
+
+- ✅ 600 tests green
+- ✅ Daemon deployed: Hetzner CPX22, Falkenstein, `167.233.66.192`, systemd-managed
+- ✅ Day-1 calendar live (104 fixtures ingested + detonator-tagged)
+- ✅ Day-7 futures locked (Portugal / Uzbekistan / Mbappé / "Arkadi" — saved to Negev)
+- ✅ Day-9.22: per-friend symmetric blocks + T+1m kickoff card + per-card picks footer
+- ⏳ First T-24h card: **2026-06-10 22:00 IDT**
+- ⏳ First T-7m LOCK: **2026-06-11 21:53 IDT** (Mexico v South Africa)
+
+## Quick start
 
 ```bash
-# clone
-git clone https://github.com/igornazarenko434/mondial2026.git
-cd mondial2026
-
-# venv + deps
-python3 -m venv .venv && source .venv/bin/activate
+git clone <repo> mondial2026 && cd mondial2026
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# env (see Configuration below)
-cp .env.example .env
-# edit .env, paste your free-tier API keys
-
-# tests (138 should pass; 1 may be flaky on concurrent SQLite)
-pytest tests/ -q
-
-# initialize the store
-python -m store.db
-
-# demo run (works with no live keys — placeholder card)
-python -m orchestrator.run
-
-# dashboard (writes reports/dashboard.html)
-python -m tools.dashboard
-
-# metrics CLI
-python -m tools.metrics
+cp .env.example .env  # then fill in keys
+PYTHONPATH=. .venv/bin/python -m schedule.runner       # local run
+sudo bash infra/bootstrap.sh                           # full VM setup
 ```
 
----
+## Inspecting the system after kickoff
 
-## Configuration
-
-All env vars and free-tier sources — copy `.env.example` to `.env` and fill in.
-
-| Variable | Purpose | Source (free tier) |
-|---|---|---|
-| `FOOTBALL_DATA_API_KEY` | Fixtures / results / calendar | https://www.football-data.org |
-| `ODDS_API_KEY` | Bookmaker odds (scoring multiplier) | https://the-odds-api.com (500 req/mo) |
-| `API_FOOTBALL_KEY` | Confirmed lineups, injuries, backup fixtures | https://www.api-football.com (100 req/day) |
-| `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` | LLM router (news agent + card writer) | Claude API or Google AI Studio (free) |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | Phone-push delivery (optional) | @BotFather → token; @userinfobot → chat id |
-| `DELIVERY_CHANNELS` | Comma-separated: `file,console,telegram` | default `file,console` |
-| `LOCAL_TZ` | Local timezone for kickoff display | e.g. `Asia/Jerusalem` |
-| `STRATEGY_TILT` | Optional 0..1 variance/position tilt | default `0` (pure EV) |
-| `LLM_PROVIDER_CHAIN` | Router fallback chain | default `claude,gemini,openai` |
-
-Full table including observability/scheduler tuning: see [`.env.example`](.env.example),
-[`docs/COST_AND_LIMITS.md`](docs/COST_AND_LIMITS.md), [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
-
-### Telegram (optional, ~3 min)
-
-1. Create a bot with `@BotFather` → grab the token.
-2. Open `@userinfobot` in Telegram → grab your chat id.
-3. Paste both into `.env`, set `DELIVERY_CHANNELS=file,console,telegram`.
-4. Smoke test:
-   ```bash
-   python -c "from dotenv import load_dotenv; load_dotenv('.env'); \
-              from core import delivery; \
-              delivery.alert('Mondial 2026', 'Telegram delivery wired')"
-   ```
-
----
-
-## Project layout
-
-```
-config/        rules · llm · observability · preflight · strategy · news
-core/scoring/  rules engine (PDF-verified) + tests
-core/decision/ ev_optimizer · futures · sidebets · strategy (win tilt)
-core/models/   dixon_coles · elo · blend · fit · backtest · montecarlo · predict
-core/data/     football_data · oddsapi(devig) · api_football · soccerdata_io ·
-               cache · results_io · teams(normalize)
-core/llm/      model-agnostic router + providers (Claude → Gemini → OpenAI)
-core/obs/      tracing · logs · cost ledger · rate limit · runs ledger
-core/delivery/ file · telegram · console fan-out
-core/reliability.py    retry + source fallback
-orchestrator/  run.py demo · pipeline.process_match · agents/news_agent
-schedule/      scheduler (catch-up) · runner (daemon) · watchdog (heartbeat)
-store/         SQLite schema · db · repo (upcoming/finished matches)
-tools/         dashboard · metrics CLI · calibrate · seed_fixtures
-data/          wc2026_groups.csv · wc2026_detonator_fixtures.csv
-docs/          BLUEPRINT · USER_GUIDE · RELIABILITY · SCHEDULING · OBSERVABILITY ·
-               COST_AND_LIMITS · LLM_AND_COSTS · STRATEGY · FAILURE_MODES ·
-               SOURCES · VERIFICATION · NEWS_AGENT_PLAYBOOK · rules.pdf ·
-               scoring_template.xlsx
-tests/         pytest (138 tests)
-```
-
----
-
-## Documentation
-
-| File | What it covers |
-|---|---|
-| [`docs/BLUEPRINT.md`](docs/BLUEPRINT.md) | Full system design (the canonical reference) |
-| [`CLAUDE.md`](CLAUDE.md) | Golden rules + component-status matrix + day-by-day build plan |
-| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | How to use the system day-to-day |
-| [`docs/VERIFICATION.md`](docs/VERIFICATION.md) | Self-audit: rules → code → test |
-| [`docs/RELIABILITY.md`](docs/RELIABILITY.md) | Retry / fallback / never-fail-silently |
-| [`docs/SCHEDULING.md`](docs/SCHEDULING.md) | Scheduler + watchdog + concurrency |
-| [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) | Tracing / logging / metrics / cost ledger |
-| [`docs/COST_AND_LIMITS.md`](docs/COST_AND_LIMITS.md) | Free-tier budgets, expected cost ($0) |
-| [`docs/FAILURE_MODES.md`](docs/FAILURE_MODES.md) | Production-hardening playbook |
-| [`docs/STRATEGY.md`](docs/STRATEGY.md) | Max-EV vs max-P(win): the strategy tilt |
-| [`docs/SOURCES.md`](docs/SOURCES.md) | Data source audit |
-| [`docs/LLM_AND_COSTS.md`](docs/LLM_AND_COSTS.md) | LLM router + provider costs |
-| [`docs/NEWS_AGENT_PLAYBOOK.md`](docs/NEWS_AGENT_PLAYBOOK.md) | News/Injury agent rubric and budget |
-| [`docs/rules.pdf`](docs/rules.pdf) | Original Toto Mondial 2026 rules (Hebrew) |
-| [`docs/scoring_template.xlsx`](docs/scoring_template.xlsx) | Spreadsheet mirror of the scoring engine |
-
----
-
-## Testing
+40+ CLI tools, all in `tools/`. The unified entry point is `tools/toto.py`:
 
 ```bash
-pytest tests/ -q              # full suite (138 tests)
-pytest tests/test_scoring.py  # rules engine alone
-pytest tests/test_ev.py       # EV optimizer (proven == brute force ±0.001)
-pytest tests/test_delivery.py # render_card + Telegram payload
+PYTHONPATH=. python tools/toto.py help              # list every subcommand
+PYTHONPATH=. python tools/toto.py standings --n 10
+PYTHONPATH=. python tools/toto.py match Mexico "South Africa"
+PYTHONPATH=. python tools/toto.py player Vaadia
+PYTHONPATH=. python tools/toto.py suggest Mexico "South Africa"
 ```
 
-Golden rule: **any change to scoring or EV math must keep the PDF examples
-green** (France 2-1 → 3.000, draw 1-1 → 5.625, final 2-2 → 12.5).
+Plus the audit tools:
 
-CI runs the full suite on every push/PR to `main` — see
-[`.github/workflows/test.yml`](.github/workflows/test.yml).
+```bash
+PYTHONPATH=. python tools/audit_martj42.py             # DC training data freshness
+PYTHONPATH=. python tools/audit_negev_multipliers.py   # drift watchdog
+PYTHONPATH=. python tools/audit_team_aliases.py        # cross-source name reconciliation
+PYTHONPATH=. python tools/run_one_card_live.py "Mexico" "South Africa" --window T-7m
+PYTHONPATH=. python tools/news_preview.py "Mexico" "South Africa"
+PYTHONPATH=. python tools/llm_audit.py --hours 24      # 5-section runbook
+```
 
----
+## Documentation map
 
-## Contributing / forking
+| Doc | Audience | What's inside |
+|---|---|---|
+| [CLAUDE.md](./CLAUDE.md) | dev (incl. AI sessions) | Build order, day-by-day changelog, golden rules, component matrix |
+| [docs/SERVER.md](./docs/SERVER.md) | operator | Live VM ops: every .env var, SQL queries, Honeycomb queries, alert taxonomy |
+| [docs/SCHEDULING.md](./docs/SCHEDULING.md) | operator | Daemon internals, hooks, safe-update procedure |
+| [docs/STRATEGY.md](./docs/STRATEGY.md) | operator | Win-the-pool tilt, how to activate mid-tournament |
+| [docs/BLUEPRINT.md](./docs/BLUEPRINT.md) | architect | Original system design |
+| [docs/FAILURE_MODES.md](./docs/FAILURE_MODES.md) | dev | Degradation ladder per component |
+| [docs/EDGE_CASES.md](./docs/EDGE_CASES.md) | dev / ops | What's tested vs not, with closing tools per gap |
+| [docs/SYSTEM_ARCHITECTURE.html](./docs/SYSTEM_ARCHITECTURE.html) | anyone (browser) | Visual walkthrough of every pipeline stage |
+| [docs/FUTURES_LOCK_2026.md](./docs/FUTURES_LOCK_2026.md) | operator | The 4 pre-tournament picks + analysis |
+| [docs/COST_AND_LIMITS.md](./docs/COST_AND_LIMITS.md) | operator | Per-provider quotas + projected burn |
 
-This is a personal project tied to a specific friends' pool with specific
-scoring rules, but the EV-under-custom-scoring pattern generalizes. If you
-fork:
+## Why these design choices
 
-- The rules engine and EV optimizer (`core/scoring`, `core/decision`) are the
-  reusable core.
-- `config/rules.py` is the single source of truth for tables and payouts —
-  swap in your own pool's rules there.
-- The 10 `docs/*.md` files explain the design top-to-bottom; start with
-  `BLUEPRINT.md`.
+### "Why not LangChain / Agent SDK?"
+Because the flow is a scheduled pipeline, not a conversational graph. Adding
+an agent runtime would buy us nothing (we already have ContextVars,
+tracing, retries, rate limits) and cost us debuggability. The "agent" here
+is one LLM call inside a `try/except` with a 3-tier parse repair.
 
-No license is currently declared — if you want to fork or reuse beyond
-reading, please open an issue first.
+### "Why no vector DB / RAG?"
+The data is live + structured. We need today's lineup, today's odds,
+today's injuries. Retrieval-augmented anything against last-week's
+documents would lose to a direct API call. The news agent calls Brave
+fresh on every match window.
 
----
+### "Why is the market signal weighted highest?"
+Because Pinnacle is sharper than any model we can build with 4 years
+of national-team data. Pinnacle aggregates the entire sharp-money pool;
+Dixon-Coles aggregates a noisy historical signal. We weight the
+information source by its accuracy, not its complexity.
 
-## Disclaimer
+### "Why no async?"
+The work is I/O-bound but low-frequency (≤ 4 concurrent matches). Threads
++ a shared token-bucket rate limiter give us true parallelism (Python
+releases the GIL during I/O) with simpler debuggability than asyncio.
 
-For fun only. Bookmaker odds appear here as a **data signal** (the sharpest
-free probability estimate) and because they're the scoring multiplier in the
-friends' pool. The system does **not** place bets — it advises; you enter
-picks in the Toto app yourself.
+### "Why SQLite?"
+The whole tournament fits in ~10 MB. Postgres would add ops overhead for
+zero benefit. SQLite's online `.backup` mode handles concurrent reads
+during nightly snapshots.
 
-The model leans on the market because the market is hard to beat; the edge is
-in optimizing expected points under custom scoring rules, not in
-out-predicting Pinnacle.
+### "Why €5/mo Hetzner instead of Lambda?"
+Long-polling Telegram + a 24/7 watchdog need a persistent process; serverless
+cold-starts would miss windows. Hetzner gives us 100% control, deterministic
+latency, and is cheaper than a $0.001/request Lambda at our scale.
+
+## Test coverage
+
+```
+$ pytest tests/ -q
+600 passed in 21.44s
+```
+
+Every external dependency is **injectable** (`fetch=`, `read=`,
+`http_get=`) so the entire test suite runs offline with zero API credits.
+
+## Contributing
+
+Currently a single-operator project. If you're a future LLM session: read
+[CLAUDE.md](./CLAUDE.md) §"Onboarding a new LLM session" first.
+
+## License
+
+Private. Not for redistribution.

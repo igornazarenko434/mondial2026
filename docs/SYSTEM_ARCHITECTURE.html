@@ -234,7 +234,7 @@
 
 <header>
   <h1>Mondial 2026 — System Architecture</h1>
-  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-07 (Day 9.8 post-match Negev sync + 4-line cron canonical; Day 9.9 ⚠ Negev failure-alert; Day 9.10 LLM error_class + parse_tier + raw_excerpt + over-budget short-circuit + tools/llm_audit.py).</div>
+  <div class="sub">End-to-end explanation of every pipeline stage, calculation, and failure mode. Updated 2026-06-09 (Day-9.22 symmetric tracked-participant blocks across all 4 Telegram message types + T+1m kickoff card window + per-card friends footer; Day-9.23 edge-case audit toolkit: news_preview, run_one_card_live, audit_martj42, audit_negev_multipliers, audit_team_aliases, telegram 4096-char cap test, news deltas dashboard, EDGE_CASES.md doc).</div>
 </header>
 
 <nav class="toc">
@@ -265,11 +265,13 @@
 <section id="tldr">
   <h2>TL;DR — what this system does</h2>
   <div class="panel info">
-    <p><strong>Goal:</strong> Win our friends' Toto pool ("Negev Toto 2026", ₪32,426 prize pool, 63 humans) by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
-    <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × locked odds, renders a 7-9 line card, and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to Honeycomb.</p>
-    <p><strong>Synchronization with Negev:</strong> After matches finish, cron-scheduled <code>sync_negev_standings.py</code> (Day-9.6) pulls Negev's authoritative server-side points back into our local <code>standings</code>, and <code>post_match_audit.py</code> (Day-9.8) cross-checks our <code>score_match()</code> calc against Negev's — silent if Δ=0, 🔍 Telegram if any discrepancy. 22 MCP tools (5 generic + 14 typed reads + 3 typed writes) live at <code>integrations/negev_toto_mcp.py</code>.</p>
-    <p><strong>Where:</strong> Hetzner CPX22 VM ($10 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>.</p>
-    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa). My opener pick is saved live: <strong>Mexico 2 - South Africa 1</strong> (detonator on).</p>
+    <p><strong>Goal:</strong> Win our friends' Toto pool ("Negev Toto 2026", ₪32,426 prize pool, <strong>67 humans</strong>) by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
+    <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × Negev's points multiplier, renders a 7-9 line card (with a Day-9.22 "👥 Picks" footer when <code>FRIEND_PARTICIPANTS</code> is set), and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to Honeycomb.</p>
+    <p><strong>Synchronization with Negev:</strong> After matches finish, cron-scheduled <code>sync_negev_standings.py</code> (Day-9.6) pulls Negev's authoritative server-side points back into our local <code>standings</code>, and <code>post_match_audit.py</code> (Day-9.8) cross-checks our <code>score_match()</code> calc against Negev's — silent if Δ=0, 🔍 Telegram if any discrepancy. 30+ MCP tools (5 generic + 19 typed reads + 4 typed writes) live at <code>integrations/negev_toto_mcp.py</code>. The unified inspector <code>tools/toto.py</code> wraps every read question into a subcommand surface.</p>
+    <p><strong>Day-9.22 — symmetric tracked participants:</strong> A new <code>FRIEND_PARTICIPANTS</code> env var lets the operator track any number of Negev display names. Every Telegram message (📊 standings, ☀️ daily summary, ⚽ T+1m kickoff card, 🃏 match card) renders the same per-person audit (rank / total / split / gap-to-leader / gap-to-second / gap-to-you) for the operator + each tracked friend. Adding a friend later is a one-line .env edit.</p>
+    <p><strong>Day-9.23 — edge-case toolkit:</strong> Six new audit tools close the gap between "600 unit tests pass" and "the news agent works on real WC2026 data". See <a href="EDGE_CASES.md">EDGE_CASES.md</a> for the full matrix.</p>
+    <p><strong>Where:</strong> Hetzner CPX22 VM (€5 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>.</p>
+    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa).</p>
   </div>
 </section>
 
@@ -293,8 +295,8 @@
     <tr><td>Delivery</td><td>Telegram Bot API</td><td>Push-to-phone, free, 30 msg/sec global</td></tr>
     <tr><td>Historical results (DC fit)</td><td>github.com/martj42/international_results</td><td>Maintained CSV, ~49k rows back to 1872</td></tr>
     <tr><td>Elo ratings</td><td>eloratings.net/World.tsv</td><td>Standard reference, updated daily</td></tr>
-    <tr><td>Test framework</td><td>pytest</td><td>466 tests, ~17s full suite (after Day-9.10 LLM observability additions)</td></tr>
-    <tr><td>Friends' Toto app</td><td>negev-toto.web.app (Firebase Auth + Firestore)</td><td>22 MCP tools; 3 writes gated by <code>NEGEV_ALLOW_WRITES=1</code> + module check + Firestore rules</td></tr>
+    <tr><td>Test framework</td><td>pytest</td><td>600 tests, ~21s full suite (Day-9.22 conftest.py autouse singleton-isolation fixture eliminated previous test-ordering fragility)</td></tr>
+    <tr><td>Friends' Toto app</td><td>negev-toto.web.app (Firebase Auth + Firestore)</td><td>30+ MCP tools (Day-9.6 → 9.22); writes gated by <code>NEGEV_ALLOW_WRITES=1</code> + module check + Firestore rules</td></tr>
     </tbody>
   </table>
 </section>
@@ -883,7 +885,7 @@ crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pr
 
 <!-- =========== TELEGRAM TAXONOMY =========== -->
 <section id="telegram">
-  <h2>Stage 13 — Telegram message taxonomy (5 types after Day-9.8)</h2>
+  <h2>Stage 13 — Telegram message taxonomy (6 types after Day-9.22)</h2>
 
   <p>All messages go to the same <code>TELEGRAM_CHAT_ID</code>. Per-chat rate limit is 1/sec — we send 2-3 messages/day on quiet days, ~12 on match days. Audit (🔍) is silent unless there's a real discrepancy, so most days the user sees 📊 + ☀️ only.</p>
 
@@ -932,8 +934,25 @@ crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pr
       <td>on Negev MCP unreachable</td>
       <td><strong>Day-9.9.</strong> Classifies the error (<code>config</code> / <code>auth</code> / <code>rules</code> / <code>network</code> / <code>import</code> / <code>unknown</code>) and sends a short body with the category + remediation hint + log path. Fires regardless of <code>--telegram</code> so the 6 silent (<code>--quiet</code>) cron runs also warn. Verify with <code>--test-alert</code>.</td>
     </tr>
+    <tr>
+      <td><span class="pill">⚽</span></td>
+      <td>daemon (<code>schedule/kickoff_cards.py</code>)</td>
+      <td><code>delivery.summary()</code></td>
+      <td>~1 min after each kickoff</td>
+      <td><strong>Day-9.22 KICKOFF CARD.</strong> Fires once per match in the [T+1m, T+15m] catch-up window via the new <code>_maybe_kickoff_cards</code> tick hook. Idempotent via runs ledger keyed (match_id, "kickoff"). Body: per-tracked-person picks + starting XI (when api-football has posted it) + compact standings. Concurrent kickoffs each get their own distinct message with a shared standings snapshot.</td>
+    </tr>
     </tbody>
   </table>
+
+  <h3>Day-9.22 symmetric tracked-participant blocks (applies to 📊 + ☀️ + ⚽ + 🃏)</h3>
+  <p>Set <code>FRIEND_PARTICIPANTS=Vaadia,Alon,...</code> (comma-separated Negev displayNames, discover via <code>tools/find_member.py &lt;substring&gt;</code>) and every Telegram message renders the same per-person audit for the operator + each friend:</p>
+  <ul>
+    <li><strong>📊 standings sync:</strong> A "TRACKED 👥" header block with full audit (rank / total / split / vs leader / vs second / vs you) per person, before Top-5. Friends in Top-5 / Around-You get a <code>← tracked</code> marker.</li>
+    <li><strong>☀️ daily summary:</strong> A "Tracked 👥:" section with one compact line per person, pulled fresh from Negev so ranks match the app exactly. Falls back to the legacy local-DB "Your score" line when Negev unreachable.</li>
+    <li><strong>⚽ kickoff card:</strong> The "👥 Picks" block above the lineups, showing what each tracked person predicted for THIS match. Compact standings footer mirrors ☀️.</li>
+    <li><strong>🃏 match card (T-60m/-15m/-7m):</strong> The "👥 Picks" footer appended AFTER the MAX_LINES cap so it's never truncated by the model-output cap.</li>
+  </ul>
+  <p>One render function (<code>core/reporting/people.py::render_block / render_compact / render_match_picks_block</code>) feeds all four message sites. Tested by 24 unit tests in <code>tests/test_reporting_people.py</code>.</p>
 
   <h3>Why <code>delivery.summary()</code> exists (Day-9.8)</h3>
   <p>Before Day-9.8, the 📊 standings message used <code>delivery.alert()</code> which prepended a ⚠️ prefix — making it look like an error. <code>delivery.summary()</code> sends the same text without the prefix. Used by ☀️, 📊, and 🔍 — all informational messages.</p>
@@ -942,8 +961,8 @@ crontab -u mondial -l    # verify exactly 4 active lines (+ comments)</code></pr
   <table>
     <tr><th>Day type</th><th>Messages</th></tr>
     <tr><td>Pre-tournament / off day</td><td>2: 📊 + ☀️ (and 🔍 sometimes; usually silent)</td></tr>
-    <tr><td>1 match day (group stage)</td><td>2 + 4 windows × 1 match = ~6</td></tr>
-    <tr><td>4 matches day (peak group stage)</td><td>2 + 4 windows × 4 = ~18 (under 1/sec rate limit by 3 orders of magnitude)</td></tr>
+    <tr><td>1 match day (group stage)</td><td>2 + 4 windows × 1 match + 1 ⚽ kickoff = ~7</td></tr>
+    <tr><td>4 matches day (peak group stage)</td><td>2 + 4 windows × 4 + 4 ⚽ kickoffs = ~22 (under 1/sec rate limit by 3 orders of magnitude)</td></tr>
     <tr><td>Day with audit discrepancy</td><td>+1 🔍 alert (rare; means a real investigation is needed)</td></tr>
   </table>
 </section>
