@@ -177,6 +177,88 @@ def test_get_standings_include_bots_explicit_false_excludes_them(fake_firestore)
     assert all(r.get("role") != "bot" for r in rows)
 
 
+def test_get_standings_baseline_present_subtracts_residue(fake_firestore, monkeypatch):
+    """Day-9.16: when a pre-tournament baseline snapshot exists, every user's
+    contribution = max(0, current_pointsTotal - baseline_pointsTotal). This
+    handles bot residue (Chinchilla's 4.3 from old tournaments) AND survives
+    the case where games start (humans gain real pts which should display)."""
+    tid = "tid-baseline"
+    # Seed: Igor's pre-game state is 0; Chinchilla has 4.3 residue.
+    # Post-game (right now): Igor scored 5 pts in WC2026, Chinchilla scored 1.
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/u-igor", "fields": {
+            "uid": "u-igor", "displayName": "Igor",
+            "role": "player", "tournaments": [tid],
+            "pointsTotal": 5.0,           # gained 5 pts post-game
+            "exactScoreCount": 1}},
+        {"path": "users/bot_chinchilla", "fields": {
+            "uid": "bot_chinchilla", "displayName": "Chinchilla",
+            "role": "bot", "isBot": True, "tournaments": [tid],
+            "pointsTotal": 5.3,           # was 4.3 baseline + 1 new pt
+            "exactScoreCount": 1}},
+    ]
+
+    # Patch _load_baseline to return our test baseline (no real disk file)
+    def fake_baseline(tid_arg):
+        return {
+            "u-igor":          {"pointsTotal": 0.0,  "exactScoreCount": 0},
+            "bot_chinchilla":  {"pointsTotal": 4.3,  "exactScoreCount": 0},
+        }
+    monkeypatch.setattr(ntm, "_load_baseline", fake_baseline)
+
+    rows = ntm.toto_get_standings(tid)
+    by_name = {r["player"]: r for r in rows}
+    # Igor's contribution = 5.0 - 0 = 5.0 (correct WC2026 score)
+    assert by_name["Igor"]["total"] == 5.0
+    # Chinchilla's contribution = 5.3 - 4.3 = 1.0 (the new WC2026 pt, not the residue)
+    assert by_name["Chinchilla"]["total"] == 1.0
+    # Igor should rank #1 (5 pts > Chinchilla's 1 pt)
+    assert rows[0]["player"] == "Igor"
+
+
+def test_get_standings_baseline_missing_falls_back_to_bot_override(fake_firestore, monkeypatch):
+    """Day-9.16: when no baseline file exists, fall back to Day-9.15's
+    bot-override (bots zeroed entirely). Maintains pre-tournament app match
+    even without taking a snapshot."""
+    tid = "tid-no-baseline"
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/u-igor", "fields": {
+            "uid": "u-igor", "displayName": "Igor",
+            "role": "player", "tournaments": [tid],
+            "pointsTotal": 0.0}},
+        {"path": "users/bot_chinchilla", "fields": {
+            "uid": "bot_chinchilla", "displayName": "Chinchilla",
+            "role": "bot", "isBot": True, "tournaments": [tid],
+            "pointsTotal": 4.3}},
+    ]
+    monkeypatch.setattr(ntm, "_load_baseline", lambda tid_arg: {})
+    rows = ntm.toto_get_standings(tid)
+    chinchilla = next(r for r in rows if r["player"] == "Chinchilla")
+    assert chinchilla["total"] == 0.0    # bot override kicks in despite 4.3 raw
+    # Note: rows[0] may still be Chinchilla because all are tied at 0 and the
+    # uid 'bot_chinchilla' sorts before 'u-igor' in uid-asc. The CRITICAL
+    # assertion is that Chinchilla's 4.3 raw residue did NOT make it dominate
+    # other tied users by raw pointsTotal — it's the uid tiebreak that ranks
+    # it now, which is correct and what the app does.
+
+
+def test_get_standings_baseline_protects_negative_contribution(fake_firestore, monkeypatch):
+    """Day-9.16: if a baseline somehow exceeds the current pointsTotal
+    (manual edit, data anomaly), clamp contribution to 0 — never go
+    negative which would corrupt the sort order."""
+    tid = "tid-baseline"
+    fake_firestore["collections"]["users"] = [
+        {"path": "users/u-test", "fields": {
+            "uid": "u-test", "displayName": "TestUser",
+            "role": "player", "tournaments": [tid],
+            "pointsTotal": 3.0}},
+    ]
+    monkeypatch.setattr(ntm, "_load_baseline",
+                        lambda tid_arg: {"u-test": {"pointsTotal": 10.0}})
+    rows = ntm.toto_get_standings(tid)
+    assert rows[0]["total"] == 0.0   # 3 - 10 = -7, clamped to 0
+
+
 def test_get_standings_fully_tied_falls_back_to_uid_asc(fake_firestore):
     """Day-9.15: when pointsTotal AND exactScoreCount are both equal across
     users (the pre-tournament state — everyone at 0/0), the app sorts by

@@ -341,6 +341,27 @@ def _is_bot(u: dict) -> bool:
     return False
 
 
+def _load_baseline(tid: str) -> dict:
+    """Day-9.16: load the pre-tournament pointsTotal snapshot if it exists.
+
+    Returns {uid: {pointsTotal, directionPoints, broadBetPoints,
+    exactScoreCount}} so a caller can compute WC2026-specific contribution
+    as `current - baseline`. Returns {} if no snapshot exists yet — caller
+    falls back to the Day-9.15 bot-override behaviour.
+    """
+    import json
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "store", f"negev_baseline_{tid}.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            snap = json.load(f)
+        return snap.get("users") or {}
+    except Exception:                                  # noqa: BLE001
+        return {}
+
+
 @mcp.tool()
 def toto_get_standings(tournament_id: str | None = None,
                        extended: bool = False,
@@ -354,24 +375,27 @@ def toto_get_standings(tournament_id: str | None = None,
     the app exactly. The strategy layer that needs human-only competitors
     for "gap to leader" math should pass `include_bots=False` explicitly.
 
-    Day-9.15: the user doc's `pointsTotal` / `directionPoints` /
+    Day-9.16: the user doc's `pointsTotal` / `directionPoints` /
     `broadBetPoints` / `exactScoreCount` fields are GLOBAL across every
-    tournament the user has joined (verified: Chinchilla has 4.3 pts
-    accumulated across 22 tournaments). The Negev app shows tournament-
-    specific points, which live in a subcollection we can't read directly
-    (403). Pre-tournament-start, EVERYONE has 0 contribution to this
-    tournament, so the global residue (only bots have any) is what
-    diverges. We zero out bot stats here so the standings ordering matches
-    the app's pre-tournament view exactly. Once WC2026 games begin and
-    Negev's server-side scorer increments these fields for THIS
-    tournament, the residue from other tournaments will keep bots'
-    pointsTotal inflated by their old totals — at which point we should
-    either (a) audit whether the app filters bots from the displayed
-    standings entirely, or (b) find a way to read tournament-specific
-    points. Until then, the override is a faithful pre-tournament match.
+    tournament the user has joined (Chinchilla has 4.3 pts residue from
+    22 prior tournaments). The Negev app shows tournament-specific points,
+    which live in a subcollection we can't read (403). To compute
+    WC2026-specific contribution we subtract a baseline snapshot:
+
+      contribution = max(0, current_pointsTotal - baseline_pointsTotal)
+
+    The baseline is captured by `tools/snapshot_negev_baseline.py`,
+    persisted at `store/negev_baseline_<tid>.json`. If the baseline file
+    EXISTS (recommended), every user's contribution is computed
+    correctly — humans (baseline=0) show real WC2026 pts, bots
+    (baseline=4.3) show only the new gain. If the baseline file is
+    MISSING, we fall back to Day-9.15's bot-override (zero bot stats
+    entirely) which only works correctly pre-tournament.
     """
     tid = _tid(tournament_id)
     users = _read_all("users")
+    baseline = _load_baseline(tid)                     # {} if no snapshot
+    has_baseline = bool(baseline)
     rows = []
     for u in users:
         if tid not in (u.get("tournaments") or []):
@@ -379,15 +403,32 @@ def toto_get_standings(tournament_id: str | None = None,
         is_bot = _is_bot(u)
         if not include_bots and is_bot:
             continue
-        # Day-9.15: override bot stats to 0 (see docstring above).
-        if is_bot:
+        # Read raw globals
+        cur_total = float(u.get("pointsTotal") or 0)
+        cur_direction = float(u.get("directionPoints") or 0)
+        cur_broad = float(u.get("broadBetPoints") or 0)
+        cur_exact = int(u.get("exactScoreCount") or 0)
+
+        if has_baseline:
+            # Day-9.16: subtract baseline to get WC2026-specific contribution.
+            # Works correctly for bots AND for humans who might have residue
+            # from other concurrent tournaments. Clamped to 0 so a residue
+            # mismatch can't go negative.
+            b = baseline.get(u.get("uid"), {})
+            total = max(0.0, cur_total - float(b.get("pointsTotal") or 0))
+            direction = max(0.0, cur_direction - float(b.get("directionPoints") or 0))
+            broad = max(0.0, cur_broad - float(b.get("broadBetPoints") or 0))
+            exact = max(0, cur_exact - int(b.get("exactScoreCount") or 0))
+        elif is_bot:
+            # Day-9.15 fallback: no baseline available. Zero bots entirely so
+            # historical residue (Chinchilla 4.3) doesn't put them at the top
+            # pre-tournament. Once games start without a baseline, this
+            # under-counts bots; capture a baseline to upgrade behaviour.
             total = direction = broad = 0.0
             exact = 0
         else:
-            total = float(u.get("pointsTotal") or 0)
-            direction = float(u.get("directionPoints") or 0)
-            broad = float(u.get("broadBetPoints") or 0)
-            exact = int(u.get("exactScoreCount") or 0)
+            total, direction, broad, exact = cur_total, cur_direction, cur_broad, cur_exact
+
         rows.append({
             "player": u.get("displayName") or u.get("uid", "?"),
             "uid": u.get("uid"),
