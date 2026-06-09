@@ -130,3 +130,45 @@ def test_friend_section_NOT_truncated_by_line_cap():
     # All 3 names must appear in output
     for name in ("Igor", "Vaadia", "David"):
         assert name in txt
+
+
+def test_worst_case_render_with_long_signal_failures():
+    """Day-9.23 §E: when every signal fails AND a friends section is
+    appended, the body must still parse + stay well-formed (no truncated
+    mid-line, no missing newline)."""
+    card = {
+        "home": "Bosnia-Herzegovina", "away": "Cape Verde Islands",
+        "stage": "Group", "group": "A",
+        "kickoff_local": "2026-06-11 22:00",
+        "detonator": True,
+        "locked_odds": {},
+        "model_prob":  {"H": .33, "D": .34, "A": .33},
+        "pick_direction": "D",
+        "pick_exact_score": {"home": 1, "away": 1},
+        "modal_score":      {"home": 1, "away": 1},
+        "expected_points": 1.0,
+        "signals_used":   [],
+        "signals_failed": ["dixon_coles", "elo", "market", "news"],
+        "failure_reasons": {
+            "dixon_coles": "fit failed: not enough recent results",
+            "elo":         "eloratings.net scrape failed: HTTP 503",
+            "market":      "odds_api over budget — 500/500 used",
+            "news":        "all 3 LLMs failed: RateLimitTimeout / 429 / 500",
+        },
+        "ev_pathway": "modal_fallback",
+        "window": "T-7m",
+        "friend_picks_section": (
+            "👥 Picks\n"
+            "  Igor: Bosnia-Herzegovina 1 — Cape Verde Islands 1   ← you\n"
+            "  Vaadia: (no pick yet)"),
+    }
+    txt = render_card(card)
+    # Every line is complete (each line ends only when intended)
+    assert not txt.endswith("...")
+    assert "Igor" in txt
+    assert "Vaadia" in txt
+    # All 4 ⚠ failure reasons present
+    for sig in ("dc", "elo", "market", "news"):
+        assert f"⚠{sig}" in txt
+    # Body stays under Telegram cap
+    assert len(txt) < 4096

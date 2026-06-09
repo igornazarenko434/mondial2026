@@ -184,6 +184,72 @@ def show_news_card_audit(hours: int) -> None:
                 print(f"     ↳ {pname} failed: {ec}  {em!r}")
 
 
+def show_news_deltas_dashboard(hours: int) -> None:
+    """Day-9.23: per-card news_deltas + confidence visual. Catches the
+    'news always returns 0.0/0.0 NEUTRAL' degradation — if every card
+    shows 0/0 with confidence=low, the news agent is silently failing
+    even when parse_tier=strict."""
+    banner(f"5. NEWS DELTAS DASHBOARD — last {hours}h (catches silent-NEUTRAL drift)")
+    try:
+        conn = connect()
+    except Exception as e:                              # noqa: BLE001
+        print(f"  (mondial.db unreadable: {e})")
+        return
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    try:
+        rows = conn.execute(
+            "SELECT match_id, window, created_at, payload_json FROM predictions "
+            "WHERE created_at >= ? ORDER BY created_at DESC LIMIT 30",
+            (since,)).fetchall()
+    except sqlite3.OperationalError as e:
+        print(f"  (predictions table missing: {e})")
+        return
+    if not rows:
+        print("  (no predictions in window)")
+        return
+    print(f"  {'when':<20} {'match':<8} {'win':<5} {'home_δ':<10} "
+          f"{'away_δ':<10} {'conf':<8} {'clamped?':<10} {'provider':<10}")
+    print("  " + "-" * 90)
+    neutral_count = 0
+    nonzero_count = 0
+    for r in rows:
+        try:
+            c = json.loads(r["payload_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            c = {}
+        hd = c.get("news_home_delta", 0)
+        ad = c.get("news_away_delta", 0)
+        conf = c.get("news_confidence", "?")
+        clamped = "✓" if (c.get("news_home_delta_clamped")
+                           or c.get("news_away_delta_clamped")) else "-"
+        prov = c.get("news_provider") or "-"
+        when = (r["created_at"] or "")[:19]
+        if abs(hd) < 0.001 and abs(ad) < 0.001:
+            neutral_count += 1
+        else:
+            nonzero_count += 1
+        # Visual delta bar (-0.6 to +0.6 → 12 chars)
+        def bar(d):
+            if not isinstance(d, (int, float)):
+                return "?"
+            pos = int(round(d * 10))
+            return f"{d:+.2f}"
+        print(f"  {when:<20} {r['match_id']!s:<8} {r['window']:<5} "
+              f"{bar(hd):<10} {bar(ad):<10} {conf:<8} {clamped:<10} {prov:<10}")
+    print()
+    total = neutral_count + nonzero_count
+    if total:
+        pct_neutral = neutral_count / total * 100
+        flag = ""
+        if pct_neutral > 70:
+            flag = "  🛑 HIGH — news_agent likely failing silently"
+        elif pct_neutral > 40:
+            flag = "  ⚠ elevated"
+        print(f"  Neutral (0/0) deltas: {neutral_count}/{total}  "
+              f"({pct_neutral:.0f}%){flag}")
+        print(f"  Non-zero deltas:      {nonzero_count}/{total}")
+
+
 def show_recent_failures(hours: int, limit: int = 10) -> None:
     """Latest LLM failures across all providers — with timestamp, provider,
     error class, and message. Useful for 'what just broke?'"""
@@ -225,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
     show_per_provider_ledger(args.hours, args.provider)
     show_quota_state()
     show_news_card_audit(args.hours)
+    show_news_deltas_dashboard(args.hours)            # Day-9.23: §F
     show_recent_failures(args.hours)
 
     print("\n  ✓ Done. Each section above answers ONE of the questions on the\n"
