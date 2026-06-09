@@ -170,9 +170,22 @@ def _parse_date(s: str | None) -> str | None:
         return None
 
 
+# Day-9.21: per-query in-memory cache so retries / overlapping window passes
+# within ~5 min don't re-burn Brave credits. Also serves STALE results
+# when the budget brake fires, matching Day-9.20's api_football pattern.
+import time as _time
+_BRAVE_CACHE: dict[tuple, tuple[float, list[dict]]] = {}
+BRAVE_CACHE_TTL_SEC = int(os.environ.get("NEWS_BRAVE_CACHE_TTL", "300"))  # 5 min
+
+
 def web_search(query: str, n: int = 5, snippet_len: int = 250,
                freshness: str = DEFAULT_FRESHNESS) -> list[dict]:
     """Run one Brave search query. Returns []  if no key or any failure.
+
+    Day-9.21: per-(query, freshness, n) in-memory cache with 5-min TTL.
+    When the budget brake hits we serve the STALE cached value (if any)
+    rather than nothing — degrades gracefully like api_football's
+    Day-9.20 pattern. Override TTL via NEWS_BRAVE_CACHE_TTL env.
 
     Args:
       query:       the search string
@@ -185,11 +198,22 @@ def web_search(query: str, n: int = 5, snippet_len: int = 250,
     h = _headers()
     if not h:
         return []
+    cache_key = (query, freshness, n)
+    now = _time.time()
+    cached = _BRAVE_CACHE.get(cache_key)
     # Quota gates BEFORE the HTTP — see module docstring; this never blocks
     # delivery, just returns no web results so API-Football alone drives the LLM.
     ok, _reason = _budget_clear()
     if not ok:
+        # Day-9.21: serve stale rather than empty when budget brake fires
+        if cached:
+            log.warning("brave_search budget brake → serving STALE results "
+                        "for query %r (age %.0fs)", query[:60], now - cached[0])
+            return cached[1]
         return []
+    # Fresh cache hit (within TTL) — skip the HTTP entirely
+    if cached and now - cached[0] < BRAVE_CACHE_TTL_SEC:
+        return cached[1]
     from core import obs
     params = {"q": query, "count": max(1, min(n, 20)), "freshness": freshness,
               "safesearch": "moderate", "result_filter": "web"}
@@ -205,7 +229,7 @@ def web_search(query: str, n: int = 5, snippet_len: int = 250,
     except ValueError:
         log.warning("brave_search returned non-JSON")
         return []
-    results = []
+    results: list[dict] = []
     for item in (body.get("web") or {}).get("results", [])[:n]:
         results.append({
             "title":   _trim(item.get("title", ""),       120),
@@ -213,6 +237,8 @@ def web_search(query: str, n: int = 5, snippet_len: int = 250,
             "url":     item.get("url", "") or "",
             "date":    _parse_date(item.get("page_age")),
         })
+    # Day-9.21: cache for ~5 min; serves retries + stale-on-budget
+    _BRAVE_CACHE[cache_key] = (now, results)
     return results
 
 
