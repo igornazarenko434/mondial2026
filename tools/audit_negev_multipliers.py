@@ -12,8 +12,11 @@ This tool:
   2. Diffs against config/rules.py::SCORE_TABLE cell-by-cell
   3. Reports any drift with severity classification
   4. Suggests remediation steps
+  5. With --telegram, fires a Telegram alert ONLY on detected drift
+     (silent on the happy path — perfect for daily cron).
 
   PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py
+  PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py --telegram
 
 Negev's three grids → our keys mapping (Day-9.7 verified all 49×3=147 cells):
   groupStage          → SCORE_TABLE["group"]
@@ -21,8 +24,10 @@ Negev's three grids → our keys mapping (Day-9.7 verified all 49×3=147 cells):
   semiAndFinal        → SCORE_TABLE["final"]
 
 Cost: 1 Negev call. Free.
+Exit code: 0 on aligned, 1 on drift (cron --telegram fires alert on 1).
 """
 from __future__ import annotations
+import argparse
 import os
 import sys
 
@@ -37,7 +42,34 @@ GRID_MAP = {
 }
 
 
+def _telegram_alert(drift_lines: list[str]) -> bool:
+    """Fire a ⚠ alert. Returns True if delivery succeeded."""
+    try:
+        from core import delivery
+        body = ("Negev SCORING multipliers drifted from our local config — "
+                "ev_optimizer is computing against the wrong payoff function "
+                "until config/rules.py is patched.\n\n"
+                "First few drifted cells:\n  " +
+                "\n  ".join(drift_lines[:8]) +
+                ("\n  ... +%d more" % (len(drift_lines) - 8)
+                 if len(drift_lines) > 8 else "") +
+                "\n\nFix: re-run with no flags, copy the diff into "
+                "config/rules.py::_GROUP / _KO / _FINAL, "
+                "pytest tests/, systemctl restart mondial2026.")
+        return bool(delivery.alert("Negev multiplier drift detected", body))
+    except Exception as e:                                # noqa: BLE001
+        print(f"  ⚠ Telegram alert send failed: {e}")
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="audit_negev_multipliers")
+    p.add_argument("--telegram", action="store_true",
+                   help="On drift, fire ⚠ Telegram alert via delivery.alert(). "
+                        "Silent on the happy path — safe for daily cron.")
+    p.add_argument("--quiet", action="store_true",
+                   help="Suppress success-line output for cron logs")
+    args = p.parse_args(argv)
     print()
     print(f"  ╔════════════════════════════════════════════════════════════╗")
     print(f"  ║  Negev multiplier alignment check")
@@ -146,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"    4. Re-run pytest tests/ — scoring tests pin the old values via")
         print(f"       direct lookups (will need updating).")
         print(f"    5. systemctl restart mondial2026 on the VM.")
+        if args.telegram:
+            ok = _telegram_alert([d.strip() for d in drift])
+            print()
+            print(f"  Telegram alert {'sent ✓' if ok else 'FAILED ✗'}")
         return 1
 
     # Schema-mismatch classification: cells with goals ≥4 are blowouts
@@ -181,11 +217,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    Missing on Negev side: {c}")
         return 1
 
-    print()
-    print(f"  ✓ All {matches} comparable multipliers aligned. "
-          f"Scoring engine matches Negev's grid byte-for-byte where they overlap.")
-    print(f"  ✓ {expected_skips + expected_extras} schema deltas are all "
-          f"expected (blowout cells handled by TABLE_CAP).")
+    if not args.quiet:
+        print()
+        print(f"  ✓ All {matches} comparable multipliers aligned. "
+              f"Scoring engine matches Negev's grid byte-for-byte where they overlap.")
+        print(f"  ✓ {expected_skips + expected_extras} schema deltas are all "
+              f"expected (blowout cells handled by TABLE_CAP).")
     return 0
 
 

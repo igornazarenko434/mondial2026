@@ -34,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="audit_team_aliases")
     p.add_argument("--groups-csv", default="data/wc2026_groups.csv")
     p.add_argument("--force", action="store_true",
-                   help="Allow api-football calls even when budget > 50% used")
+                   help="Allow api-football calls even when budget > 50%% used")
     args = p.parse_args(argv)
 
     roster = _read_roster(args.groups_csv)
@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     from core.data import teams
     from core.data import api_football as af
     from core.data import eloratings_codes
+    # eloratings_codes exposes code→team; build the inverse for team→code lookup
+    _ELO_NAME_TO_CODE = {v: k for k, v in eloratings_codes.EL_CODE_TO_TEAM.items()}
     from core.obs.cost import ledger
 
     af_used, af_budget, af_frac = (lambda q: (q.get("used") or 0,
@@ -53,8 +55,15 @@ def main(argv: list[str] | None = None) -> int:
                                                  (q.get("budget") or 1))
                                     )(ledger().quota_status("api_football"))
     cache = af._load_team_id_cache()
+    cache_local = bool(cache)
+    if not cache_local:
+        print(f"  ⚠ api-football team-id cache empty — the file lives ONLY on")
+        print(f"    the VM (gitignored). To audit the live cache, run this tool")
+        print(f"    on the VM. The 'af-cache' column will report '(skipped)'")
+        print(f"    below; canonical / elo / martj42 checks remain accurate.")
+        print()
     print(f"  api-football budget: {af_used}/{af_budget}  "
-          f"({af_frac*100:.0f}%)  cache: {len(cache)} teams")
+          f"({af_frac*100:.0f}%)  cache: {len(cache)} team(s)")
     print()
 
     rows = []
@@ -72,28 +81,25 @@ def main(argv: list[str] | None = None) -> int:
             except Exception:                             # noqa: BLE001
                 api_resolved = False
 
-        # eloratings
-        try:
-            elo_code = eloratings_codes.code_for(team)
-            elo_ok = bool(elo_code)
-        except Exception:                                 # noqa: BLE001
-            elo_ok = False
+        # eloratings — reverse lookup against the verified code table
+        elo_ok = team in _ELO_NAME_TO_CODE
 
         # martj42 — read in main loop OK (small CSV)
         rows.append({"team": team, "canon": canon, "canon_ok": canon_ok,
                       "api_resolved": api_resolved, "elo_ok": elo_ok,
                       "martj_count": None})
 
-    # martj42 — read once
+    # martj42 — `historical_results()` returns rows already normalized to
+    # the keys `home`/`away` (NOT `home_team`/`away_team`), with normalized
+    # canonical names. No additional normalize() pass needed.
     try:
         from core.data.results_io import historical_results
         results = historical_results()
         team_counts = {}
         for r in results:
-            for side in (r.get("home_team"), r.get("away_team")):
+            for side in (r.get("home"), r.get("away")):
                 if side:
-                    team_counts[teams.normalize(side)] = \
-                        team_counts.get(teams.normalize(side), 0) + 1
+                    team_counts[side] = team_counts.get(side, 0) + 1
     except Exception as e:                                # noqa: BLE001
         print(f"  ⚠ martj42 read failed: {e}")
         team_counts = {}
@@ -107,14 +113,17 @@ def main(argv: list[str] | None = None) -> int:
     issues = []
     for r in rows:
         c = "✓" if r["canon_ok"] else "✗"
-        a = "✓" if r["api_resolved"] else "✗"
+        if not cache_local:
+            a = "n/a"                          # cache file isn't on this host
+        else:
+            a = "✓" if r["api_resolved"] else "✗"
         e = "✓" if r["elo_ok"] else "✗"
         m = r["martj_count"]
         m_s = (f"{m}" if m and m > 0 else "0 ⚠")
         print(f"    {r['team']:<22} {c:<3} {a:<9} {e:<5} {m_s:<13}")
         if not r["canon_ok"]:
             issues.append(f"{r['team']}: canonical roundtrip broken")
-        if not r["api_resolved"]:
+        if cache_local and not r["api_resolved"]:
             issues.append(f"{r['team']}: api-football team-id not cached")
         if not r["elo_ok"]:
             issues.append(f"{r['team']}: eloratings code missing")
@@ -124,7 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print(f"  ── Summary ──")
     print(f"  Canonical OK:        {sum(1 for r in rows if r['canon_ok'])}/{len(rows)}")
-    print(f"  api-football cached: {sum(1 for r in rows if r['api_resolved'])}/{len(rows)}")
+    if cache_local:
+        print(f"  api-football cached: {sum(1 for r in rows if r['api_resolved'])}/{len(rows)}")
+    else:
+        print(f"  api-football cached: (skipped — run on VM for live cache audit)")
     print(f"  eloratings code OK:  {sum(1 for r in rows if r['elo_ok'])}/{len(rows)}")
     print(f"  martj42 has rows:    {sum(1 for r in rows if r['martj_count'])}/{len(rows)}")
 
