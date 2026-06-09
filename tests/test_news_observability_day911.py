@@ -99,6 +99,35 @@ def test_external_call_raises_RateLimitTimeout_when_bucket_blocks(monkeypatch):
     assert row[2] == 0
 
 
+def test_external_call_ratelimit_uses_n_1_regardless_of_credit_units(monkeypatch):
+    """Day-9.13: rate-limit and credit accounting are independent. A
+    multi-credit outright call (e.g. odds_api units=2 for 2-region fetch)
+    must NOT need 2 ratelimit tokens — buckets have capacity 1, so
+    coupling them made 2-credit calls impossible to ever succeed.
+    Ratelimit always asks for n=1 (one HTTP request); ledger records the
+    full credit cost separately."""
+    from core import obs
+    L = CostLedger(":memory:")
+    monkeypatch.setattr("core.obs.cost._LEDGER", L)
+
+    seen_n = []
+    def fake_acquire(provider, n=1, timeout=None):
+        seen_n.append(n)
+        return True
+    monkeypatch.setattr("core.obs.ratelimit.acquire", fake_acquire)
+
+    with obs.external_call("odds_api", "outrights:wc", units=2):
+        pass
+
+    assert seen_n == [1], (
+        f"ratelimit.acquire must be called with n=1 regardless of credit "
+        f"units; got {seen_n}")
+    # And ledger still records the 2-credit cost
+    row = L.conn.execute(
+        "SELECT units FROM api_calls WHERE provider='odds_api'").fetchone()
+    assert row[0] == 2
+
+
 # ──────────────────────── Router correctness ────────────────────────────────
 
 class _FakeProvider:

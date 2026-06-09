@@ -125,8 +125,17 @@ def external_call(provider: str, endpoint: str, tokens: int = 0,
     Day-9.11: the rate-limit acquire now FAILS CLOSED — if the local token
     bucket can't be acquired within rate_timeout, we raise RateLimitTimeout
     BEFORE entering the body (was: log warning + proceed, which produced a
-    downstream 429 indistinguishable from a real upstream one)."""
-    if not ratelimit.acquire(provider, n=units, timeout=rate_timeout):
+    downstream 429 indistinguishable from a real upstream one).
+
+    Day-9.13 fix: ratelimit and credit accounting are independent concerns.
+    Rate-limit is about REQUEST FREQUENCY (one HTTP call = one token; the
+    bucket throttles politeness to the API). Credits are about QUOTA
+    (a multi-region/-market outright call can cost 2-4 credits per call).
+    Previously we passed `units` to BOTH — so a 2-credit outright call
+    needed 2 tokens, but the bucket has capacity=1 → always failed. Now
+    rate-limit always consumes 1 token; ledger.record still records the
+    full credit cost."""
+    if not ratelimit.acquire(provider, n=1, timeout=rate_timeout):
         log.warning("rate-limit timeout for %s/%s — failing closed", provider, endpoint)
         metrics.incr("rate_limit_timeout", 1, provider=provider)
         # Record the would-be call so the audit shows the local-bucket block.
