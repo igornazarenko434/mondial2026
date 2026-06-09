@@ -90,13 +90,16 @@ DO NOT:
     provided context
   - move deltas beyond ±{DELTA_CLAMP} (will be clamped anyway)
   - return any text outside the JSON object
+  - wrap the JSON in markdown code fences (no ```json, no ``` — RAW JSON only)
+  - use a leading + sign on positive numbers (use 0.15 NOT +0.15 — JSON spec
+    forbids leading + and our parser will reject it)
 
 EXAMPLE 1 — Norway vs France at T-60m, primary scan, both teams' XIs confirmed:
   Context excerpt:
     [SOURCE: API-Football lineups] Norway XI: 6 rotation players vs strongest…
     [SOURCE: brave_search "Mbappé confirmed start"] "Mbappé back in XI after knock"
   Output:
-  {{"home_goal_delta": -0.30, "away_goal_delta": +0.15, "confidence": "high",
+  {{"home_goal_delta": -0.30, "away_goal_delta": 0.15, "confidence": "high",
     "notes": ["Norway: 6 starters rotated per manager presser",
               "Mbappé: confirmed XI, France strongest"],
     "discarded_sources": []}}
@@ -435,33 +438,51 @@ def _clamp_with_provenance(x) -> tuple[float, bool, bool]:
     return max(-DELTA_CLAMP, min(DELTA_CLAMP, fx)), True, clamped
 
 
+def _strip_invalid_plus_signs(s: str) -> str:
+    """Day-9.18: JSON spec forbids leading + on positive numbers, but LLMs
+    (especially Claude) emit `+0.15` for clarity, breaking strict json.loads.
+    Defensively strip the leading + from numeric literals so we don't reject
+    perfectly-valid intent. Pattern: + followed by a digit, OR + followed
+    by a dot then digit. We only touch the + when it appears at a position
+    JSON would otherwise reject (after : or , or whitespace at line start)."""
+    # Replace ": +0.15" → ": 0.15", ", +0.15" → ", 0.15", "[\n  +0.15" → "[\n  0.15"
+    return re.sub(r"(?<=[:,\[\s])\+(?=\d)", "", s)
+
+
 def _parse_json_lenient(raw: str) -> tuple[dict | None, str]:
     """Three-tier JSON parser. Returns (data, tier).
 
     tier is one of:
-      "strict"        — raw output parsed as valid JSON directly
+      "strict"        — raw output parsed as valid JSON directly (with
+                         defensive fixes for known LLM quirks: leading-+
+                         on numbers, markdown fences anywhere in the text)
       "regex_repair"  — first/largest {...} block parsed (LLM added prose)
       "empty"         — empty input (provider returned nothing)
       "failed"        — both tiers failed (output was non-JSON garbage)
 
-    The tier is stamped on the card as `news_parse_tier` so the user can
-    tell whether neutral deltas came from "everything ran fine, just no
-    news" vs "LLM responded but the output was unparseable".
+    Day-9.18 defensive fixes (apply to all tiers):
+      1. Strip ```json / ``` markdown fences ANYWHERE in the text (Claude
+         routinely wraps responses in fences despite system-prompt orders).
+      2. Strip leading + from numbers (JSON forbids `+0.15`; the system
+         prompt's own EXAMPLE 1 used to do this and trained the LLMs).
+      3. Strip prefatory text via regex tier as before.
     """
     if not raw:
         return None, "empty"
     s = raw.strip()
-    # Strip ```json fences (the router already does this once, defensive again)
-    s = s.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    # Tier 0 cleanup: strip fences ANYWHERE — Claude can put them mid-string,
+    # add prefatory text before them, etc. Then strip invalid leading-+ signs.
+    s = s.replace("```json", "").replace("```", "").strip()
+    s_clean = _strip_invalid_plus_signs(s)
     try:
-        return json.loads(s), "strict"
+        return json.loads(s_clean), "strict"
     except json.JSONDecodeError:
         pass
-    # Tier 2: find the largest {...} block in the text
-    m = re.search(r"\{[\s\S]*\}", s)
+    # Tier 2: find the largest {...} block in the text + same defensive fixes
+    m = re.search(r"\{[\s\S]*\}", s_clean)
     if m:
         try:
-            return json.loads(m.group(0)), "regex_repair"
+            return json.loads(_strip_invalid_plus_signs(m.group(0))), "regex_repair"
         except json.JSONDecodeError:
             pass
     return None, "failed"

@@ -281,21 +281,33 @@ def check_in_range(value: float, lo: float, hi: float) -> str:
 
 # ───── Run one scenario ───────────────────────────────────────────────────────
 
-def run_scenario(s: Scenario, P) -> dict:
+def _router_for(force_provider: str | None):
+    """Build an LLMRouter limited to a single provider. None ⇒ default chain."""
+    from core.llm.router import LLMRouter
+    if force_provider is None:
+        return LLMRouter()
+    return LLMRouter(chain=[force_provider])
+
+
+def run_scenario(s: Scenario, P, force_provider: str | None = None,
+                  label_suffix: str = "") -> dict:
     from orchestrator.agents.news_agent import analyze_safe
 
-    banner(P, f"§ {s.name}")
+    banner(P, f"§ {s.name}{label_suffix}")
     P(f"  Description: {s.description}")
     P(f"  Fixture:     {s.home} vs {s.away}")
     P(f"  Rubric:      {s.rubric_lesson}")
+    if force_provider:
+        P(f"  Provider:    {force_provider!r} (forced — no fallback)")
     P()
     P("  ─── CONTEXT (handed to the LLM) ───────────────────────────────────────")
     for line in s.context.split("\n"):
         P(f"    {line}")
     P("  ─── end context ───────────────────────────────────────────────────────")
 
+    router = _router_for(force_provider)
     t0 = time.monotonic()
-    result = analyze_safe(s.home, s.away, context_text=s.context)
+    result = analyze_safe(s.home, s.away, context_text=s.context, router=router)
     dur_ms = (time.monotonic() - t0) * 1000
 
     P(f"\n  ─── LLM RESPONSE ({dur_ms:.0f}ms) ─────────────────────────────────────")
@@ -346,6 +358,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="list scenarios and exit")
     p.add_argument("--no-save", action="store_true")
     p.add_argument("--report-dir", default="reports")
+    p.add_argument("--provider", choices=("gemini", "claude", "openai", "all"),
+                   default=None,
+                   help="Force a specific provider (skip the router fallback "
+                        "chain). 'all' runs every scenario through each "
+                        "configured provider sequentially.")
     args = p.parse_args(argv)
 
     if args.list:
@@ -374,25 +391,64 @@ def main(argv: list[str] | None = None) -> int:
     if report_path:
         P(f"  Report: {report_path}")
 
+    providers_to_run = ([args.provider] if args.provider and args.provider != "all"
+                         else (["gemini", "claude", "openai"] if args.provider == "all"
+                               else [None]))
     results = []
-    for i, s in enumerate(run):
-        results.append(run_scenario(s, P))
-        if i < len(run) - 1:
-            # Gemini free tier: 5 RPM. Sleep 13s between scenarios so we
-            # don't trip 429 RESOURCE_EXHAUSTED. The router will fallback
-            # to Claude if it does, but Claude costs PAYG cents per call.
-            time.sleep(13)
+    for prov in providers_to_run:
+        suffix = f"  [provider={prov}]" if prov else ""
+        if prov:
+            banner(P, f"PROVIDER PASS: {prov!r}")
+        for i, s in enumerate(run):
+            r = run_scenario(s, P, force_provider=prov, label_suffix=suffix)
+            r["provider_requested"] = prov
+            results.append(r)
+            if i < len(run) - 1:
+                # Gemini free tier: 5 RPM. Sleep 13s between scenarios so we
+                # don't trip 429 RESOURCE_EXHAUSTED. Other providers (Claude
+                # 50 RPM, OpenAI 500 RPM) tolerate faster cadence but the
+                # sleep is harmless.
+                time.sleep(13 if prov == "gemini" or prov is None else 2)
 
     # Summary
     banner(P, "Summary")
     n_pass = sum(1 for r in results if r["passed"])
     n_fail = len(results) - n_pass
-    P(f"  {n_pass}/{len(results)} scenarios passed the rubric check")
+    P(f"  {n_pass}/{len(results)} runs passed the rubric check")
     for r in results:
         mark = "✓" if r["passed"] else "✗"
-        P(f"    {mark} {r['scenario']:<40} "
+        prov_tag = f" [{r.get('provider_requested')}]" if r.get("provider_requested") else ""
+        P(f"    {mark} {r['scenario']:<40}{prov_tag:<11} "
           f"home={r['home_delta']:+.2f}  away={r['away_delta']:+.2f}  "
           f"conf={r['confidence']!r}")
+
+    # Cross-provider table when running --provider all
+    if args.provider == "all":
+        banner(P, "Cross-provider comparison matrix")
+        scenarios_seen = []
+        for r in results:
+            if r["scenario"] not in scenarios_seen:
+                scenarios_seen.append(r["scenario"])
+        prov_cols = ("gemini", "claude", "openai")
+        # Header
+        hdr = f"  {'scenario':<35}"
+        for p in prov_cols:
+            hdr += f" {p:<22}"
+        P(hdr)
+        P("  " + "-" * (35 + 3 * 23))
+        for scn in scenarios_seen:
+            line = f"  {scn:<35}"
+            for p in prov_cols:
+                row = next((r for r in results
+                            if r["scenario"] == scn and r["provider_requested"] == p),
+                           None)
+                if row:
+                    mark = "✓" if row["passed"] else "✗"
+                    cell = (f"{mark} h{row['home_delta']:+.2f} a{row['away_delta']:+.2f}")
+                else:
+                    cell = "(skipped)"
+                line += f" {cell:<22}"
+            P(line)
 
     P()
     if report_path:

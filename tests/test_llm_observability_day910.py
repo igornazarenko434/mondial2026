@@ -192,6 +192,62 @@ def test_parse_tier_empty():
     assert tier == "empty"
 
 
+def test_parse_tier_strict_handles_claude_leading_plus_sign():
+    """Day-9.18: Claude (and others) emit `+0.15` for positive numbers as
+    a clarity hint, but JSON spec FORBIDS leading + on numbers. Verified
+    against Claude Haiku 4.5 in the cross-provider scenario harness.
+    The parser must strip the + defensively."""
+    from orchestrator.agents.news_agent import _parse_json_lenient
+    bad = ('{"home_goal_delta": -0.25, "away_goal_delta": +0.20, '
+           '"confidence": "medium", "notes": [], "discarded_sources": []}')
+    data, tier = _parse_json_lenient(bad)
+    assert data is not None, "+0.20 must be tolerated"
+    assert tier == "strict"
+    assert data["away_goal_delta"] == 0.20
+
+
+def test_parse_tier_strict_handles_claude_markdown_fences():
+    """Day-9.18: Claude wraps responses in ```json...``` despite the system
+    prompt saying not to. The parser must strip fences anywhere in the text."""
+    from orchestrator.agents.news_agent import _parse_json_lenient
+    wrapped = ('```json\n'
+               '{"home_goal_delta": 0.15, "away_goal_delta": 0.0, '
+               '"confidence": "high", "notes": [], "discarded_sources": []}'
+               '\n```')
+    data, tier = _parse_json_lenient(wrapped)
+    assert data is not None
+    assert tier == "strict"
+    assert data["home_goal_delta"] == 0.15
+
+
+def test_parse_tier_strict_handles_both_quirks_together():
+    """Combined real-world Claude case: markdown fences + leading +."""
+    from orchestrator.agents.news_agent import _parse_json_lenient
+    real_claude = ('```json\n'
+                    '{\n  "home_goal_delta": -0.25,\n  "away_goal_delta": +0.20,\n'
+                    '  "confidence": "medium",\n  "notes": ["X", "Y"],\n'
+                    '  "discarded_sources": []\n}\n```')
+    data, tier = _parse_json_lenient(real_claude)
+    assert data is not None
+    assert tier == "strict"
+    assert data["home_goal_delta"] == -0.25
+    assert data["away_goal_delta"] == 0.20
+
+
+def test_parse_tier_doesnt_corrupt_legitimate_negative_numbers():
+    """Defensive: stripping + must not touch -0.30 or - in mid-text."""
+    from orchestrator.agents.news_agent import _parse_json_lenient
+    good = ('{"home_goal_delta": -0.30, "away_goal_delta": 0.0, '
+            '"confidence": "high", '
+            '"notes": ["Mexico already qualified -0.30 squad rotation"], '
+            '"discarded_sources": []}')
+    data, tier = _parse_json_lenient(good)
+    assert data is not None
+    assert tier == "strict"
+    assert data["home_goal_delta"] == -0.30   # negative preserved
+    assert "Mexico already qualified -0.30" in data["notes"][0]
+
+
 # ─────────────────────── news_agent stamping ──────────────────────
 
 def test_analyze_stamps_parse_tier_and_excerpt_on_unparseable_output(monkeypatch):
