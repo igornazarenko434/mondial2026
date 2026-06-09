@@ -60,24 +60,42 @@ def main(argv: list[str] | None = None) -> int:
 
     found = 0
     skipped = 0
-    failed = []
+    failed: list[str] = []
+    quota_blocked: list[str] = []
     for i, team in enumerate(teams, 1):
         if team in cache and not args.force:
             print(f"  {i:>2}/48  {team:<28} → {cache[team]:<6}  (cached)")
             skipped += 1
             continue
+        # Day-9.20: distinguish "real not-found" from "quota exhausted mid-run".
+        # If _budget_clear is False, the find_team_id calls will return None
+        # but it's a QUOTA issue, not a name issue — flag separately so the
+        # user knows to retry tomorrow instead of editing aliases.
+        budget_ok = af._budget_clear()
         tid = af.find_team_id(team)
         if tid:
             print(f"  {i:>2}/48  {team:<28} → {tid:<6}  ✓ fetched")
             found += 1
+        elif not budget_ok or not af._budget_clear():
+            print(f"  {i:>2}/48  {team:<28} → ?       ⚠ deferred (quota exhausted)")
+            quota_blocked.append(team)
         else:
             print(f"  {i:>2}/48  {team:<28} → ?       ✗ NOT FOUND in api-football")
             failed.append(team)
 
     print()
     print(f"  Summary: {found} fetched, {skipped} already cached, "
-          f"{len(failed)} not resolvable")
+          f"{len(quota_blocked)} quota-deferred, {len(failed)} not resolvable")
+    if quota_blocked:
+        print()
+        print(f"  ⚠ Quota-deferred: {quota_blocked}")
+        print(f"    These teams' api-football lookups were blocked by the daily")
+        print(f"    100-credit cap, NOT by a missing alias. Re-run this script")
+        print(f"    after midnight UTC (quota resets ~03:00 IDT) and the {len(quota_blocked)}")
+        print(f"    remaining team(s) will be fetched — costs only {len(quota_blocked)} credits")
+        print(f"    since the {found + skipped} already-cached teams will be skipped.")
     if failed:
+        print()
         print(f"  ✗ Could not resolve: {failed}")
         print(f"    These teams will use Brave-only news context (no api-football")
         print(f"    injuries). Consider adding aliases to _TEAM_NAME_VARIANTS in")
