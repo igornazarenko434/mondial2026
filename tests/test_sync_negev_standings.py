@@ -181,22 +181,26 @@ def test_sync_returns_error_when_zero_rows(conn, fake_ntm, monkeypatch):
 
 
 def test_telegram_summary_format_contains_top5_and_me(monkeypatch):
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.delenv("FRIEND_PARTICIPANTS", raising=False)
     rows = [
         {"player": f"P{i}", "rank": i, "total": 100 - i, "direction": 50,
          "broad": 50, "exactCount": 0, "role": "player"}
         for i in range(1, 11)
     ]
-    # Put me at rank 8 (out of top 5) — should trigger the "Around you" block
+    # Put me at rank 8 (out of top 5) — should trigger the "AROUND YOU" block
     rows[7]["player"] = "Igor"
     title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid-x")
     assert "Negev standings" in title
     assert "P1" in body and "P5" in body                 # top 5
     assert "Igor" in body and "← you" in body
-    assert "Around you:" in body                          # context window
-    assert "gap to leader" in body
+    assert "AROUND YOU" in body                           # Day-9.22: new section title
+    assert "vs leader" in body                            # tracked block contains gap line
 
 
 def test_telegram_summary_no_around_when_in_top_5(monkeypatch):
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.delenv("FRIEND_PARTICIPANTS", raising=False)
     rows = [{"player": "Igor", "rank": 1, "total": 100, "direction": 50,
              "broad": 50, "exactCount": 0, "role": "player"}] + [
         {"player": f"P{i}", "rank": i, "total": 100 - i, "direction": 50,
@@ -205,7 +209,46 @@ def test_telegram_summary_no_around_when_in_top_5(monkeypatch):
     ]
     title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid-x")
     assert "← you" in body
-    assert "Around you:" not in body                      # I'm in top 5; no extra block
+    assert "AROUND YOU" not in body                       # I'm in top 5; no extra block
+
+
+def test_telegram_summary_includes_tracked_block_for_each_friend(monkeypatch):
+    """Day-9.22: every friend in FRIEND_PARTICIPANTS gets a full audit block."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.setenv("FRIEND_PARTICIPANTS", "Vaadia")
+    rows = [
+        {"player": "Gilad",  "rank": 1, "total": 12.5, "direction": 8, "broad": 4.5,
+         "exactCount": 0, "role": "player"},
+        {"player": "Sarah",  "rank": 2, "total": 10.0, "direction": 8, "broad": 2,
+         "exactCount": 0, "role": "player"},
+        {"player": "Vaadia", "rank": 12, "total": 3.5, "direction": 3.5, "broad": 0,
+         "exactCount": 0, "role": "player"},
+        {"player": "Igor",   "rank": 26, "total": 0.0, "direction": 0, "broad": 0,
+         "exactCount": 0, "role": "player"},
+    ]
+    title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid")
+    assert "TRACKED" in body
+    # Both Igor's and Vaadia's blocks present
+    assert "👤 Igor" in body
+    assert "👤 Vaadia" in body
+    # Friend block carries vs-you line; my block does not
+    assert "vs you" in body
+    # Vaadia ahead of me (3.5 vs 0)
+    assert "Vaadia ahead of you" in body
+
+
+def test_telegram_summary_marks_tracked_friend_in_top5_list(monkeypatch):
+    """Friends who land in the Top-5 scoreboard get a ← tracked marker."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.setenv("FRIEND_PARTICIPANTS", "Vaadia")
+    rows = [
+        {"player": "Vaadia", "rank": 1, "total": 50, "direction": 50, "broad": 0,
+         "exactCount": 0, "role": "player"},
+        {"player": "Igor",   "rank": 26, "total": 0, "direction": 0, "broad": 0,
+         "exactCount": 0, "role": "player"},
+    ]
+    _title, body = sns._format_telegram_summary(rows, me="Igor", tid="tid")
+    assert "← tracked" in body
 
 
 def test_sync_with_send_telegram_calls_delivery_summary_not_alert(conn, fake_ntm, monkeypatch):

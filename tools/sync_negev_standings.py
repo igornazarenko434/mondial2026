@@ -77,19 +77,29 @@ def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
 def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, str]:
     """Compose a Telegram-safe plain-text leaderboard summary.
 
-    Day-9.15: `rows` is the FULL roster (with bots) so the `rank` number
-    matches what the user sees in the Negev app. Top 5 / gap-to-leader
-    sections filter bots first so we don't show phantoms in the human
-    leaderboard.
+    Layout (high-detail blocks at top, scoreboard below):
+      📊 Negev standings — TIMESTAMP
+      ───────────────────  TRACKED 👥  ───────────────────
+      👤 You (Igor)    full block: rank/total/split/vs-leader/vs-second
+      👤 Friend1       same block + vs-you line
+      ...one block per FRIEND_PARTICIPANTS entry...
+      ─────────────────────  TOP 5  ──────────────────────
+      1. Gilad   12.5
+      ...
+      ─────────────  AROUND YOU (rank ±2)  ──────────────
+      ...
 
-    Returns: (title, body). 8-12 lines body. Highlights:
-      • Top 5 humans by rank (bots filtered)
-      • YOU with the app-equivalent rank
-      • Gap to the real leader (bot-filtered)
-      • "Around you" window of 2 above + 2 below
+    Day-9.15: `rows` is the FULL roster (with bots) so ranks match the app.
+    Top 5 / gap math filter bots out. Day-9.22 (this commit): symmetric
+    tracked-people blocks at the top via core.reporting.people, so YOU and
+    every friend in FRIEND_PARTICIPANTS get the same per-person audit
+    (rank, total, group/futures split, vs leader/second/you).
+
+    Returns: (title, body).
     """
     from datetime import datetime, timezone
     from zoneinfo import ZoneInfo
+    from core.reporting import people
     now = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Jerusalem"))
     title = f"📊 Negev standings — {now:%Y-%m-%d %H:%M IDT}"
 
@@ -97,33 +107,41 @@ def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, 
     by_name = {r["player"]: r for r in rows}
     me_row = by_name.get(me)
     n = len(rows)
-    # Bot-filtered list for "real competitor" sections (Top 5 + gap math)
     humans = [r for r in rows if r.get("role") != "bot"]
     leader_row = humans[0] if humans else rows[0]
 
-    if me_row:
-        gap_leader = leader_row["total"] - me_row["total"]
-        lines.append(
-            f"You: rank {me_row['rank']}/{n}  •  {me_row['total']:.1f} pts  "
-            f"•  gap to leader: {gap_leader:.1f}")
-    else:
-        lines.append(f"Roster: {n} players  •  YOU not found in standings")
+    # ─── Tracked 👥 ─── one full audit block per (me + friends).
+    tracked = people.tracked_participants()
+    if tracked:
+        lines.append("─" * 16 + "  TRACKED 👥  " + "─" * 16)
+        for name in tracked:
+            lines.append(people.render_block(rows, name, self_name=me))
+            lines.append("")            # blank between blocks for breathing room
+        # Trim the trailing blank
+        if lines and lines[-1] == "":
+            lines.pop()
 
+    # ─── Top 5 humans ───
     lines.append("")
-    lines.append("Top 5:")
+    lines.append("─" * 19 + "  TOP 5  " + "─" * 20)
     for r in humans[:5]:
         marker = "  ← you" if r["player"] == me else ""
-        lines.append(f"  {r['rank']:>2}. {r['player']:<16}  {r['total']:>6.1f}{marker}")
+        # Highlight any tracked friend in the top-5 list too
+        if r["player"] != me and r["player"] in tracked:
+            marker = "  ← tracked"
+        lines.append(f"  {r['rank']:>2}. {r['player']:<18}  {r['total']:>6.1f}{marker}")
 
-    # Context window: 2 above + 2 below me, if I'm out of the top 5
+    # ─── Around you (if not in top 5/7) ───
     if me_row and me_row["rank"] > 7:
         lines.append("")
-        lines.append(f"Around you:")
+        lines.append("─" * 12 + "  AROUND YOU (rank ±2)  " + "─" * 12)
         my_rank = me_row["rank"]
         window = [r for r in rows if abs(r["rank"] - my_rank) <= 2]
         for r in window:
             marker = "  ← you" if r["player"] == me else ""
-            lines.append(f"  {r['rank']:>2}. {r['player']:<16}  {r['total']:>6.1f}{marker}")
+            if r["player"] != me and r["player"] in tracked:
+                marker = "  ← tracked"
+            lines.append(f"  {r['rank']:>2}. {r['player']:<18}  {r['total']:>6.1f}{marker}")
 
     return title, "\n".join(lines)
 

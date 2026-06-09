@@ -106,6 +106,23 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
     except Exception as e:                          # noqa: BLE001
         log.warning("standings read failed: %s", e)
 
+    # Day-9.22: Tracked-people blocks — pull fresh Negev rows so rank/total
+    # match the app exactly + every friend gets the same per-person audit.
+    # ONE Negev API call per delivered summary (= 1/day). Falls back silently
+    # if Negev unreachable; the local-DB "Your score" line below still fires.
+    from core.reporting import people
+    tracked = people.tracked_participants()
+    negev_rows: list[dict] = []
+    if tracked:
+        try:
+            from integrations import negev_toto_mcp as ntm
+            from core import obs
+            with obs.external_call("negev_toto", "get_standings"):
+                negev_rows = ntm.toto_get_standings(include_bots=True)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("Negev fetch for tracked blocks failed: %s", e)
+            negev_rows = []
+
     # Budget headline — only providers with a real budget contribute a number
     L = cost_ledger()
     brave = L.quota_status("brave_search")
@@ -113,8 +130,8 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
 
     lines = [f"📅 Mondial 2026 — {today_local.isoformat()}"]
     if today_games:
-        n = len(today_games)
-        lines.append(f"Today ({n} game{'s' if n != 1 else ''}):")
+        n_today = len(today_games)
+        lines.append(f"Today ({n_today} game{'s' if n_today != 1 else ''}):")
         for g in today_games[:5]:
             lines.append(f"  • {g}")
     else:
@@ -123,7 +140,15 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
         lines.append(f"Recent ({len(results)}):")
         for r in results[:4]:
             lines.append(f"  ✓ {r}")
-    if stand:
+    # Day-9.22: per-tracked-person compact line (replaces the legacy single
+    # "Your score" row). Falls back to the legacy line only when Negev
+    # didn't load (rare; keeps the summary useful in degraded mode).
+    if negev_rows and tracked:
+        lines.append("")
+        lines.append("Tracked 👥:")
+        for name in tracked:
+            lines.append(people.render_compact(negev_rows, name, self_name=me))
+    elif stand:
         lines.append(
             f"Your score: {stand['total']:.1f} pts "
             f"(group {stand['group_points']:.1f} / KO {stand['knockout_points']:.1f} / "

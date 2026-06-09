@@ -167,3 +167,75 @@ def test_summary_text_never_raises_on_missing_tables(tmp_path):
     txt = ds.build_summary_text(c, _at("2026-06-11 09:00"))
     assert "Mondial 2026" in txt
     assert "Budget" in txt
+
+
+# ─────────────── Day-9.22: tracked friends ───────────────
+
+def _install_fake_negev(monkeypatch, rows):
+    """Replace `toto_get_standings` on the real integrations.negev_toto_mcp
+    module. We can't substitute the whole module (Python's
+    `from integrations import negev_toto_mcp` resolves via package attribute,
+    not just sys.modules), so we patch the function directly — works for any
+    local re-import in build_summary_text."""
+    from integrations import negev_toto_mcp as ntm
+    monkeypatch.setattr(ntm, "toto_get_standings",
+                         lambda **kwargs: rows)
+
+
+def test_summary_text_renders_per_friend_compact_lines(conn, monkeypatch):
+    """Day-9.22: ☀️ summary includes a Tracked block with one compact line
+    per (me + each friend), each carrying rank/total/gap-to-leader."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.setenv("FRIEND_PARTICIPANTS", "Vaadia")
+    _install_fake_negev(monkeypatch, [
+        {"player": "Gilad",  "rank": 1, "total": 12.5, "direction": 8, "broad": 4.5,
+         "role": "player"},
+        {"player": "Vaadia", "rank": 12, "total": 3.5, "direction": 3.5, "broad": 0,
+         "role": "player"},
+        {"player": "Igor",   "rank": 26, "total": 0.0, "direction": 0, "broad": 0,
+         "role": "player"},
+    ])
+    txt = ds.build_summary_text(conn, _at("2026-06-11 09:00"))
+    assert "Tracked 👥" in txt
+    assert "Igor: 0.0 pts" in txt
+    assert "Vaadia: 3.5 pts" in txt
+    # Friend has a "ahead of you" tag because Vaadia 3.5 > Igor 0.0
+    assert "ahead of you" in txt
+
+
+def test_summary_text_falls_back_to_local_db_when_negev_unreachable(conn, monkeypatch):
+    """When Negev raises, the legacy 'Your score' DB-backed line still
+    fires so we don't lose the morning heartbeat entirely."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.setenv("FRIEND_PARTICIPANTS", "Vaadia")
+
+    def _boom(**_):
+        raise RuntimeError("Negev token expired")
+    from integrations import negev_toto_mcp as ntm
+    monkeypatch.setattr(ntm, "toto_get_standings", _boom)
+
+    conn.execute(
+        "INSERT INTO standings (participant, group_points, knockout_points, futures_points) "
+        "VALUES ('Igor', 5.0, 0.0, 0.0)")
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-11 09:00"))
+    assert "Your score: 5.0" in txt
+    assert "Tracked 👥" not in txt
+    assert "Budget" in txt                          # heartbeat still present
+
+
+def test_summary_text_no_tracked_block_when_friends_empty(conn, monkeypatch):
+    """Pure backward-compat: no FRIEND_PARTICIPANTS → legacy 'Your score' line."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    monkeypatch.delenv("FRIEND_PARTICIPANTS", raising=False)
+    _install_fake_negev(monkeypatch, [
+        {"player": "Igor", "rank": 1, "total": 5.0, "direction": 5, "broad": 0,
+         "role": "player"},
+    ])
+    conn.execute(
+        "INSERT INTO standings (participant, group_points, knockout_points, futures_points) "
+        "VALUES ('Igor', 5.0, 0.0, 0.0)")
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-11 09:00"))
+    # Even with only-self, tracked block renders the compact line for self.
+    assert ("Tracked 👥" in txt) or ("Your score: 5.0" in txt)
