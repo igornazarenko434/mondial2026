@@ -397,6 +397,27 @@ def build_card(match: dict, conn=None, *,
         log.warning("friend_picks_section build failed: %s", e)
         card["friend_picks_section"] = None
 
+    # ───── 8.6. Per-person strategy suggestions (Day-9.24) ─────
+    # Cheap second-pass EV-optimization on the SAME ranked_alternatives
+    # produced by match_card. Runs ev_optimizer.recommend_to_win ONCE
+    # per tracked participant with THEIR standings_context + THEIR tilt
+    # (from STRATEGY_OVERRIDES). Each person can have a different strategy
+    # and see a different recommended pick on the same card. Section is
+    # rendered separately so the main pick stays the operator's
+    # authoritative recommendation. Skipped silently when no override is
+    # set or only the operator is tracked.
+    try:
+        from core.decision.per_person import (
+            compute_per_person_suggestions, render_section)
+        suggestions = compute_per_person_suggestions(card, conn)
+        card["per_person_suggestions"] = suggestions
+        card["per_person_section"] = render_section(
+            suggestions, home, away, detonator=detonator)
+    except Exception as e:                          # noqa: BLE001
+        log.warning("per_person section build failed: %s", e)
+        card["per_person_suggestions"] = None
+        card["per_person_section"] = None
+
     # ───── 9. Match metadata ─────
     card["match_id"]    = match.get("match_id")
     card["window"]      = window

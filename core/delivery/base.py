@@ -203,4 +203,13 @@ def render_card(card: dict) -> str:
     if section:
         lines.append(section)
 
+    # Day-9.24: per-person strategy suggestions — one row per tracked
+    # participant with their OWN EV-optimal pick based on their tilt +
+    # standings context. Appended after friend_picks_section so the social
+    # layer (who picked what) and the analytic layer (what the model
+    # recommends per person) stack cleanly.
+    pp_section = card.get("per_person_section")
+    if pp_section:
+        lines.append(pp_section)
+
     return "\n".join(lines)
