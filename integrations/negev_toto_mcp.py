@@ -81,8 +81,23 @@ def _id_token() -> str:
           browser (NEGEV_REFRESH_TOKEN). The connector exchanges it for an
           ID token via the secure-token refresh endpoint. The refresh token
           auto-rotates on each refresh; cached in-memory afterwards.
-    Path (b) takes precedence when NEGEV_REFRESH_TOKEN is set, so no password
-    is required for Google-only accounts.
+
+    Day-9.23 hardening: when NEGEV_REFRESH_TOKEN is set, that path is the
+    OPERATOR'S EXPLICIT CHOICE. A refresh failure raises LOUDLY with a clear
+    remediation hint. Silent fall-through to email/password masks token-
+    rotation issues and is now opt-in only via
+    `NEGEV_ALLOW_PASSWORD_FALLBACK=1` (default 0).
+
+    Why this matters (real incident, 2026-06-10):
+      A long-lived daemon process was started with .env containing inline
+      `#` comments. systemd's EnvironmentFile parser does NOT strip inline
+      comments, so the daemon's `NEGEV_EMAIL` literal value was
+      `igor434@gmail.com   # your Negev Toto login email`. When the
+      refresh-token's cached rotation drifted out-of-sync after ~15 hours
+      of uptime, the connector silently fell through to email auth, which
+      Firebase rejected with INVALID_EMAIL — and the daily summary
+      degraded to the legacy DB line, undetected. Loud failure forces the
+      operator to notice + fix immediately.
     """
     if _token["id"] and time.time() < _token["exp"] - 60:
         return _token["id"]
@@ -101,16 +116,23 @@ def _id_token() -> str:
                           uid=d.get("user_id") or _token.get("uid"),
                           exp=time.time() + int(d.get("expires_in", 3600)))
             return _token["id"]
-        # Refresh failed: don't silently fall through to password (the user may
-        # be a Google-Sign-In-only account). Surface a clear, actionable error
-        # unless an email/password is also configured as a deliberate fallback.
-        if not (os.environ.get("NEGEV_EMAIL") and os.environ.get("NEGEV_PASSWORD")):
+        # Day-9.23: refresh failed. Operator chose refresh-token auth; default
+        # is loud failure with a remediation message. Only fall through to
+        # email/password if explicitly opted-in.
+        fallback_ok = (os.environ.get("NEGEV_ALLOW_PASSWORD_FALLBACK", "0").strip() == "1"
+                       and os.environ.get("NEGEV_EMAIL")
+                       and os.environ.get("NEGEV_PASSWORD"))
+        if not fallback_ok:
             raise RuntimeError(
                 f"Firebase refresh failed ({r.status_code}): {r.text[:160]}. "
-                "Your NEGEV_REFRESH_TOKEN likely expired or was revoked — "
+                "Your NEGEV_REFRESH_TOKEN likely expired or rotation desynced — "
                 "re-capture it from negev-toto.web.app DevTools (IndexedDB → "
-                "firebaseLocalStorageDb → stsTokenManager.refreshToken).")
-        _token["refresh"] = None      # let the password path try
+                "firebaseLocalStorageDb → stsTokenManager.refreshToken), paste "
+                "into .env, and restart the daemon. To intentionally allow "
+                "silent fallback to email/password, set "
+                "NEGEV_ALLOW_PASSWORD_FALLBACK=1 (NOT recommended — masks "
+                "token-rotation drift).")
+        _token["refresh"] = None      # explicit opt-in: let the password path try
     r = requests.post(f"{IDENTITY}?key={key}", timeout=20, json={
         "email": _cfg("NEGEV_EMAIL"), "password": _cfg("NEGEV_PASSWORD"),
         "returnSecureToken": True})

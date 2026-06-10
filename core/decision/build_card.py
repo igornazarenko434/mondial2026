@@ -72,6 +72,16 @@ def _build_friend_picks_section(home: str | None, away: str | None) -> str | Non
             details = ntm.toto_get_match_details(home=home, away=away)
     except Exception as e:                          # noqa: BLE001
         log.warning("toto_get_match_details(%r, %r) failed: %s", home, away, e)
+        # Day-9.23: once-per-day Telegram so a daemon-wide Negev outage
+        # surfaces immediately rather than silently dropping every card
+        # footer all day.
+        try:
+            from integrations.negev_alerts import alert_failure_once_per_day
+            alert_failure_once_per_day(
+                source=f"build_card friend_picks ({home} vs {away})",
+                reason=str(e))
+        except Exception:                          # noqa: BLE001
+            pass
         return None
     if "error" in (details or {}):
         return None

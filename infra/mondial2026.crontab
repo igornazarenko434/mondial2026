@@ -36,3 +36,9 @@
 # the 07:00 sync). Silent on the happy path; fires ⚠ Telegram alert ONLY
 # when admin changes the scoring grid mid-tournament. 1 Negev call/day, free.
 55 6 * * *  flock -n /tmp/mondial-mult-audit.lock timeout 60 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py --quiet --telegram' >> /home/mondial/mondial2026/reports/cron-mult-audit.log 2>&1
+
+# Day-9.23 — 06:50 IDT — .env hygiene + Negev auth probe. Catches the
+# inline-comment-in-.env trap that bit us on 2026-06-10 AND the daemon's
+# silent-auth-failure pattern. Silent on the happy path; fires ⚠ Telegram
+# only on real failures. 1 Negev call/day, free.
+50 6 * * *  flock -n /tmp/mondial-env-audit.lock timeout 30 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/audit_env.py --quiet --telegram' >> /home/mondial/mondial2026/reports/cron-env-audit.log 2>&1

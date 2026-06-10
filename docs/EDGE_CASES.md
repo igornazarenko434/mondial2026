@@ -72,6 +72,33 @@ this commit set) to close the gap.
 | **martj42 CSV freshness** | If stale by months, DC fit uses out-of-date strengths | `tools/audit_martj42.py` |
 | **Negev admin changes the multiplier grid mid-tournament** | Our EV optimizer would compute against the wrong payoff function | `tools/audit_negev_multipliers.py` |
 
+## Real incident closed in Day-9.23 (2026-06-10)
+
+**Symptom:** ☀️ daily summary at 09:00 IDT showed legacy `Your score: 0.0` line
+instead of the new `Tracked 👥:` block with Vaadia's row. The 📊 standings sync
+at 07:00 (via cron) worked perfectly.
+
+**Diagnostic chain:**
+1. `/proc/$PID/environ` showed `FRIEND_PARTICIPANTS=Vaadia` was present
+2. `journalctl` showed `Negev fetch for tracked blocks failed: Firebase
+   sign-in failed (400): INVALID_EMAIL`
+3. `.env` had `NEGEV_EMAIL=igor434@gmail.com   # your Negev Toto login email`
+4. **systemd's EnvironmentFile parser doesn't strip inline `#` comments** —
+   so the daemon's `NEGEV_EMAIL` actually contained the comment as part
+   of the value. bash's `source .env` (used by cron) does strip it, which
+   is why cron worked and daemon didn't.
+5. The connector's auth fall-through (refresh-token → email/password)
+   masked the issue — the email auth got the malformed value.
+
+**Permanent fixes shipped:**
+| Fix | File | What |
+|---|---|---|
+| Strip ALL inline `#` from `.env.example` | `.env.example` | Operators copying the example never reproduce the trap |
+| Loud refresh-token failure | `integrations/negev_toto_mcp.py::_id_token` | No silent fallback by default; explicit opt-in via `NEGEV_ALLOW_PASSWORD_FALLBACK=1` |
+| Preflight inline-comment detector | `config/preflight.py::_detect_inline_comment_leaks` | Daemon startup logs ERROR for every leaked var |
+| Daily env hygiene cron | `tools/audit_env.py` + crontab 06:50 IDT | Fires ⚠ Telegram on any leak detected OR Negev auth probe failure |
+| Once-per-day Negev failure alert | `integrations/negev_alerts.alert_failure_once_per_day` | All 3 daemon call sites (daily_summary, kickoff_cards, build_card friend_picks) fire ⚠ within 24h of any silent degradation, suppressing repeat alerts same day |
+
 ## Closing actions taken in this commit set (Day-9.23)
 
 A. **`tools/news_preview.py`** — live news_agent inspection

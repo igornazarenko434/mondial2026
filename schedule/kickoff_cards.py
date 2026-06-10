@@ -116,6 +116,7 @@ def _fetch_picks(home: str, away: str) -> tuple[list[dict] | None, dict | None]:
         return details.get("friendsPicks"), details.get("myPrediction")
     except Exception as e:                                # noqa: BLE001
         log.warning("kickoff picks fetch failed for %s vs %s: %s", home, away, e)
+        _maybe_alert_negev(f"kickoff_cards (_fetch_picks for {home} vs {away})", e)
         return None, None
 
 
@@ -128,7 +129,18 @@ def _fetch_standings_rows() -> list[dict]:
             return ntm.toto_get_standings(include_bots=True)
     except Exception as e:                                # noqa: BLE001
         log.warning("kickoff standings fetch failed: %s", e)
+        _maybe_alert_negev("kickoff_cards (_fetch_standings_rows)", e)
         return []
+
+
+def _maybe_alert_negev(source: str, e: Exception) -> None:
+    """Day-9.23: ONCE-per-day Telegram alert helper for kickoff-card Negev
+    failures. Best-effort — never propagates exceptions."""
+    try:
+        from integrations.negev_alerts import alert_failure_once_per_day
+        alert_failure_once_per_day(source=source, reason=str(e))
+    except Exception:                                     # noqa: BLE001
+        pass
 
 
 def _fetch_lineups(home: str, away: str, kickoff_iso: str

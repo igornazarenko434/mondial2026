@@ -122,6 +122,14 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
         except Exception as e:                       # noqa: BLE001
             log.warning("Negev fetch for tracked blocks failed: %s", e)
             negev_rows = []
+            # Day-9.23: fire ⚠ Telegram ONCE per day so we know the daemon's
+            # Negev path is broken before 24h of silent degradation accumulates.
+            try:
+                from integrations.negev_alerts import alert_failure_once_per_day
+                alert_failure_once_per_day(
+                    source="daily_summary (build_summary_text)", reason=str(e))
+            except Exception:                          # noqa: BLE001
+                pass    # alerts are best-effort, must never crash the daemon
 
     # Budget headline — only providers with a real budget contribute a number
     L = cost_ledger()

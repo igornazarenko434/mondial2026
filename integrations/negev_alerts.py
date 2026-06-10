@@ -51,6 +51,34 @@ def classify(reason: str) -> tuple[str, str]:
                        "`journalctl -u mondial2026 -n 100` for context.")
 
 
+# Day-9.23: in-process "first-failure-of-the-day" tracker so the daemon's
+# 3 long-lived Negev call sites (daily_summary, kickoff_cards, build_card
+# friend_picks) don't generate a Telegram storm if every match-window pass
+# is hitting the same auth issue. Resets at midnight Asia/Jerusalem.
+_LAST_ALERT_DATE: str | None = None
+
+
+def alert_failure_once_per_day(*, source: str, reason: str,
+                                  tz: str = "Asia/Jerusalem") -> bool:
+    """Like alert_failure() but suppresses repeat alerts within the SAME
+    local-day window. The first failure of the day fires Telegram; every
+    subsequent failure same day is silent (still logged WARN by the caller).
+
+    Used by daemon paths (daily_summary, kickoff_cards, build_card
+    friend-picks) where a single auth break would otherwise produce
+    dozens of identical Telegram alerts in 24h."""
+    global _LAST_ALERT_DATE
+    today_local = datetime.now(timezone.utc).astimezone(
+        ZoneInfo(tz)).strftime("%Y-%m-%d")
+    if _LAST_ALERT_DATE == today_local:
+        log.info("Negev alert suppressed (already alerted today %s)", today_local)
+        return False
+    sent = alert_failure(source=source, reason=reason)
+    if sent:
+        _LAST_ALERT_DATE = today_local
+    return sent
+
+
 def alert_failure(*, source: str, reason: str) -> bool:
     """Send a ⚠ Telegram alert for a Negev MCP connection failure.
 

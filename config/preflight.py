@@ -3,12 +3,52 @@
 
 Reports which features are enabled given the current env, and which are degraded
 because a key/credential is missing. Never raises — it informs.
+
+Day-9.23: ALSO checks the running env vars for the "inline-comment trap" —
+values that contain ` # ...` because systemd's EnvironmentFile parser doesn't
+strip inline comments. This bit us on 2026-06-10: NEGEV_EMAIL=igor434@gmail.com
+with an inline comment made Firebase reject as INVALID_EMAIL.
 """
 from __future__ import annotations
 import os
+import re
 from core.obs.logging import get_logger
 
 log = get_logger("preflight")
+
+
+# Vars where an inline-comment leak would silently break the daemon.
+# Auth-affecting + delivery-affecting only — generic optional keys can leak
+# without functional impact and we don't want to be too chatty.
+INLINE_HAZARD_KEYS = (
+    "NEGEV_EMAIL", "NEGEV_PASSWORD", "NEGEV_REFRESH_TOKEN",
+    "NEGEV_TOURNAMENT_ID", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+    "MY_PARTICIPANT", "FRIEND_PARTICIPANTS",
+    "FOOTBALL_DATA_API_KEY", "ODDS_API_KEY", "API_FOOTBALL_KEY",
+    "BRAVE_SEARCH_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+)
+# `<whitespace>#<anything>` at end of value = systemd has leaked an inline comment
+_INLINE_COMMENT_RE = re.compile(r"\s+#")
+
+
+def _detect_inline_comment_leaks() -> list[tuple[str, str]]:
+    """Scan os.environ for vars whose value contains an inline-comment leak.
+    Returns [(key, snippet), ...] for any detected hazard.
+
+    Detection: whitespace + '#' anywhere AFTER a non-space character.
+    A leading '#' at column 0 would be a comment line (never reaches env).
+    """
+    out = []
+    for key in INLINE_HAZARD_KEYS:
+        val = os.environ.get(key)
+        if not val:
+            continue
+        m = _INLINE_COMMENT_RE.search(val)
+        if m:
+            snippet = val[max(0, m.start() - 8):m.end() + 12]
+            out.append((key, snippet))
+    return out
 
 
 def check() -> dict:
@@ -23,6 +63,17 @@ def check() -> dict:
         "delivery: telegram": bool(os.environ.get("TELEGRAM_BOT_TOKEN")
                                    and os.environ.get("TELEGRAM_CHAT_ID")),
     }
+    # Day-9.23 — inline-comment hygiene check. Loud at startup so the operator
+    # fixes the .env BEFORE the daemon spends 15 hours producing degraded cards.
+    leaks = _detect_inline_comment_leaks()
+    if leaks:
+        log.error("preflight — INLINE COMMENT LEAK in .env (systemd doesn't "
+                  "strip inline #). Fix by moving the comment to its own line "
+                  "ABOVE the var. Affected:")
+        for key, snippet in leaks:
+            log.error("  %s contains an inline-comment leak near '%s'",
+                      key, snippet.strip())
+    status["env_hygiene_ok"] = not leaks
     enabled = [k for k, v in status.items() if v]
     missing = [k for k, v in status.items() if not v]
     log.info("preflight — enabled: %s", ", ".join(enabled) or "none")
