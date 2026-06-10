@@ -95,6 +95,44 @@ def _scan_stray_lines(path: str) -> list[tuple[int, str]]:
     return out
 
 
+def _scan_unquoted_hazardous_values(path: str) -> list[tuple[int, str, str]]:
+    """Day-9.24: KEY=value lines where the value contains shell-special
+    characters (spaces, `{}`, `[]`, `|`, `;`, etc.) but the value is NOT
+    wrapped in single/double quotes. bash's `source` will word-split or
+    misparse such lines — symptom: env var truncated at the first space.
+
+    Specifically the 2026-06-10 STRATEGY_OVERRIDES bug:
+      STRATEGY_OVERRIDES={"Igor": 0.0, "Vaadia": 0.4}
+      → bash assigns STRATEGY_OVERRIDES='{"Igor":' then tries to exec '0.0,'.
+
+    Quoting it solves the problem:
+      STRATEGY_OVERRIDES='{"Igor": 0.0, "Vaadia": 0.4}'
+    """
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for i, raw in enumerate(f, 1):
+                line = raw.rstrip("\n")
+                stripped = line.lstrip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                m = re.match(r"^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$",
+                              line)
+                if not m:
+                    continue
+                value = m.group(1)
+                # Already quoted — fine.
+                if value.startswith(("'", '"')):
+                    continue
+                # Has any of: space, `{}`, `[]`, `|`, `;`, `&`, `<`, `>`, `?`,
+                # backtick, parens → bash will word-split or misparse.
+                if re.search(r"""[\s{}\[\]|;&<>?`()]""", value):
+                    out.append((i, line.split("=", 1)[0].lstrip(), line))
+    except FileNotFoundError:
+        pass
+    return out
+
+
 def _scan_duplicate_keys(path: str) -> list[tuple[str, list[int]]]:
     """Day-9.24: duplicate KEY= lines (case-sensitive). Last-wins for bash
     `source` but systemd's behaviour depends on version. Either way the
@@ -159,8 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     indented = _scan_indented_assignments(args.env_path)
     strays = _scan_stray_lines(args.env_path)
     dupes = _scan_duplicate_keys(args.env_path)
+    unquoted = _scan_unquoted_hazardous_values(args.env_path)
 
-    issues = bool(leaks or indented or strays or dupes)
+    issues = bool(leaks or indented or strays or dupes or unquoted)
     if issues:
         if not args.quiet:
             if leaks:
@@ -181,6 +220,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  ⚠ {len(dupes)} duplicate KEY=VALUE line(s):")
                 for key, lines in dupes[:10]:
                     print(f"    {key}  on lines {lines}")
+            if unquoted:
+                print(f"  ⚠ {len(unquoted)} unquoted value(s) with shell-"
+                      f"hazardous chars (bash 'source' will mis-split):")
+                for lineno, key, line in unquoted[:10]:
+                    print(f"    line {lineno}  {key}:  {line[:80]}")
+                print(f"    Fix: wrap the value in single quotes, e.g.:")
+                print(f"      {unquoted[0][1]}='...'")
         if args.telegram:
             body_parts = []
             if leaks:
@@ -199,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
                 body_parts.append("DUPLICATE KEYS:\n" +
                                   "\n".join(f"  {k} on lines {ls}"
                                               for k, ls in dupes[:5]))
+            if unquoted:
+                body_parts.append("UNQUOTED HAZARDOUS VALUES (wrap in '):\n"
+                                  + "\n".join(f"  line {l}: {ln[:60]}"
+                                                for l, _, ln in unquoted[:5]))
             body = (".env contains lines that will be silently mis-parsed:\n\n"
                     + "\n\n".join(body_parts)
                     + "\n\nFix manually + systemctl restart mondial2026.")
@@ -207,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         print(f"  ✓ No inline-comment hazards, no indented assignments, "
-              f"no stray lines, no duplicate keys.")
+              f"no stray lines, no duplicate keys, all values shell-safe.")
 
     if not args.skip_auth:
         if not args.quiet:
