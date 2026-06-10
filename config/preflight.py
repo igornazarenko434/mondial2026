@@ -74,6 +74,34 @@ def check() -> dict:
             log.error("  %s contains an inline-comment leak near '%s'",
                       key, snippet.strip())
     status["env_hygiene_ok"] = not leaks
+
+    # Day-9.24 — STRATEGY_OVERRIDES validation. If set, MUST parse as JSON
+    # dict {name: float}; otherwise the per-person section silently no-ops
+    # and the operator wouldn't know why. Loud ERROR at startup is honest.
+    raw = (os.environ.get("STRATEGY_OVERRIDES") or "").strip()
+    overrides_ok = True
+    if raw:
+        try:
+            import json as _json
+            d = _json.loads(raw)
+            if not isinstance(d, dict):
+                log.error("STRATEGY_OVERRIDES parses to %s, expected dict; "
+                          "per-person section will be ignored", type(d).__name__)
+                overrides_ok = False
+            else:
+                for k, v in d.items():
+                    if not isinstance(v, (int, float)):
+                        log.error("STRATEGY_OVERRIDES['%s']=%r is not numeric; "
+                                  "per-person section will be ignored", k, v)
+                        overrides_ok = False
+                        break
+                if overrides_ok:
+                    log.info("preflight — STRATEGY_OVERRIDES active: %s", d)
+        except Exception as e:                          # noqa: BLE001
+            log.error("STRATEGY_OVERRIDES not valid JSON: %s — per-person "
+                      "section will be ignored", e)
+            overrides_ok = False
+    status["strategy_overrides_ok"] = overrides_ok
     enabled = [k for k, v in status.items() if v]
     missing = [k for k, v in status.items() if not v]
     log.info("preflight — enabled: %s", ", ".join(enabled) or "none")
