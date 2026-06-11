@@ -57,7 +57,8 @@ Belt-and-suspenders: even if you forget the supervisor, a stale heartbeat or a
 missing daily summary tells you the scheduler stopped.
 
 ## Two games at the same time — does it work? Yes.
-The daemon uses a **ThreadPoolExecutor** (`SCHED_MAX_WORKERS`, default 4). When
+
+The daemon uses a **ThreadPoolExecutor** (`SCHED_MAX_WORKERS`, default 6). When
 two matches hit T-7m together, `tick()` submits **two independent jobs that run
 concurrently** in separate threads. Verified by `tests/test_scheduler.py`
 (`test_two_simultaneous_matches_run_concurrently`).
@@ -77,6 +78,16 @@ just that in a `ProcessPoolExecutor` — but you don't need it for match-day.
   `test_cost_ledger_thread_safe` writing from 4 threads).
 - Each job is **stateless/idempotent** and failures are contained inside
   `process_match`, so one match can't break another.
+- **Day-9.25: per-worker SQLite connections.** The runner's main thread does
+  NOT share a SQLite connection with worker threads. Every callback opens its
+  own via `with closing(connect()) as conn` (cheap — SQLite opens in
+  microseconds). SQLite serializes writes at the OS-level journal; `ON
+  CONFLICT(match_id, window) DO UPDATE` keeps `predictions` correct under
+  concurrent dispatch. Without this fix every fired card silently failed to
+  persist with `"objects created in a thread can only be used in that same
+  thread"`. Pinned by 8 tests across `test_runner_sqlite_thread_safety_day925.py`
+  + `test_multi_match_concurrent_day925.py` (24 dispatches concurrent + 1000
+  sequential persists with no fd leak + today-22:00 + tomorrow-22:00 scenario).
 
 ## Config (env)
 ```
@@ -152,42 +163,60 @@ update procedure is one command on the VM, and it's designed to be safe:
 /home/mondial/mondial2026/infra/update.sh
 ```
 
-What it does, in order — each step gates on the previous one:
+What it does, in order — each step gates on the previous one (Day-9.25 rewrite):
 
-1. **Refuses if the VM has uncommitted changes.** If you (or anyone) hand-
-   edited a file directly on the VM, the script bails so you don't silently
-   overwrite work. Investigate, then commit / stash / discard explicitly.
+1. **Refuses if the VM has uncommitted changes.** Investigate before overwriting.
 
-   **1b. Refuses if any match-window job is currently in flight.** A
-   restart while a worker is running can kill the thread between Telegram
-   delivery and `ledger.finish` — `was_handled` would then return True for
-   a (match_id, window) whose card was never sent. The check queries the
-   runs ledger: any `status='started'` row younger than 5 min = busy. Wait
-   a few minutes for it to clear, or override with `--force` (you accept
-   the missed-card risk).
-2. **Records the current commit SHA** to `/home/mondial/mondial2026/.last_good_sha`.
-   This is the rollback target if the new version misbehaves.
-3. **`git fetch` and prints the incoming diff stat** so you can eyeball what's
-   about to deploy before any state changes.
-4. **`git pull --ff-only`** (no merge commits — refuses if the branches
-   diverged, which only happens if someone committed directly on the VM).
-5. **Compares `requirements.txt` SHA before/after.** If it changed, runs
-   `.venv/bin/pip install -r requirements.txt`. If it didn't, skips pip to
-   save the 30-60s install time.
-6. **`systemctl restart mondial2026`**, then waits 10 s and runs a THREE-
-   level health check:
-   - **`systemctl is-active --quiet`** — process is registered as running
-   - **`journalctl | grep 'scheduler started'`** — the Python process
-     actually got past `obs.setup()` and `preflight.check()`
-   - **`journalctl | grep -c '"level": "ERROR"'`** — zero ERRORs in the
-     last 60 s
-   If all three pass → prints a post-deploy summary (SHA, uptime, last
-   heartbeat, last card delivered) and exits 0.
-7. **If any check fails** → automatic rollback:
-   - `git reset --hard <previous SHA>`
-   - Restart the daemon
-   - Tail the journal so you can see the rollback log lines
-   - Exit non-zero with a "fix-it-on-your-Mac" message
+   **1b. Refuses if any match-window job is currently in flight** (any
+   `status='started'` row younger than 5 min in the runs ledger). Override
+   with `--force` if you accept the missed-card risk.
+
+2. **Records current SHA** to `.last_good_sha` (rollback target).
+
+3. **`git fetch`** + diff stat preview. If `HEAD == origin/main`, sets
+   `NO_CODE_CHANGE=1` but **does NOT exit** — steps 5b + 6b still run so
+   infra drift gets self-healed even on no-op invocations.
+
+4. **`git pull --ff-only`** (skipped when no code change).
+
+5. **`requirements.txt` diff check** → `pip install` if changed (skipped on
+   no-op).
+
+5. **(Day-9.25) Step 5b — `infra/*` sync.** Runs on EVERY invocation:
+   - `cmp infra/mondial2026.service` vs `/etc/systemd/system/...`; on diff
+     copy + `systemctl daemon-reload`
+   - `cmp infra/mondial2026.crontab` vs `crontab -l`; on diff
+     `crontab <file>` install
+   This catches the case where infra files were bumped in a previous deploy
+   but the live system path was never updated (e.g. when `step 5b` itself
+   was added — the previous deploy's stale `/etc/systemd/system/` had no
+   way to self-heal). Now: any future drift heals on the next invocation.
+
+6. **Skip restart entirely** when `NO_CODE_CHANGE=1 AND SYSTEMD_CHANGED=0`.
+   Otherwise `systemctl restart mondial2026` + 3-level health check:
+   - `systemctl is-active --quiet`
+   - `journalctl | grep 'scheduler started'`
+   - `journalctl | grep -c '"level": "ERROR"'` = 0 (Day-9.25: `tail -1` +
+     `2>/dev/null` guards against `[ "0 0" -gt 0 ]` shell errors)
+
+7. **(Day-9.25) Step 6b — smoke audits.** Runs on EVERY invocation:
+   - `audit_env.py --skip-auth --quiet` (0 API calls — scans .env for
+     systemd inline-comment trap; the 2026-06-10 incident)
+   - `audit_negev_multipliers.py --quiet` (1 free Negev call — confirms
+     `config/rules.py` grids match Negev's authoritative scoring table)
+   - Surfaces the daemon's preflight `enabled: ...` line so operator sees
+     active features without grepping journalctl
+   Failures are WARN-only — deploy still succeeds but operator sees the
+   issue at deploy time, not days later.
+
+8. **Post-deploy summary** — deployed SHA, daemon start time, last
+   heartbeat, last card sent, `systemd unit synced: YES (drifted)/already
+   matched`, `crontab synced: YES (drifted)/already matched`.
+
+**On any restart-check failure → automatic rollback** to the SHA recorded
+in step 2 (`git reset --hard` + restart). Exits non-zero with "fix on
+Mac" message. A broken deploy returns to the previous working version
+within ~30 seconds.
 
 So **a broken deploy returns you to the previous working version automatically**
 within ~30 seconds. You only have to intervene manually if rollback ALSO fails

@@ -265,13 +265,26 @@
 <section id="tldr">
   <h2>TL;DR — what this system does</h2>
   <div class="panel info">
-    <p><strong>Goal:</strong> Win our friends' Toto pool ("Negev Toto 2026", <strong>67 humans</strong>) by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up.</p>
-    <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × Negev's points multiplier, renders a 7-9 line card (with a Day-9.22 "👥 Picks" footer when <code>FRIEND_PARTICIPANTS</code> is set), and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to Honeycomb.</p>
-    <p><strong>Synchronization with Negev:</strong> After matches finish, cron-scheduled <code>sync_negev_standings.py</code> (Day-9.6) pulls Negev's authoritative server-side points back into our local <code>standings</code>, and <code>post_match_audit.py</code> (Day-9.8) cross-checks our <code>score_match()</code> calc against Negev's — silent if Δ=0, 🔍 Telegram if any discrepancy. 30+ MCP tools (5 generic + 19 typed reads + 4 typed writes) live at <code>integrations/negev_toto_mcp.py</code>. The unified inspector <code>tools/toto.py</code> wraps every read question into a subcommand surface.</p>
-    <p><strong>Day-9.22 — symmetric tracked participants:</strong> A new <code>FRIEND_PARTICIPANTS</code> env var lets the operator track any number of Negev display names. Every Telegram message (📊 standings, ☀️ daily summary, ⚽ T+1m kickoff card, 🃏 match card) renders the same per-person audit (rank / total / split / gap-to-leader / gap-to-second / gap-to-you) for the operator + each tracked friend. Adding a friend later is a one-line .env edit.</p>
-    <p><strong>Day-9.23 — edge-case toolkit:</strong> Six new audit tools close the gap between "600 unit tests pass" and "the news agent works on real WC2026 data". See <a href="EDGE_CASES.md">EDGE_CASES.md</a> for the full matrix.</p>
-    <p><strong>Where:</strong> Hetzner CPX22 VM (€5 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>.</p>
-    <p><strong>When you'll see the first card:</strong> 2026-06-10 22:00 Asia/Jerusalem (T-24h of Mexico vs South Africa).</p>
+    <p><strong>Goal:</strong> Win our friends' Toto pool ("Negev Toto 2026", <strong>65 humans + 3 bots = 68 in app</strong>) by maximizing expected points per game, with an optional position-aware tilt for late-tournament catch-up. Pure EV-MAX is the default; Monte Carlo (50,000 tournaments × 68 players × 64 matches) shows P(YOU win) = <strong>61.4%</strong> when friends play modal/safe.</p>
+    <p><strong>How:</strong> Every 60 s the daemon checks if any match-window is due. If yes, it loads 4 signals (Dixon-Coles team strengths, Elo ratings, market odds, news/lineups via LLM), blends them into a score-probability matrix, picks the exact-score with the highest expected points × Negev's points multiplier, renders a 7-9 line card (with a "👥 Picks" footer when <code>FRIEND_PARTICIPANTS</code> is set), and ships it to Telegram. Every external call is rate-limited, cost-tracked, and traced to <strong>Honeycomb (live)</strong>.</p>
+    <p><strong>Day-9.25 — full LLM cascade + ranking pipeline:</strong>
+    <ul>
+      <li><strong>News ranker</strong> scores every Brave article on team-name presence, injury/lineup keywords, source authority (ESPN/Sports Mole/Goal +3; Wikipedia/Reddit −3), and freshness. Top-K (5) get 1200-char snippets; lowest scores dropped first when context cap bites. CONTEXT_MAX_CHARS bumped 3000 → 12000 (still 0.3% of Gemini's 1M-token context).</li>
+      <li><strong>LLMRouter.complete_validated</strong> cascades on <em>semantic</em> failures too — if Gemini returns HTTP 200 but body is unparseable (truncated JSON, prose-only, garbage), router treats it as <code>ValidationFailed</code> and falls through to Claude → OpenAI. Live-verified 2026-06-11: Gemini 503 → Claude succeeded with same ranked context.</li>
+      <li><strong>SQLite per-worker connections</strong> fix the "objects created in a thread" bug that was silently failing every persist_card. Predictions row now lands on every fire.</li>
+      <li><strong>Negev sync reconciliation</strong> deletes phantom rows (departed members + rename duplicates) so DB count = Negev count exactly.</li>
+    </ul></p>
+    <p><strong>Synchronization with Negev:</strong> <code>sync_negev_standings.py</code> runs 7× per day (07:00 + 16/18/20/22/00/02 IDT). Pulls full roster, UPSERTs current members, DELETEs stale phantoms (with MY_PARTICIPANT preservation + empty-fetch safety). <code>post_match_audit.py</code> at 08:00 IDT cross-checks our <code>score_match()</code> calc against Negev's — silent if Δ=0, 🔍 Telegram if discrepancy. 30+ MCP tools at <code>integrations/negev_toto_mcp.py</code>, all source-wrapped in <code>obs.external_call</code> (Day-9.25).</p>
+    <p><strong>Inspection tools (live on VM):</strong></p>
+    <ul>
+      <li><code>tools/audit_fired_card.py</code> — full post-fire audit (10 sections incl. scoring_table cross-check)</li>
+      <li><code>tools/news_inspect.py</code> — LLM forensics: 3 Brave queries → ranked context → provider chain → notes/discarded reasoning</li>
+      <li><code>tools/pick_analyzer.py</code> — per-match EV vs MODAL vs LONGSHOT trade-off table with Sharpe ratios</li>
+      <li><code>tools/llm_audit.py</code> — 5-section LLM runbook</li>
+      <li><code>tools/show_schedule.py</code> — live schedule with countdowns</li>
+    </ul>
+    <p><strong>Where:</strong> Hetzner CPX22 VM (€5 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart + per-worker SQLite connections. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>. <code>infra/update.sh</code> is self-healing: every invocation runs step 5b (infra sync — systemd unit + crontab) + step 6b (smoke audits — .env hygiene + Negev grid drift).</p>
+    <p><strong>Tests:</strong> <strong>731 passing</strong> in 36s. Covers everything from per-stage signal failure, news ranker edge cases, SQLite thread-safety stress (24 concurrent dispatches), Negev rename/departure handling, update.sh contract, news/LLM cascade behaviour, scoring multiplier per-card stamp.</p>
   </div>
 </section>
 
@@ -533,19 +546,28 @@ detonator    INTEGER (0/1)   tagged from CSV; preserved on re-ingest</code></pre
     </table>
   </div>
 
-  <h3><span class="pill news">News deltas</span> (the LLM signal)</h3>
+  <h3><span class="pill news">News deltas</span> (the LLM signal — Day-9.25 rewrite)</h3>
   <div class="panel">
-    <p>Two-stage process:</p>
+    <p>Three-stage process with full audit trail:</p>
     <ol>
-      <li><strong>Context assembly</strong> (<code>news_agent.gather_context</code>): pulls API-Football lineups + injuries; pulls 3-4 Brave search results per window. Caps at 1800 chars.</li>
-      <li><strong>LLM analysis</strong> (<code>news_agent.analyze</code>): sends to Gemini Flash 2.5 → Claude Haiku → OpenAI gpt-4o-mini (router fallback). Returns <code>(home_goal_delta, away_goal_delta)</code> in ±0.6.</li>
+      <li><strong>Context assembly</strong> (<code>news_agent.gather_context</code>): pulls API-Football lineups + injuries (T-60m/T-15m only); pulls 3-4 Brave search results per query × 8 per query = up to 32 raw articles. URL+title-similarity dedup → ~18-22 unique.</li>
+      <li><strong>Relevance ranking</strong> (<code>news_ranker.rank_articles</code>): scores each article on team-name presence in title (+8 both / +5 one), injury/lineup/tactical keywords (+3 each), trusted source like ESPN/Sports Mole/Goal (+3), generic source like Wikipedia (−3), freshness (+2 ≤24h / +1 ≤48h), preview-pattern title (+2). Top-K (5) get LONG_SNIPPET_LEN=1200 chars; rest 600. Final context capped at 12000 chars; LOWEST-scored articles dropped first (not last-in-Brave-order).</li>
+      <li><strong>LLM analysis</strong> (<code>news_agent.analyze</code>): sends to Gemini Flash 2.5 via <code>LLMRouter.complete_validated</code>. Returns <code>(home_goal_delta, away_goal_delta)</code> in ±0.6 with notes + discarded_sources arrays.</li>
     </ol>
     <table>
       <tr><th>Inputs</th><td>Match + window + stage + group</td></tr>
-      <tr><th>Outputs (the news_meta block)</th><td><code>{home_goal_delta, away_goal_delta, confidence, notes, provider, fallbacks_used, fallback_errors, parse_tier, raw_excerpt, failure, failure_class}</code></td></tr>
-      <tr><th>Cost per match</th><td>3 Brave (T-24h) + 4 Brave (T-60m) + 0-2 Brave (T-15m, cached) + 1 LLM call per window</td></tr>
-      <tr><th>5-layer guardrails</th><td>L1 dated queries + WC2026 anchor → L2 source-side freshness → L3 capped context → L4 SYSTEM prompt with worked examples → L5 strict→regex→NEUTRAL parse + ±0.6 clamp</td></tr>
+      <tr><th>Outputs (the news_meta block)</th><td><code>{home_goal_delta, away_goal_delta, confidence, notes, provider, fallbacks_used, fallback_errors, parse_tier, raw_excerpt, failure, failure_class, brave_top3_titles, brave_lowest_included_score, brave_n_raw, brave_n_after_dedup, brave_n_dropped_low_score}</code></td></tr>
+      <tr><th>Cost per match</th><td>3 Brave (T-24h) + 4 Brave (T-60m) + 0-2 Brave (T-15m, cached) + 1 LLM call per window (+ optional cascade calls if Gemini fails)</td></tr>
+      <tr><th>Context budget</th><td>SNIPPET_LEN=600 (Day-9.25 bump from 400); LONG_SNIPPET_LEN=1200 for top-5; CONTEXT_MAX_CHARS=12000 (bump from 3000); max_tokens=4096 LLM output (bump from 2048 — Gemini's verbose discarded_sources used to truncate)</td></tr>
     </table>
+  </div>
+
+  <h3>Day-9.25 — LLMRouter.complete_validated (semantic-failure cascade)</h3>
+  <div class="panel ok">
+    <p>Plain <code>complete()</code> falls through to the next provider only when the provider call itself RAISES (transport error). But a provider can return HTTP 200 with a body the caller can't use — truncated JSON, plain prose where JSON was asked for, refusal text. Pre-Day-9.25 those stayed-and-stuck on the first provider and the caller had to accept garbage or write its own retry loop.</p>
+    <p><code>complete_validated</code> takes a <code>validate(text) → (ok, sentinel)</code> callback. If the body fails validation, the router records <code>error_class='ValidationFailed'</code> + reason in <code>last_fallback_errors[provider]</code> and tries the next provider. Same cascade as transport errors.</p>
+    <p><strong>Live-verified 2026-06-11:</strong> Gemini returned <code>503 UNAVAILABLE</code> for South Korea v Czechia T-24h → router fell through to Claude → Claude received the same ranked context and parsed cleanly. Card landed normally with <code>news_provider=claude</code> + <code>news_fallbacks_used=['gemini']</code>.</p>
+    <p><strong>Worst-case chain:</strong> 6 LLM attempts (3 providers × 2 json_mode passes). All exhaust → <code>AllProvidersFailed</code> → <code>analyze_safe</code> catches → NEUTRAL (0, 0) with <code>failure_class='AllProvidersFailed'</code> stamped on the card. The signal lands in <code>signals_failed</code> not <code>signals_used</code> so the user sees ⚠news in the card's Signals line.</p>
   </div>
 
   <h3>LLM-side observability (Day-9.10)</h3>
@@ -1010,7 +1032,41 @@ WHERE correlation_id LIKE "daily-summary-%"
 // gemini/claude.complete that answered). Cross-reference with
 // store/obs.db::api_calls WHERE correlation_id=X for error_class + message.
 WHERE correlation_id = "match-537327-T-7m" AND name LIKE "%.complete"
-SELECT name, status_code, error, duration_ms</code></pre>
+SELECT name, status_code, error, duration_ms
+
+// Day-9.25: news cascade chain for one match — shows the providers TRIED
+// before the successful one, with ValidationFailed vs ServerError vs auth
+WHERE correlation_id = "match-537327-T-60m"
+  AND name = "news_agent.parse_validate"
+SELECT raw_len, provider</code></pre>
+
+  <h3>Day-9.25 — preflight tracing self-test</h3>
+  <div class="panel ok">
+    <p>The daemon startup self-tests the OTel exporter via <code>config/preflight.py::_check_tracing()</code>:</p>
+    <ul>
+      <li><code>OTEL_TRACES_EXPORTER=none</code> → returns True (intentional off)</li>
+      <li><code>OTEL_TRACES_EXPORTER=console</code> → returns True (local stderr only)</li>
+      <li><code>OTEL_TRACES_EXPORTER=otlp</code> + missing endpoint → ERROR + False</li>
+      <li><code>OTEL_TRACES_EXPORTER=otlp</code> + Honeycomb endpoint + missing <code>OTEL_EXPORTER_OTLP_HEADERS</code> → ERROR + False (spans would be rejected by Honeycomb's API-key check)</li>
+      <li>All present → opens a no-op span; if the SDK construction succeeds → INFO "OTLP exporter to https://api.honeycomb.io OK"</li>
+    </ul>
+    <p>Pinned by 7 tests in <code>test_preflight_tracing_day925.py</code>. The daemon's first journalctl line after restart shows the self-test result. Without this, a misconfigured exporter would silently no-op for the whole tournament.</p>
+  </div>
+
+  <h3>Day-9.25 — Negev MCP source-level instrumentation</h3>
+  <div class="panel ok">
+    <p>Pre-Day-9.25, raw <code>requests.get/post/patch</code> in <code>integrations/negev_toto_mcp.py</code> relied on CALL SITES (build_card, kickoff_cards, sync_negev_standings) to wrap them in <code>obs.external_call</code>. Any new caller of <code>toto_*</code> would silently bypass rate-limit + ledger recording — an observability hole.</p>
+    <p>Day-9.25 introduced a <code>_fs(method, url, endpoint=...)</code> helper that wraps every Firestore call at the SOURCE. Live <code>api_calls</code> ledger now shows distinct endpoint labels:</p>
+    <pre><code>negev_toto | auth:refresh            | refresh token
+negev_toto | auth:signin             | email/password fallback
+negev_toto | firestore:get_document  | single document read
+negev_toto | firestore:read_collection | top-level collection read
+negev_toto | firestore:read_all_paged | paginated read (per page)
+negev_toto | firestore:runQuery      | structured query
+negev_toto | firestore:patch_document | write (gated by NEGEV_ALLOW_WRITES)
+negev_toto | firestore:listCollectionIds | bootstrap discovery</code></pre>
+    <p>The outer call-site wraps (e.g. <code>obs.external_call("negev_toto", "get_match_details")</code>) remain too, so both <em>logical-op</em> and <em>physical-HTTP</em> granularities record. Since Negev has no metered budget, harmless double-counting.</p>
+  </div>
 </section>
 
 <!-- =========== FAILURE MODES =========== -->

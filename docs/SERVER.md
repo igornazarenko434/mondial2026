@@ -268,6 +268,32 @@ landed without news:
 sudo -u mondial bash -c 'set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/brave_quota.py'
 ```
 
+### Day-9.25 — per-card audit, news inspection, pick analysis
+
+```bash
+# Full post-fire audit for one card (zero API calls, reads SQLite + journalctl hint)
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/audit_fired_card.py 537327 T-7m'
+# 10 sections: runs ledger, predictions payload, rendered card body,
+# api_calls trail, signal audit, scoring_table audit (Day-9.25 section 4b),
+# news audit, feature flags, Honeycomb hint, journalctl hint, anomaly flags
+
+# News-agent forensic deep-dive (1 LLM call + 3 Brave queries)
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/news_inspect.py Mexico "South Africa" --window T-24h'
+# Shows: 3 Brave queries → ranked + scored articles (rank N, score K) →
+# full LLM context → system prompt → provider chain visited (with cascade
+# errors) → Gemini's notes/discarded_sources reasoning → final clamped deltas
+
+# Per-match EV vs MODAL vs LONGSHOT trade-off table (zero API calls)
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/pick_analyzer.py Mexico "South Africa" --detonator --xg-home 2.05 --xg-away 0.65 --odds-h 1.43 --odds-d 4.56 --odds-a 8.77'
+# Top-10 candidates with EV, P(any pts), upside, std-dev, Sharpe.
+# Tags: ← EV-MAX (system pick) / ← MODAL / ← SAFEST DIR / ← LONGSHOT
+
+# Negev multiplier drift (canary; 1 free Negev call)
+sudo -u mondial bash -c 'cd /home/mondial/mondial2026 && set -a && source .env && set +a && PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py'
+# Diffs config/rules.py grids vs Negev's authoritative grid cell-by-cell.
+# ALSO runs automatically on every update.sh invocation (step 6b).
+```
+
 ### Calendar & cross-source correlation audit (offline, read-only, ~1 s)
 
 ```bash
