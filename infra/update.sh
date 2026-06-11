@@ -169,39 +169,52 @@ ok "saved current SHA: $CURRENT"
 bold "3. fetch + show incoming changes"
 git_as_mondial fetch --quiet origin main
 INCOMING="$(git_as_mondial rev-parse origin/main)"
+NO_CODE_CHANGE=0
 if [ "$CURRENT" = "$INCOMING" ]; then
-    ok "already at latest ($CURRENT) — nothing to do"
-    exit 0
+    ok "already at latest ($CURRENT) — no code to pull"
+    NO_CODE_CHANGE=1
+    # Day-9.25: do NOT early-exit here. Even when there's no code change to
+    # pull, the systemd unit + crontab MAY have drifted from a previous
+    # deploy that failed mid-sync, a hand-edit on the VM, or a bug in an
+    # older update.sh. Step 5b below is cheap (`cmp` two files) and self-
+    # healing — running it on every invocation ensures the VM converges
+    # to the repo's truth on the next admin touch.
 fi
-echo "   current  : $CURRENT"
-echo "   incoming : $INCOMING"
-echo "   diff stat:"
-git_as_mondial --no-pager log --oneline "$CURRENT..$INCOMING" | sed 's/^/     /'
-git_as_mondial --no-pager diff --stat "$CURRENT..$INCOMING" | sed 's/^/     /'
+if [ "$NO_CODE_CHANGE" -eq 0 ]; then
+    echo "   current  : $CURRENT"
+    echo "   incoming : $INCOMING"
+    echo "   diff stat:"
+    git_as_mondial --no-pager log --oneline "$CURRENT..$INCOMING" | sed 's/^/     /'
+    git_as_mondial --no-pager diff --stat "$CURRENT..$INCOMING" | sed 's/^/     /'
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
-    bold "DRY-RUN — would pull + restart. Re-run without --dry-run to apply."
+    bold "DRY-RUN — would pull (if any) + sync infra + restart. Re-run without --dry-run to apply."
     exit 0
 fi
 
-bold "4. git pull --ff-only"
-REQ_BEFORE="$(sha256sum "${INSTALL_DIR}/requirements.txt" | awk '{print $1}')"
-git_as_mondial pull --ff-only --quiet origin main
-ok "pulled to $(git_as_mondial rev-parse HEAD)"
-REQ_AFTER="$(sha256sum "${INSTALL_DIR}/requirements.txt" | awk '{print $1}')"
+if [ "$NO_CODE_CHANGE" -eq 0 ]; then
+    bold "4. git pull --ff-only"
+    REQ_BEFORE="$(sha256sum "${INSTALL_DIR}/requirements.txt" | awk '{print $1}')"
+    git_as_mondial pull --ff-only --quiet origin main
+    ok "pulled to $(git_as_mondial rev-parse HEAD)"
+    REQ_AFTER="$(sha256sum "${INSTALL_DIR}/requirements.txt" | awk '{print $1}')"
 
-bold "5. requirements.txt changed?"
-if [ "$REQ_BEFORE" != "$REQ_AFTER" ]; then
-    warn "requirements.txt changed — reinstalling deps inside venv"
-    sudo -u "$INSTALL_USER" bash -c "
-        set -e
-        cd '$INSTALL_DIR'
-        .venv/bin/pip install --quiet --upgrade pip
-        .venv/bin/pip install --quiet -r requirements.txt
-    "
-    ok "pip install completed"
+    bold "5. requirements.txt changed?"
+    if [ "$REQ_BEFORE" != "$REQ_AFTER" ]; then
+        warn "requirements.txt changed — reinstalling deps inside venv"
+        sudo -u "$INSTALL_USER" bash -c "
+            set -e
+            cd '$INSTALL_DIR'
+            .venv/bin/pip install --quiet --upgrade pip
+            .venv/bin/pip install --quiet -r requirements.txt
+        "
+        ok "pip install completed"
+    else
+        ok "no dep changes — skipping pip install"
+    fi
 else
-    ok "no dep changes — skipping pip install"
+    ok "skipping steps 4-5 (no code change to pull/install)"
 fi
 
 # ─── Day-9.25: sync infra/* into the system paths ────────────────────────
@@ -212,10 +225,11 @@ fi
 # Mac would update the repo file on the VM but the running daemon would
 # STILL use the stale unit until someone manually copied + daemon-reload'd.
 # Same gap for the crontab.
-bold "5b. sync infra/* to system paths"
+bold "5b. sync infra/* to system paths (runs even when no code changed)"
 SYSTEMD_REPO_UNIT="${INSTALL_DIR}/infra/mondial2026.service"
 SYSTEMD_LIVE_UNIT="/etc/systemd/system/mondial2026.service"
 SYSTEMD_CHANGED=0
+CRON_CHANGED=0
 if [ -f "$SYSTEMD_REPO_UNIT" ]; then
     if ! cmp -s "$SYSTEMD_REPO_UNIT" "$SYSTEMD_LIVE_UNIT"; then
         warn "systemd unit drifted — syncing infra/mondial2026.service → $SYSTEMD_LIVE_UNIT"
@@ -237,6 +251,7 @@ if [ -f "$CRON_REPO_FILE" ]; then
     if [ "$CRON_INSTALLED" != "$CRON_REPO_CONTENT" ]; then
         warn "crontab drifted — installing from $CRON_REPO_FILE"
         sudo -u "$INSTALL_USER" crontab "$CRON_REPO_FILE"
+        CRON_CHANGED=1
         ok "crontab synced ($(grep -c '^[^#]' "$CRON_REPO_FILE" 2>/dev/null || echo '?') active lines)"
     else
         ok "crontab up-to-date"
@@ -246,6 +261,14 @@ else
 fi
 
 # ─────────────────────────── restart + auto-rollback ───────────────────────────
+# Day-9.25: if there's no code change AND no infra drift, the daemon doesn't
+# need restarting — bail out cleanly so re-runs of update.sh on a fresh VM
+# don't add unnecessary downtime.
+if [ "$NO_CODE_CHANGE" -eq 1 ] && [ "$SYSTEMD_CHANGED" -eq 0 ]; then
+    ok "no code change, no infra drift — daemon already running latest. Done."
+    exit 0
+fi
+
 if restart_and_verify; then
     bold "6. last 30 journal lines"
     journalctl -u "$SERVICE" -n 30 --no-pager
