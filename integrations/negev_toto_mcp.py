@@ -1368,6 +1368,9 @@ def toto_save_broad_bets(winner: str | None = None,
             "selections": resolved, "patched": out}
 
 
+_SIDE_BET_ID_RE = __import__("re").compile(r"^sb_\d{4}-\d{2}-\d{2}$")
+
+
 @mcp.tool()
 def toto_submit_side_bet_answer(side_bet_id: str,
                                   answer: bool,
@@ -1377,29 +1380,43 @@ def toto_submit_side_bet_answer(side_bet_id: str,
 
     DISABLED unless NEGEV_ALLOW_WRITES=1.
 
-    **STATUS as of 2026-06-07**: the Negev founder hasn't published any
-    side bets yet — the UI's "Upcoming Side Bets" panel is empty. The doc
-    SHAPE is captured from the schema (see SCHEMA_negev.md side bet section)
-    but the exact answer-submission PATH/shape was never captured from
-    DevTools because no live submission existed to observe. Two likely
-    candidates (best guess, both Firestore PATCH):
+    **Verified 2026-06-11** against the first published side bet
+    `sb_2026-06-11` ("Mexico - South Africa total goals over 2.5"). The
+    Negev app's "Side Bets" panel reads from a flat doc in the top-level
+    `bets` collection, with id `{tid}_{side_bet_id}_{uid}` — i.e. the same
+    layout as per-match picks (`bets/{tid}_{match_id}_{uid}`), with
+    `side_bet_id` taking the role of `match_id`. Earlier guesses A
+    (`tournaments/{tid}/sideBets/{sbid}/answers/{uid}`) were rejected by
+    the Firestore security rules with 403 PERMISSION_DENIED.
 
-      A. `tournaments/{tid}/sideBets/{side_bet_id}/answers/{my_uid}` —
-         a sub-collection per bet
-      B. `bets/{tid}_sb_{side_bet_id}_{my_uid}` — flat layout matching
-         per-match bets
+    Verified doc shape (no extra fields):
+      userId        — my uid
+      tournamentId  — tid
+      sideBetId     — e.g. "sb_2026-06-11"
+      answer        — bool (True=Yes, False=No)
+      submittedAt   — ISO-8601 timestamp
 
-    This tool implements option A (most likely given the parallel with
-    broadBets). When the founder publishes the first real side bet, run
-    once with `dry_run=True`, manually submit Y/N in the web app with
-    DevTools Network tab open, and compare. Update this function if the
-    path differs.
+    Idempotent: re-submitting overwrites my prior answer (PATCH on same
+    doc id). The app immediately shows "✅ BET RECEIVED" once the doc
+    exists with these fields.
+
+    Future side-bet variants (multiple-choice, integer threshold, etc.)
+    will need a sibling tool — the verified shape here is Yes/No only.
+    If the founder publishes a new side bet variant whose UI doesn't
+    accept this tool's output, re-run the DevTools capture recipe in
+    `SCHEMA_negev.md` and add a parallel tool.
 
     Args:
-      side_bet_id: the side-bet doc id (e.g. `"sb_2026-06-12"`)
+      side_bet_id: the side-bet doc id, expected pattern `sb_YYYY-MM-DD`
+                   (validated — typos like `2026-06-11` without the `sb_`
+                   prefix get rejected before any network call).
       answer:      True = Yes, False = No
       dry_run:     plan-and-return without calling Firestore
     """
+    if not _SIDE_BET_ID_RE.match(side_bet_id):
+        return {"error": f"invalid side_bet_id {side_bet_id!r}: expected "
+                          f"format 'sb_YYYY-MM-DD'. Look it up via "
+                          f"toto_get_side_bets_upcoming()."}
     tid = _tid(tournament_id)
     uid = _token.get("uid")
     if not uid:
@@ -1413,13 +1430,10 @@ def toto_submit_side_bet_answer(side_bet_id: str,
         "answer":     bool(answer),
         "submittedAt": datetime.now(timezone.utc).isoformat(),
     }
-    path = f"tournaments/{tid}/sideBets/{side_bet_id}/answers/{uid}"
+    path = f"bets/{tid}_{side_bet_id}_{uid}"
 
     if dry_run:
-        return {"dry_run": True, "would_patch": path, "fields": fields,
-                "note": "Path is BEST GUESS — verify against DevTools "
-                        "Network capture when first real side bet is "
-                        "submitted, then update this function."}
+        return {"dry_run": True, "would_patch": path, "fields": fields}
 
     if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
         return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
@@ -1427,6 +1441,31 @@ def toto_submit_side_bet_answer(side_bet_id: str,
                 "would_patch": path}
 
     return toto_patch_document(path, json.dumps(fields))
+
+
+@mcp.tool()
+def toto_delete_document(path: str) -> dict:
+    """Delete one Firestore document by its path.
+
+    DISABLED unless NEGEV_ALLOW_WRITES=1. Use sparingly — there is no undo.
+    Typical use: clean up orphan/stray docs left over from prior schema
+    guesses (e.g. an early-tournament write to a guessed side-bet path
+    before the canonical path was pinned). Returns {"deleted": path} on
+    success or {"error": "..."} on failure (e.g. 403 from security rules
+    if you don't own the doc, or 404 if it never existed).
+
+    Args:
+      path: Firestore doc path, e.g.
+            "bets/n40ykJlOIA9Mg839hz91_sb_2026-06-11_<uid>".
+    """
+    if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
+        return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable."}
+    r = _fs("DELETE", f"{_base()}/{path}",
+             endpoint="firestore:delete_document",
+             headers=_headers(), timeout=20)
+    if not r.ok:
+        return {"error": f"{r.status_code}: {r.text[:200]}", "path": path}
+    return {"deleted": path}
 
 
 if __name__ == "__main__":
