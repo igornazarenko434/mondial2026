@@ -260,30 +260,17 @@ else
     warn "no $CRON_REPO_FILE in repo — skipping crontab sync"
 fi
 
-# ─────────────────────────── restart + auto-rollback ───────────────────────────
-# Day-9.25: if there's no code change AND no infra drift, the daemon doesn't
-# need restarting — bail out cleanly so re-runs of update.sh on a fresh VM
-# don't add unnecessary downtime.
-if [ "$NO_CODE_CHANGE" -eq 1 ] && [ "$SYSTEMD_CHANGED" -eq 0 ]; then
-    ok "no code change, no infra drift — daemon already running latest. Done."
-    exit 0
-fi
-
-if restart_and_verify; then
-    bold "6. last 30 journal lines"
-    journalctl -u "$SERVICE" -n 30 --no-pager
-
-    # Day-9.25: post-deploy smoke audits. ALL of these are 0-quota or low-cost
-    # (≤ 1 free Negev call) and read-only. Failures are WARN-only — we don't
-    # fail the deploy on a smoke-check fail, but we DO log loudly so the
-    # operator sees something is off the moment they finish update.sh.
-    bold "6b. post-deploy smoke audits (free / read-only)"
+# ──── Day-9.25: post-deploy smoke audits — extracted into a function so
+# they run on EVERY invocation (even no-op "already at latest" runs).
+# Heartbeat behavior: every time the operator runs update.sh, we re-verify
+# the .env hygiene + Negev grid alignment. A drift in either is caught
+# the moment it happens, not weeks later when a card scores wrong.
+run_smoke_audits() {
+    bold "6b. smoke audits (free / read-only — run on every invocation)"
 
     # 6b.i — .env inline-comment trap detector (zero API cost, reads .env)
     # Catches the 2026-06-10 incident where NEGEV_EMAIL had an inline
     # comment that systemd's parser didn't strip → INVALID_EMAIL silently.
-    # `audit_env.py --no-auth` skips the live Negev round-trip; the
-    # inline-comment leak detection is purely local.
     if [ -f "${INSTALL_DIR}/tools/audit_env.py" ]; then
         if sudo -u "$INSTALL_USER" bash -c "
             cd '$INSTALL_DIR'
@@ -299,14 +286,13 @@ if restart_and_verify; then
     fi
 
     # 6b.ii — Negev scoring-grid drift (1 free Negev call)
-    # The grids never change mid-tournament, but a Negev admin tweak would
-    # silently invalidate every EV-optimal pick. This is the canary that
-    # catches drift the same day it happens.
+    # The grids never change mid-tournament, but a Negev admin tweak
+    # would silently invalidate every EV-optimal pick. Canary check.
     if [ -f "${INSTALL_DIR}/tools/audit_negev_multipliers.py" ]; then
         if sudo -u "$INSTALL_USER" bash -c "
             cd '$INSTALL_DIR'
             set -a; source .env; set +a
-            PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py
+            PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py --quiet
         " > /tmp/audit_neg_out 2>&1; then
             ok "audit_negev_multipliers: grids match config/rules.py"
         else
@@ -316,19 +302,19 @@ if restart_and_verify; then
         rm -f /tmp/audit_neg_out
     fi
 
-    # 6b.iii — preflight summary from the running daemon's first log line
-    # The daemon's own preflight ran at startup; surface its enabled/missing
-    # features here so the operator sees what's active without grepping
-    # journalctl manually.
+    # 6b.iii — preflight summary from the running daemon's recent log
+    # Surface the daemon's own preflight 'enabled: ...' line so the operator
+    # sees which features are active without grepping journalctl manually.
     PREFLIGHT_LINE="$(journalctl -u "$SERVICE" --since '120 seconds ago' \
                        --no-pager 2>/dev/null | grep -m1 'preflight — enabled' \
                        || true)"
     if [ -n "$PREFLIGHT_LINE" ]; then
-        # Extract just the "enabled: ..." substring; trim escape chars.
         ENABLED="$(printf '%s' "$PREFLIGHT_LINE" | sed -E 's/.*"msg": "preflight \\\\u2014 (enabled: [^"]*).*/\1/')"
         ok "$ENABLED"
     fi
+}
 
+print_summary() {
     bold "7. post-deploy summary"
     NEW_SHA="$(git_as_mondial rev-parse HEAD)"
     UPTIME="$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE")"
@@ -342,6 +328,26 @@ if restart_and_verify; then
     echo "   last card sent     : $LAST_CARD"
     echo "   systemd unit synced: $( [ "$SYSTEMD_CHANGED" -eq 1 ] && echo 'YES (drifted, re-applied)' || echo 'already matched' )"
     echo "   crontab synced     : $( [ "$CRON_CHANGED" -eq 1 ] && echo 'YES (drifted, re-applied)' || echo 'already matched' )"
+}
+
+# ─────────────────────────── restart + auto-rollback ───────────────────────────
+# Day-9.25: if there's no code change AND no infra drift, the daemon doesn't
+# need restarting. But we STILL run the smoke audits + summary so the
+# operator gets the same heartbeat info as on a real deploy.
+if [ "$NO_CODE_CHANGE" -eq 1 ] && [ "$SYSTEMD_CHANGED" -eq 0 ]; then
+    ok "no code change, no infra drift — daemon already running latest"
+    run_smoke_audits
+    print_summary
+    bold "✓ UPDATE OK — daemon was already up-to-date; audits ran clean"
+    exit 0
+fi
+
+if restart_and_verify; then
+    bold "6. last 30 journal lines"
+    journalctl -u "$SERVICE" -n 30 --no-pager
+
+    run_smoke_audits
+    print_summary
 
     bold "✓ UPDATE OK — daemon running latest"
     echo
