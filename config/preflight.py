@@ -51,6 +51,59 @@ def _detect_inline_comment_leaks() -> list[tuple[str, str]]:
     return out
 
 
+def _check_tracing() -> bool:
+    """Day-9.25 OTel exporter self-test. Returns True iff:
+      - TRACES_EXPORTER is "none" → tracing intentionally off; return True
+      - TRACES_EXPORTER is "console" → no remote endpoint needed; return True
+      - TRACES_EXPORTER is "otlp" → endpoint+headers configured, the OTel SDK
+        importable, and a no-op span open/close cycle survives end-to-end
+
+    A False return shows up in the preflight log as a degraded feature so
+    the operator notices BEFORE missing traces in Honeycomb. We never raise
+    — preflight is informational, not a hard gate (the daemon still runs)."""
+    try:
+        from config import observability as cfg
+    except Exception as e:                              # noqa: BLE001
+        log.warning("preflight tracing — observability config import failed: %s", e)
+        return False
+    if not cfg.ENABLED or cfg.TRACES_EXPORTER in (None, "", "none"):
+        log.info("preflight tracing — disabled (TRACES_EXPORTER=%r)",
+                  cfg.TRACES_EXPORTER)
+        return True                                       # intentional off
+    if cfg.TRACES_EXPORTER == "console":
+        log.info("preflight tracing — console exporter (local stderr only)")
+        return True
+    if cfg.TRACES_EXPORTER == "otlp":
+        if not cfg.OTLP_ENDPOINT:
+            log.error("preflight tracing — OTEL_TRACES_EXPORTER=otlp but "
+                      "OTEL_EXPORTER_OTLP_ENDPOINT empty; traces will NO-OP")
+            return False
+        # Honeycomb requires an auth header. Don't fail on absent (could be a
+        # local Jaeger), just note it.
+        if "honeycomb" in cfg.OTLP_ENDPOINT.lower() and \
+                not os.environ.get("OTEL_EXPORTER_OTLP_HEADERS"):
+            log.error("preflight tracing — Honeycomb endpoint configured but "
+                      "OTEL_EXPORTER_OTLP_HEADERS empty (need x-honeycomb-team "
+                      "API key); spans will be rejected")
+            return False
+        # Live-fire a no-op span. Failure = the SDK isn't installed or the
+        # exporter config is malformed at construction time.
+        try:
+            from core.obs.tracing import span as _span
+            with _span("preflight.healthcheck", source="preflight"):
+                pass
+            log.info("preflight tracing — OTLP exporter to %s OK",
+                      cfg.OTLP_ENDPOINT)
+            return True
+        except Exception as e:                          # noqa: BLE001
+            log.error("preflight tracing — span open/close failed (%s: %s); "
+                      "traces will be lost", type(e).__name__, e)
+            return False
+    log.warning("preflight tracing — unknown TRACES_EXPORTER=%r; treating as off",
+                cfg.TRACES_EXPORTER)
+    return False
+
+
 def check() -> dict:
     status = {
         "fixtures (football-data)": bool(os.environ.get("FOOTBALL_DATA_API_KEY")),
@@ -102,6 +155,13 @@ def check() -> dict:
                       "section will be ignored", e)
             overrides_ok = False
     status["strategy_overrides_ok"] = overrides_ok
+
+    # Day-9.25 — OTel exporter self-test. If TRACES_EXPORTER=otlp but the
+    # endpoint or auth header is missing/garbled, spans silently no-op and
+    # Honeycomb shows nothing. The right time to find out is at startup, not
+    # 3 days into the tournament when debugging a card failure.
+    status["tracing"] = _check_tracing()
+
     enabled = [k for k, v in status.items() if v]
     missing = [k for k, v in status.items() if not v]
     log.info("preflight — enabled: %s", ", ".join(enabled) or "none")

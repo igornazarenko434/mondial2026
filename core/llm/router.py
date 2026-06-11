@@ -47,6 +47,10 @@ class LLMRouter:
         # by complete()/complete_json() so the card's news_fallbacks_used
         # field shows both bypassed-up-front and tried-and-failed.
         self._last_skips: list[str] = []
+        # Day-9.25: set by complete_validated() when a provider's body passes
+        # the caller's validator — saves the caller from re-parsing what the
+        # validator already parsed. None when no validated call has run yet.
+        self.last_validated_sentinel = None
 
     def _ordered_available(self) -> list[LLMProvider]:
         """Providers in chain order, filtered by (a) key configured and
@@ -148,6 +152,68 @@ class LLMRouter:
         # tracebacks show the upstream provider error, not just the wrapper.
         raise AllProvidersFailed(
             f"no usable LLM in chain {self.chain}; last error: {last}") from last
+
+    def complete_validated(self, system: str, prompt: str,
+                            validate, **kw):
+        """Day-9.25: cascade on **semantic** failure, not just transport.
+
+        Plain `complete()` falls through to the next provider only when the
+        provider call itself RAISES. But a provider can return HTTP 200 with
+        a body the caller can't use — e.g. truncated JSON (max_tokens cap),
+        plain prose where JSON was asked for, refusal text. Those used to
+        stay-and-stick on the first provider and the caller had to either
+        accept garbage or write its own retry loop.
+
+        `complete_validated` takes a `validate(text) -> (ok, sentinel)` callback:
+          - returns `(True, parsed_or_None)` → success, return the raw text;
+            the caller can stash the sentinel via `last_validated_sentinel`
+          - returns `(False, reason_str)` → treat as failure; record under
+            `last_fallback_errors[provider.name] = {"error_class":
+            "ValidationFailed", "error_message": reason_str}` and try next
+
+        Live evidence motivating this: the Mexico v South Africa T-24h card
+        on 2026-06-10. Gemini returned HTTP 200 with valid-looking JSON
+        truncated mid-string in `discarded_sources` (verbose listing blew
+        past max_tokens=2048). Parser correctly rejected the unterminated
+        string → `tier='failed'` → NEUTRAL deltas. Claude/OpenAI were not
+        tried — even though both were available with budget headroom — so
+        news contributed nothing despite a healthy chain.
+        """
+        last = None
+        tried: list[str] = []
+        errors: dict[str, dict] = {}
+        available = self._ordered_available()
+        for p in available:
+            try:
+                result = self._instrument(p, p.complete, system, prompt, **kw)
+            except Exception as e:                # noqa: BLE001
+                tried.append(p.name)
+                errors[p.name] = {"error_class": type(e).__name__,
+                                   "error_message": str(e)[:200]}
+                log.warning("provider '%s' raised (%s): %s; falling back",
+                            p.name, type(e).__name__, e)
+                last = e
+                continue
+            # Transport succeeded — now ask the caller if the body is usable.
+            ok, sentinel = validate(result)
+            if ok:
+                self.last_provider = p.name
+                self.last_fallbacks = list(self._last_skips) + tried
+                self.last_fallback_errors = errors
+                self.last_validated_sentinel = sentinel
+                return result
+            tried.append(p.name)
+            errors[p.name] = {"error_class": "ValidationFailed",
+                               "error_message": str(sentinel)[:200]}
+            log.warning("provider '%s' returned unparseable body (%s); "
+                        "falling back", p.name, sentinel)
+            last = ValueError(f"validation failed for {p.name}: {sentinel}")
+        self.last_provider = None
+        self.last_fallbacks = list(self._last_skips) + tried
+        self.last_fallback_errors = errors
+        raise AllProvidersFailed(
+            f"no LLM in chain {self.chain} returned a body that passed "
+            f"validation; last reason: {last}") from last
 
     def complete_json(self, system: str, prompt: str, **kw) -> dict:
         last = None

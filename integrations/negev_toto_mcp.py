@@ -108,8 +108,20 @@ def _id_token() -> str:
         if env_rt:
             _token["refresh"] = env_rt
     if _token["refresh"]:
-        r = requests.post(f"{REFRESH}?key={key}", timeout=20,
-                          data={"grant_type": "refresh_token", "refresh_token": _token["refresh"]})
+        # Day-9.25: wrap auth refresh in obs.external_call so token-rotation
+        # latency + failure counts land in the api_calls ledger like every
+        # other Negev call. Uses requests.post directly (not _fs) since the
+        # auth endpoint isn't a Firestore URL; we still want it on the same
+        # provider name "negev_toto" for budget aggregation.
+        try:
+            from core import obs as _obs_auth
+            _auth_wrap = _obs_auth.external_call("negev_toto", "auth:refresh", units=1)
+        except Exception:                                  # noqa: BLE001
+            from contextlib import nullcontext as _nullcontext_auth
+            _auth_wrap = _nullcontext_auth()
+        with _auth_wrap:
+            r = requests.post(f"{REFRESH}?key={key}", timeout=20,
+                              data={"grant_type": "refresh_token", "refresh_token": _token["refresh"]})
         if r.ok:
             d = r.json()
             _token.update(id=d["id_token"], refresh=d["refresh_token"],
@@ -133,9 +145,16 @@ def _id_token() -> str:
                 "NEGEV_ALLOW_PASSWORD_FALLBACK=1 (NOT recommended — masks "
                 "token-rotation drift).")
         _token["refresh"] = None      # explicit opt-in: let the password path try
-    r = requests.post(f"{IDENTITY}?key={key}", timeout=20, json={
-        "email": _cfg("NEGEV_EMAIL"), "password": _cfg("NEGEV_PASSWORD"),
-        "returnSecureToken": True})
+    try:
+        from core import obs as _obs_signin
+        _signin_wrap = _obs_signin.external_call("negev_toto", "auth:signin", units=1)
+    except Exception:                                  # noqa: BLE001
+        from contextlib import nullcontext as _nullcontext_signin
+        _signin_wrap = _nullcontext_signin()
+    with _signin_wrap:
+        r = requests.post(f"{IDENTITY}?key={key}", timeout=20, json={
+            "email": _cfg("NEGEV_EMAIL"), "password": _cfg("NEGEV_PASSWORD"),
+            "returnSecureToken": True})
     if not r.ok:
         raise RuntimeError(f"Firebase sign-in failed ({r.status_code}): {r.text[:200]}")
     d = r.json()
@@ -151,6 +170,35 @@ def _base() -> str:
 
 def _headers() -> dict:
     return {"Authorization": f"Bearer {_id_token()}"}
+
+
+def _fs(method: str, url: str, *, endpoint: str, **kw):
+    """Day-9.25: every Firestore call goes through `obs.external_call` so the
+    shared rate-limit bucket gates it AND the cost ledger records it with a
+    correlation_id (Honeycomb sees the span under the active stage:negev).
+    Before this, raw `requests.get/post/patch` in this module would skip
+    rate-limiting unless the CALL SITE wrapped them. A new tool calling
+    `toto_*` would silently bypass instrumentation — a pure observability
+    hole. Endpoint label tells you which logical Firestore endpoint per row
+    (e.g. 'firestore:get_document', 'firestore:runQuery').
+
+    Dispatch via the named `requests.<verb>` functions (not `request()`) so
+    existing tests that monkeypatch `requests.get/post/patch` keep working
+    without modification."""
+    try:
+        from core import obs as _obs
+        wrap = _obs.external_call("negev_toto", endpoint, units=1)
+    except Exception:                                      # noqa: BLE001
+        from contextlib import nullcontext
+        wrap = nullcontext()
+    verb = method.upper()
+    fn = {"GET": requests.get, "POST": requests.post,
+          "PATCH": requests.patch, "PUT": requests.put,
+          "DELETE": requests.delete}.get(verb)
+    if fn is None:
+        raise ValueError(f"unsupported HTTP verb: {method!r}")
+    with wrap:
+        return fn(url, **kw)
 
 
 def _decode(v: dict):
@@ -189,7 +237,8 @@ def _encode(val):
 def toto_ping() -> dict:
     """Sign in and list the top-level Firestore collections — run this FIRST to
     discover the data model (standings, broad bets, side bets, etc.)."""
-    r = requests.post(f"{_base()}:listCollectionIds", headers=_headers(), json={}, timeout=20)
+    r = _fs("POST", f"{_base()}:listCollectionIds", endpoint="firestore:listCollectionIds",
+            headers=_headers(), json={}, timeout=20)
     cols = r.json().get("collectionIds", []) if r.ok else []
     return {"signed_in_as_uid": _token.get("uid"), "collections": cols,
             "note": None if r.ok else f"listCollectionIds blocked ({r.status_code}); "
@@ -200,8 +249,8 @@ def toto_ping() -> dict:
 def toto_read_collection(collection: str, page_size: int = 50) -> dict:
     """Read documents from a top-level collection (e.g. 'standings', 'matches',
     'broadBets', 'sideBets', 'users'). Returns decoded documents."""
-    r = requests.get(f"{_base()}/{collection}", headers=_headers(),
-                     params={"pageSize": page_size}, timeout=20)
+    r = _fs("GET", f"{_base()}/{collection}", endpoint="firestore:read_collection",
+            headers=_headers(), params={"pageSize": page_size}, timeout=20)
     if not r.ok:
         return {"error": f"{r.status_code}: {r.text[:200]}", "collection": collection}
     return {"collection": collection, "documents": [_doc(d) for d in r.json().get("documents", [])]}
@@ -211,7 +260,8 @@ def toto_read_collection(collection: str, page_size: int = 50) -> dict:
 def toto_get_document(path: str) -> dict:
     """Read one document by its Firestore path (e.g. 'standings/<id>' or
     'users/<uid>/settings/preferences')."""
-    r = requests.get(f"{_base()}/{path}", headers=_headers(), timeout=20)
+    r = _fs("GET", f"{_base()}/{path}", endpoint="firestore:get_document",
+            headers=_headers(), timeout=20)
     if not r.ok:
         return {"error": f"{r.status_code}: {r.text[:200]}", "path": path}
     return _doc(r.json())
@@ -226,7 +276,8 @@ def toto_query(collection: str, field: str, op: str, value: str, limit: int = 50
         "where": {"fieldFilter": {"field": {"fieldPath": field}, "op": op,
                                   "value": _encode(value)}},
         "limit": limit}}
-    r = requests.post(f"{_base()}:runQuery", headers=_headers(), json=body, timeout=20)
+    r = _fs("POST", f"{_base()}:runQuery", endpoint="firestore:runQuery",
+            headers=_headers(), json=body, timeout=20)
     if not r.ok:
         return {"error": f"{r.status_code}: {r.text[:200]}"}
     return {"results": [_doc(row["document"]) for row in r.json() if "document" in row]}
@@ -243,7 +294,8 @@ def toto_patch_document(path: str, fields_json: str) -> dict:
     fields = json.loads(fields_json)
     params = [("updateMask.fieldPaths", k) for k in fields]
     body = {"fields": {k: _encode(v) for k, v in fields.items()}}
-    r = requests.patch(f"{_base()}/{path}", headers=_headers(), params=params, json=body, timeout=20)
+    r = _fs("PATCH", f"{_base()}/{path}", endpoint="firestore:patch_document",
+            headers=_headers(), params=params, json=body, timeout=20)
     if not r.ok:
         return {"error": f"{r.status_code}: {r.text[:200]}", "path": path}
     return {"updated": path, "fields": list(fields)}
@@ -291,16 +343,25 @@ def _tid(tournament_id: str | None) -> str:
 def _read_all(collection: str, page_size: int = 100,
               http_get=None) -> list[dict]:
     """Read all docs from a collection with pagination via Firestore's
-    nextPageToken. http_get is injectable so tests can mock without network."""
-    get = http_get or requests.get
+    nextPageToken. http_get is injectable so tests can mock without network.
+
+    Day-9.25: when no http_get is injected (production path), each HTTP page
+    is wrapped in obs.external_call so the rate-limit bucket gates every
+    page request individually. With http_get injected (tests), the wrap is
+    skipped — the test owns instrumentation."""
     docs: list[dict] = []
     page_token = None
     while True:
         params = {"pageSize": page_size}
         if page_token:
             params["pageToken"] = page_token
-        r = get(f"{_base()}/{collection}", headers=_headers(),
-                params=params, timeout=20)
+        if http_get is not None:
+            r = http_get(f"{_base()}/{collection}", headers=_headers(),
+                          params=params, timeout=20)
+        else:
+            r = _fs("GET", f"{_base()}/{collection}",
+                     endpoint="firestore:read_all_paged",
+                     headers=_headers(), params=params, timeout=20)
         if not r.ok:
             return docs                                # caller may inspect
         data = r.json()

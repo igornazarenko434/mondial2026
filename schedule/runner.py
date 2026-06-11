@@ -244,21 +244,37 @@ if __name__ == "__main__":
     from config.strategy import DEFAULT_TILT
 
     init_db()
-    conn = connect()
+    # Day-9.25: per-call connections instead of one shared conn. Python's
+    # sqlite3 connections are SINGLE-THREAD (check_same_thread=True by
+    # default), so a connection created in the main thread can't be used
+    # from a ThreadPoolExecutor worker. Live evidence: every fired card was
+    # logging "persist_card failed: SQLite objects created in a thread can
+    # only be used in that same thread" + strategy_context_fn was failing
+    # for the same reason → predictions table never populated; strategy
+    # silently fell back to pure-EV. Fix: open a fresh connection inside
+    # every callback (SQLite opens in microseconds — cheap) and close via
+    # `with closing(...)` so we don't leak. Each worker thread gets its own
+    # connection on dispatch; the main thread's tick callbacks (fixtures,
+    # ingest, standings, daily_summary, kickoff) also use fresh connections
+    # for symmetry — that way no path can accidentally reuse a stale conn.
+    from contextlib import closing
 
     def fixtures():
-        return repo.upcoming_matches(conn)
+        with closing(connect()) as conn:
+            return repo.upcoming_matches(conn)
 
     def ingest():
-        football_data.refresh(conn)       # calendar + results + bracket + detonator tags
+        with closing(connect()) as conn:
+            football_data.refresh(conn)   # calendar + results + bracket + detonator tags
 
     def build(match):
-        # Persist to the predictions table on the same connection used for
-        # fixture reads. window + events_cache come from the scheduler
-        # dispatch context (stamped on the match dict in _run_job).
-        return real_build_card(match, conn=conn,
-                               window=match.get("_window", "T-7m"),
-                               events_cache=match.get("_events_cache"))
+        # Per-worker connection so persist_card succeeds from the worker
+        # thread. window + events_cache come from the scheduler dispatch
+        # context (stamped on the match dict in _run_job).
+        with closing(connect()) as conn:
+            return real_build_card(match, conn=conn,
+                                   window=match.get("_window", "T-7m"),
+                                   events_cache=match.get("_events_cache"))
 
     def events_cache_fetcher():
         # ONE batch call per tick → fetch_all_odds returns every WC event;
@@ -274,20 +290,26 @@ if __name__ == "__main__":
     my_participant = os.environ.get("MY_PARTICIPANT", "me")
 
     def standings_updater():
-        update_standings(conn, participant=my_participant)
+        with closing(connect()) as conn:
+            update_standings(conn, participant=my_participant)
 
     def daily_summary_sender(*, now):
-        return _send_daily_summary(conn, runs(), now=now)
+        with closing(connect()) as conn:
+            return _send_daily_summary(conn, runs(), now=now)
 
     def kickoff_card_sender(*, now):
-        return _fire_kickoff_cards(conn, runs(), now=now)
+        with closing(connect()) as conn:
+            return _fire_kickoff_cards(conn, runs(), now=now)
 
     def strategy_context_loader():
         # Re-read on each dispatch. Cheap (two SELECTs). Means a fresh
         # `tools/standings_set.py set ...` is picked up by the very next
         # match-window job — no daemon restart needed.
+        # Day-9.25: per-call conn — strategy_context_fn runs in the worker
+        # thread (see _run_job) so it MUST open its own connection.
         from store import repo
-        return repo.standings_context(conn, me=my_participant)
+        with closing(connect()) as conn:
+            return repo.standings_context(conn, me=my_participant)
 
     SchedulerDaemon(fixtures, build, ingest_fn=ingest,
                     events_cache_fn=events_cache_fetcher,

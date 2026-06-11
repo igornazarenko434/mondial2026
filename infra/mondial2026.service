@@ -32,6 +32,13 @@ User=mondial
 Group=mondial
 WorkingDirectory=/home/mondial/mondial2026
 EnvironmentFile=/home/mondial/mondial2026/.env
+# Day-9.25: matplotlib auto-init tries to write a config dir under $HOME,
+# but ProtectHome=read-only blocks that → a WARNING every match dispatch:
+#   "mkdir failed for /home/mondial/.config/matplotlib: [Errno 30]
+#    Read-only file system" — followed by an "MPLCONFIGDIR not set" hint.
+# Cosmetic but every dispatch logs it under the news stage trace. Direct
+# matplotlib to /tmp (writable; PrivateTmp=true above makes it per-unit).
+Environment="MPLCONFIGDIR=/tmp/matplotlib"
 ExecStart=/home/mondial/mondial2026/.venv/bin/python -m schedule.runner
 Restart=always
 RestartSec=10

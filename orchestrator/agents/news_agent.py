@@ -616,20 +616,13 @@ def analyze(home: str, away: str, context_text: str,
     prompt = (f"Fixture: {home} (home) vs {away} (away).\n\n"
               f"Pre-match context:\n{context_text}\n\n"
               f"Return ONLY the JSON adjustment defined in the system prompt.")
-    # Try strict JSON mode first; fall back to plain text + lenient parse.
-    # Day-9.11: capture the json_mode fallback as observability — if a
-    # provider doesn't support json_mode and we silently re-call without it,
-    # the user can now see WHICH provider needed the fallback and why.
-    json_mode_fallback_used = False
-    json_mode_error_class: str | None = None
-    try:
-        raw = llm.complete(SYSTEM, prompt, json_mode=True, max_tokens=2048)
-    except Exception as e_jm:                          # noqa: BLE001
-        json_mode_fallback_used = True
-        json_mode_error_class = type(e_jm).__name__
-        log.warning("json_mode=True failed (%s: %s); retrying plain text",
-                    json_mode_error_class, e_jm)
-        raw = llm.complete(SYSTEM, prompt, json_mode=False, max_tokens=2048)
+    # Day-9.25: bump max_tokens 2048 → 4096. Live evidence (Mexico v SA
+    # T-24h, 2026-06-10): Gemini's verbose `discarded_sources` list pushed
+    # the response past 2048 tokens, truncating the JSON mid-string. The
+    # parser correctly rejected the unterminated string, fell to NEUTRAL.
+    # 4096 gives headroom for legitimately rich responses (notes +
+    # discarded_sources) without blowing the per-call cost.
+    _MAX_TOKENS = 4096
     # Wrap parse+validate in a span — Honeycomb now shows "parse_validate"
     # under stage:news so the auditor sees WHERE in the agent it landed.
     try:
@@ -638,9 +631,55 @@ def analyze(home: str, away: str, context_text: str,
         from contextlib import nullcontext
         def _span(name, **attrs):                       # type: ignore
             return nullcontext()
-    with _span("news_agent.parse_validate", raw_len=len(raw or "")):
-        parsed, tier = _parse_json_lenient(raw)
-        out = _validate_and_clamp(parsed)
+
+    # Day-9.25: cascade on parse-fail through the LLM chain instead of
+    # accepting NEUTRAL from the first provider. The validator returns
+    # ok=True when parse_tier is strict / regex_repair (we got usable
+    # data); ok=False on empty / failed → router tries next provider.
+    def _validator(raw_text: str):
+        with _span("news_agent.parse_validate", raw_len=len(raw_text or "")):
+            parsed_local, tier_local = _parse_json_lenient(raw_text)
+        if tier_local in ("strict", "regex_repair"):
+            return True, (parsed_local, tier_local)
+        return False, f"parse_tier={tier_local}"
+
+    # Test mocks may provide only `complete()` (no `complete_validated`).
+    # Fall back gracefully so the test surface area is unchanged. Production
+    # uses LLMRouter which has both, so the cascade is wired automatically.
+    _has_validated = hasattr(llm, "complete_validated")
+
+    json_mode_fallback_used = False
+    json_mode_error_class: str | None = None
+    try:
+        if _has_validated:
+            raw = llm.complete_validated(SYSTEM, prompt, _validator,
+                                          json_mode=True, max_tokens=_MAX_TOKENS)
+        else:
+            raw = llm.complete(SYSTEM, prompt, json_mode=True,
+                                max_tokens=_MAX_TOKENS)
+    except Exception as e_jm:                          # noqa: BLE001
+        json_mode_fallback_used = True
+        json_mode_error_class = type(e_jm).__name__
+        log.warning("json_mode=True %s (%s: %s); retrying plain text",
+                    "chain exhausted" if _has_validated else "raised",
+                    json_mode_error_class, e_jm)
+        # Plain-text retry: same validator, same cascade. If THIS also fails
+        # for every provider, analyze_safe catches AllProvidersFailed.
+        if _has_validated:
+            raw = llm.complete_validated(SYSTEM, prompt, _validator,
+                                          json_mode=False, max_tokens=_MAX_TOKENS)
+        else:
+            raw = llm.complete(SYSTEM, prompt, json_mode=False,
+                                max_tokens=_MAX_TOKENS)
+    if _has_validated:
+        # complete_validated stashed the parsed sentinel on the router so we
+        # don't have to re-parse the raw text a second time.
+        parsed, tier = llm.last_validated_sentinel
+    else:
+        # Legacy path: parse + validate in-place (the pre-Day-9.25 flow).
+        with _span("news_agent.parse_validate", raw_len=len(raw or "")):
+            parsed, tier = _parse_json_lenient(raw)
+    out = _validate_and_clamp(parsed)
     out["provider"] = getattr(llm, "last_provider", None)
     out["fallbacks_used"] = list(getattr(llm, "last_fallbacks", []) or [])
     out["fallback_errors"] = dict(getattr(llm, "last_fallback_errors", {}) or {})

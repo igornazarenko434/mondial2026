@@ -31,11 +31,25 @@ def _pct(v) -> str:
 
 
 def _ev_text(ev, detonator: bool) -> str:
-    """Format expected_points (float or dict). When detonator, append ×2 hint."""
+    """Format expected_points (float or dict).
+
+    Day-9.25: previously this multiplied `ev` by 2 again when detonator was
+    True, producing a misleading "EV ≈ 3.37 → ×2 detonator ≈ 6.74" line.
+    But `recommend()` (core/decision/ev_optimizer.py:36) ALREADY multiplies
+    by DETONATOR_FACTOR=2 inside the EV formula, so the stored
+    expected_points value IS the detonator-included expectation. The
+    arrow-line was applying ×2 a SECOND time and presenting 4× the no-
+    detonator EV as if it were the upside. `test_detonator_doubles_ev`
+    pins this: `expected_points(det=True) == 2 * expected_points(det=False)`.
+
+    Fix: present the value AS-IS plus an honest annotation that the ×2 is
+    already included. The user still sees the detonator badge in line 1's
+    "⚡ DETONATOR x2" suffix.
+    """
     if isinstance(ev, (int, float)):
         s = f"{ev:.2f}"
         if detonator:
-            s += f"  → ×2 detonator ≈ {ev * 2:.2f}"
+            s += "  (×2 detonator already applied)"
         return s
     if isinstance(ev, dict):
         parts = []
