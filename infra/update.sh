@@ -273,6 +273,62 @@ if restart_and_verify; then
     bold "6. last 30 journal lines"
     journalctl -u "$SERVICE" -n 30 --no-pager
 
+    # Day-9.25: post-deploy smoke audits. ALL of these are 0-quota or low-cost
+    # (≤ 1 free Negev call) and read-only. Failures are WARN-only — we don't
+    # fail the deploy on a smoke-check fail, but we DO log loudly so the
+    # operator sees something is off the moment they finish update.sh.
+    bold "6b. post-deploy smoke audits (free / read-only)"
+
+    # 6b.i — .env inline-comment trap detector (zero API cost, reads .env)
+    # Catches the 2026-06-10 incident where NEGEV_EMAIL had an inline
+    # comment that systemd's parser didn't strip → INVALID_EMAIL silently.
+    # `audit_env.py --no-auth` skips the live Negev round-trip; the
+    # inline-comment leak detection is purely local.
+    if [ -f "${INSTALL_DIR}/tools/audit_env.py" ]; then
+        if sudo -u "$INSTALL_USER" bash -c "
+            cd '$INSTALL_DIR'
+            set -a; source .env; set +a
+            PYTHONPATH=. .venv/bin/python tools/audit_env.py --skip-auth --quiet
+        " > /tmp/audit_env_out 2>&1; then
+            ok "audit_env: .env hygiene OK"
+        else
+            warn "audit_env reported issues — review:"
+            head -20 /tmp/audit_env_out | sed 's/^/     /'
+        fi
+        rm -f /tmp/audit_env_out
+    fi
+
+    # 6b.ii — Negev scoring-grid drift (1 free Negev call)
+    # The grids never change mid-tournament, but a Negev admin tweak would
+    # silently invalidate every EV-optimal pick. This is the canary that
+    # catches drift the same day it happens.
+    if [ -f "${INSTALL_DIR}/tools/audit_negev_multipliers.py" ]; then
+        if sudo -u "$INSTALL_USER" bash -c "
+            cd '$INSTALL_DIR'
+            set -a; source .env; set +a
+            PYTHONPATH=. .venv/bin/python tools/audit_negev_multipliers.py
+        " > /tmp/audit_neg_out 2>&1; then
+            ok "audit_negev_multipliers: grids match config/rules.py"
+        else
+            warn "audit_negev_multipliers reported drift — review:"
+            tail -15 /tmp/audit_neg_out | sed 's/^/     /'
+        fi
+        rm -f /tmp/audit_neg_out
+    fi
+
+    # 6b.iii — preflight summary from the running daemon's first log line
+    # The daemon's own preflight ran at startup; surface its enabled/missing
+    # features here so the operator sees what's active without grepping
+    # journalctl manually.
+    PREFLIGHT_LINE="$(journalctl -u "$SERVICE" --since '120 seconds ago' \
+                       --no-pager 2>/dev/null | grep -m1 'preflight — enabled' \
+                       || true)"
+    if [ -n "$PREFLIGHT_LINE" ]; then
+        # Extract just the "enabled: ..." substring; trim escape chars.
+        ENABLED="$(printf '%s' "$PREFLIGHT_LINE" | sed -E 's/.*"msg": "preflight \\\\u2014 (enabled: [^"]*).*/\1/')"
+        ok "$ENABLED"
+    fi
+
     bold "7. post-deploy summary"
     NEW_SHA="$(git_as_mondial rev-parse HEAD)"
     UPTIME="$(systemctl show -p ActiveEnterTimestamp --value "$SERVICE")"
@@ -280,10 +336,12 @@ if restart_and_verify; then
         "SELECT match_id, window, started_at FROM runs WHERE card_delivered=1 ORDER BY started_at DESC LIMIT 1" \
         2>/dev/null || echo 'none yet')"
     LAST_HEARTBEAT="$(stat -c %y "${INSTALL_DIR}/store/heartbeat" 2>/dev/null | cut -d. -f1 || echo 'no heartbeat yet')"
-    echo "   deployed SHA   : $NEW_SHA"
-    echo "   daemon started : $UPTIME"
-    echo "   last heartbeat : $LAST_HEARTBEAT"
-    echo "   last card sent : $LAST_CARD"
+    echo "   deployed SHA       : $NEW_SHA"
+    echo "   daemon started     : $UPTIME"
+    echo "   last heartbeat     : $LAST_HEARTBEAT"
+    echo "   last card sent     : $LAST_CARD"
+    echo "   systemd unit synced: $( [ "$SYSTEMD_CHANGED" -eq 1 ] && echo 'YES (drifted, re-applied)' || echo 'already matched' )"
+    echo "   crontab synced     : $( [ "$CRON_CHANGED" -eq 1 ] && echo 'YES (drifted, re-applied)' || echo 'already matched' )"
 
     bold "✓ UPDATE OK — daemon running latest"
     echo

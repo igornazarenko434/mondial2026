@@ -333,6 +333,33 @@ def build_card(match: dict, conn=None, *,
                              or card.get("note")
                           else "ev_optimized")
 
+    # Day-9.25: stamp the scoring TABLE the EV calc used + the actual
+    # multiplier for the chosen scoreline. Without this, the audit can't
+    # tell whether the right Group/KO/Final grid was selected for this
+    # match's stage (e.g. if football_data's stage code stops mapping
+    # cleanly via RULES_STAGE) — and audit_fired_card.py would have to
+    # re-derive it. Persisted to predictions.payload_json so the audit
+    # tool can show "scoring_table=ko, exact_multiplier=2.25" inline.
+    try:
+        from config.rules import STAGE_TYPE
+        from core.scoring.engine import exact_multiplier as _xm
+        stype = STAGE_TYPE.get(stage)
+        card["scoring_table"] = stype                       # 'group'|'ko'|'final'|None
+        if stype and card.get("pick_exact_score"):
+            pe = card["pick_exact_score"]
+            ph, pa = int(pe.get("home", 0)), int(pe.get("away", 0))
+            w, l = max(ph, pa), min(ph, pa)
+            card["exact_multiplier_used"] = _xm(stype, w, l)
+        else:
+            card["exact_multiplier_used"] = None
+    except Exception as e:                                   # noqa: BLE001
+        # Stamp the failure but DON'T let it crash the card — we're at the
+        # very end of build_card and degradation policy is to ship.
+        card["scoring_table"] = None
+        card["exact_multiplier_used"] = None
+        log.warning("scoring_table stamp failed for match %s (%s: %s)",
+                    card.get("match_id"), type(e).__name__, e)
+
     # ───── 7. Penalty-winner pick (KO + draw_prob >= threshold) ─────
     card["penalty_winner"] = None
     if stage in _KO_STAGES:

@@ -201,6 +201,36 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {ts[:19]}  {prov:<14} {ep_:<22} units={units}"
                   f"  HTTP={status_code or '-'}{err_s}")
 
+    # ─── 4b. Scoring-table audit (Day-9.25) ───
+    _banner("4b. Scoring-table audit (correct grid selected?)")
+    stage = (card.get("stage") or "?")
+    stable = card.get("scoring_table")
+    xm = card.get("exact_multiplier_used")
+    print(f"  match.stage:               {stage!r}")
+    print(f"  scoring_table chosen:      {stable!r}  "
+          f"(expected: 'group'|'ko'|'final' via STAGE_TYPE[stage])")
+    print(f"  exact_multiplier for pick: {xm}  "
+          f"(table cell for pick_exact_score)")
+    # Cross-check: re-derive from config + show whether it matches.
+    try:
+        from config.rules import STAGE_TYPE, SCORE_TABLE, TABLE_CAP
+        expected_stable = STAGE_TYPE.get(stage)
+        if stable != expected_stable:
+            print(f"  ⚠ DRIFT: card has scoring_table={stable!r} but "
+                  f"STAGE_TYPE[{stage!r}]={expected_stable!r}")
+        # Also show what the FULL row looks like for human verification
+        if expected_stable and ph is not None and pa is not None:
+            w, l = max(int(ph), int(pa)), min(int(ph), int(pa))
+            from core.scoring.engine import exact_multiplier as _xm
+            recomputed = _xm(expected_stable, w, l)
+            cap = TABLE_CAP.get(expected_stable)
+            print(f"  recomputed multiplier:     {recomputed}  "
+                  f"(cap for {expected_stable!r} = {cap})")
+            if xm is not None and abs(float(xm) - float(recomputed)) > 1e-9:
+                print(f"  ⚠ STAMPED vs RECOMPUTED differ — audit chain broken")
+    except Exception as e:                                  # noqa: BLE001
+        print(f"  (cross-check failed: {type(e).__name__}: {e})")
+
     # ─── 5. Signal audit ───
     _banner("5. Signal audit (the auditability rule)")
     sig_used = card.get("signals_used") or []

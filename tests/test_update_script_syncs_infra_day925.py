@@ -78,3 +78,43 @@ def test_systemd_unit_in_repo_has_mplconfigdir():
         unit = f.read()
     assert "MPLCONFIGDIR" in unit, \
         "infra/mondial2026.service missing MPLCONFIGDIR — Bug F would reappear"
+
+
+def test_update_script_runs_post_deploy_audit_env():
+    """Step 6b.i — audit_env.py runs post-restart so .env inline-comment
+    leaks (the 2026-06-10 incident) get caught the same minute they happen."""
+    src = _read_update_script()
+    assert "audit_env.py" in src, \
+        "update.sh doesn't run tools/audit_env.py post-deploy"
+    # The flag must skip the live Negev auth probe (we don't want every
+    # deploy to ping Negev — the daemon ingests it anyway on the next tick).
+    assert "--skip-auth" in src, \
+        "update.sh must pass --skip-auth to audit_env so the .env scan stays free"
+
+
+def test_update_script_runs_post_deploy_audit_negev_multipliers():
+    """Step 6b.ii — Negev multiplier-drift watchdog. The grids never change
+    mid-tournament, but an admin tweak would silently invalidate every
+    EV-optimal pick we compute. Catching it the day-of beats discovering
+    points dropping a week later."""
+    src = _read_update_script()
+    assert "audit_negev_multipliers.py" in src, \
+        "update.sh doesn't run tools/audit_negev_multipliers.py post-deploy"
+
+
+def test_update_script_surfaces_preflight_enabled_features():
+    """Step 6b.iii — surface the daemon's own preflight 'enabled: ...' line
+    so the operator finishes update.sh knowing exactly which features are
+    active vs degraded, without grepping journalctl manually."""
+    src = _read_update_script()
+    assert "preflight — enabled" in src or "preflight \\\\u2014 enabled" in src, \
+        "update.sh doesn't surface the daemon's preflight features line"
+
+
+def test_update_script_summary_includes_drift_flags():
+    """Final summary tells the operator if the systemd unit or crontab
+    DRIFTED and had to be re-applied. Without this, a quiet sync is
+    indistinguishable from no-sync-needed."""
+    src = _read_update_script()
+    assert "SYSTEMD_CHANGED" in src and "CRON_CHANGED" in src, \
+        "post-deploy summary must report drift-and-resync of systemd unit + crontab"
