@@ -8,7 +8,7 @@
 > cost. One human operator. Full LLM provider cascade with semantic
 > failure detection. Per-card forensic-grade audit trail.**
 
-[![tests](https://img.shields.io/badge/tests-731%20passing-brightgreen)]() [![python](https://img.shields.io/badge/python-3.12-blue)]() [![status](https://img.shields.io/badge/status-live%20in%20production-green)]() [![infra](https://img.shields.io/badge/infra-Hetzner%20CPX22%20%E2%82%AC5%2Fmo-orange)]() [![observability](https://img.shields.io/badge/tracing-Honeycomb-success)]() [![license](https://img.shields.io/badge/license-private-lightgrey)]()
+[![tests](https://img.shields.io/badge/tests-731%20passing-brightgreen)]() [![python](https://img.shields.io/badge/python-3.12-blue)]() [![status](https://img.shields.io/badge/status-live%20in%20production-green)]() [![infra](https://img.shields.io/badge/infra-Hetzner%20CPX22%20%E2%82%AC5%2Fmo-orange)]() [![observability](https://img.shields.io/badge/tracing-Honeycomb-success)]() [![license](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
 ---
 
@@ -414,4 +414,15 @@ session" first.
 
 ## License
 
-Private. Not for redistribution.
+[MIT License](./LICENSE) © 2026 Igor Nazarenko.
+
+You may freely use, fork, modify, and distribute this code (commercially or
+not), subject to keeping the copyright notice + permission notice intact.
+The pool-specific assets (`config/rules.py` scoring grid,
+`data/wc2026_groups.csv`, `integrations/negev_toto_mcp.py` Firebase project
+ID) are pool-specific and intended to be replaced when you fork — see
+"If you fork this for a different Toto pool" above. **No warranty** —
+this is provided "as is" per the MIT terms.
+
+Personal secrets (API keys, refresh tokens, Telegram bot tokens) are
+gitignored via `.env` and are never committed to the repo.
