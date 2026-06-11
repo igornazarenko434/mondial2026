@@ -204,6 +204,47 @@ else
     ok "no dep changes — skipping pip install"
 fi
 
+# ─── Day-9.25: sync infra/* into the system paths ────────────────────────
+# git pull only updates the repo; the systemd unit lives in
+# /etc/systemd/system/ and the crontab lives in cron-spool — both need an
+# explicit copy + reload after a repo-side change. Before this step,
+# bumping infra/mondial2026.service (e.g. adding MPLCONFIGDIR=/tmp/...) on
+# Mac would update the repo file on the VM but the running daemon would
+# STILL use the stale unit until someone manually copied + daemon-reload'd.
+# Same gap for the crontab.
+bold "5b. sync infra/* to system paths"
+SYSTEMD_REPO_UNIT="${INSTALL_DIR}/infra/mondial2026.service"
+SYSTEMD_LIVE_UNIT="/etc/systemd/system/mondial2026.service"
+SYSTEMD_CHANGED=0
+if [ -f "$SYSTEMD_REPO_UNIT" ]; then
+    if ! cmp -s "$SYSTEMD_REPO_UNIT" "$SYSTEMD_LIVE_UNIT"; then
+        warn "systemd unit drifted — syncing infra/mondial2026.service → $SYSTEMD_LIVE_UNIT"
+        cp "$SYSTEMD_REPO_UNIT" "$SYSTEMD_LIVE_UNIT"
+        systemctl daemon-reload
+        SYSTEMD_CHANGED=1
+        ok "systemd unit synced + daemon-reload done"
+    else
+        ok "systemd unit up-to-date"
+    fi
+else
+    warn "no $SYSTEMD_REPO_UNIT in repo — skipping unit sync"
+fi
+
+CRON_REPO_FILE="${INSTALL_DIR}/infra/mondial2026.crontab"
+if [ -f "$CRON_REPO_FILE" ]; then
+    CRON_INSTALLED="$(sudo -u "$INSTALL_USER" crontab -l 2>/dev/null || true)"
+    CRON_REPO_CONTENT="$(cat "$CRON_REPO_FILE")"
+    if [ "$CRON_INSTALLED" != "$CRON_REPO_CONTENT" ]; then
+        warn "crontab drifted — installing from $CRON_REPO_FILE"
+        sudo -u "$INSTALL_USER" crontab "$CRON_REPO_FILE"
+        ok "crontab synced ($(grep -c '^[^#]' "$CRON_REPO_FILE" 2>/dev/null || echo '?') active lines)"
+    else
+        ok "crontab up-to-date"
+    fi
+else
+    warn "no $CRON_REPO_FILE in repo — skipping crontab sync"
+fi
+
 # ─────────────────────────── restart + auto-rollback ───────────────────────────
 if restart_and_verify; then
     bold "6. last 30 journal lines"
