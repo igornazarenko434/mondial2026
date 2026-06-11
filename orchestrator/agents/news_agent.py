@@ -38,7 +38,8 @@ from core.obs.logging import get_logger
 from config.news import (
     NEWS_MAX_QUERIES, NEWS_RECENCY_HOURS, DELTA_CLAMP, SEARCH_WINDOWS,
     QUERIES_PER_WINDOW, SNIPPET_LEN, CONTEXT_MAX_CHARS, PER_QUERY_RESULTS,
-    WEB_RESULTS_IN_CONTEXT, should_search,
+    WEB_RESULTS_IN_CONTEXT, TOP_K_LONG_SNIPPET, LONG_SNIPPET_LEN,
+    should_search,
 )
 
 log = get_logger("news")
@@ -210,21 +211,56 @@ def _fmt_injuries(team_name: str, injuries: list[dict] | None) -> str:
 
 
 def _fmt_web_results(results: list[dict], snippet_len: int,
-                     cap: int | None = None) -> str:
-    """Day-9.19: explicit `cap` argument (was hardcoded 8). Defaults to
-    config.news.WEB_RESULTS_IN_CONTEXT (15). The number of dropped results
-    is exposed via the ContextVar so build_card can stamp it on the card
-    for audit."""
+                     cap: int | None = None,
+                     home: str | None = None,
+                     away: str | None = None) -> str:
+    """Format Brave results into an LLM context block.
+
+    Day-9.25 rewrite: scores each article via news_ranker.score_article and
+    sorts highest-first BEFORE truncating to `cap`. The TOP_K_LONG_SNIPPET
+    articles get a longer snippet (LONG_SNIPPET_LEN chars) so the most-
+    relevant content keeps detail past the baseline. Pre-Day-9.25 this
+    function just took the first `cap` articles in Brave's order, which
+    let a Wikipedia overview displace a Sports-Mole-style team-news preview.
+
+    Each formatted row now carries the score so the LLM can see at a glance
+    which articles are highest-signal (e.g. it can deprioritize a 1-pt
+    Wikipedia entry vs a 13-pt ESPN injury report). Score also lets
+    `discarded_sources` reasoning be cross-checked.
+
+    When `home`/`away` aren't supplied (legacy callers), falls back to the
+    pre-Day-9.25 first-N-in-Brave-order behavior.
+    """
     if not results:
         return ""
     if cap is None:
         cap = WEB_RESULTS_IN_CONTEXT
+
     rows = []
-    for r in results[:cap]:
-        title = r.get("title") or ""
-        snippet = (r.get("snippet") or "")[:snippet_len]
-        date = r.get("date") or "?"
-        rows.append(f"- [{date}] {title} | {snippet}")
+    if home and away:
+        from orchestrator.agents.news_ranker import rank_articles
+        scored = rank_articles(results, home, away)
+        kept = scored[:cap]
+        for idx, sa in enumerate(kept):
+            # Top-K get longer snippets — the most-relevant content keeps
+            # detail past the baseline cap (so an injury report's "ruled
+            # out for 4 weeks due to..." doesn't lose the weeks).
+            this_snip_len = (LONG_SNIPPET_LEN
+                              if idx < TOP_K_LONG_SNIPPET
+                              else snippet_len)
+            title = sa.title
+            snippet = (sa.snippet or "")[:this_snip_len]
+            date = sa.date or "?"
+            score = sa.score
+            rows.append(
+                f"- [{date}] [rank {idx+1}, score {score:.0f}] {title} | {snippet}")
+    else:
+        # Legacy path — first-N-in-Brave-order, no scoring
+        for r in results[:cap]:
+            title = r.get("title") or ""
+            snippet = (r.get("snippet") or "")[:snippet_len]
+            date = r.get("date") or "?"
+            rows.append(f"- [{date}] {title} | {snippet}")
     return "\n".join(rows)
 
 
@@ -287,6 +323,10 @@ def gather_context(match: dict, window: str = "T-60m",
 
     ctx_failures: list[dict] = []
     sources_ok: list[str] = []
+    # Day-9.25: per-source ranking diagnostics. Populated by the Brave block
+    # below; surfaced via context_meta so build_card stamps them on the
+    # card for `tools/audit_fired_card.py` to print.
+    brave_extras: dict = {}
 
     def _record_failure(source: str, e: BaseException) -> None:
         ctx_failures.append({
@@ -386,21 +426,64 @@ def gather_context(match: dict, window: str = "T-60m",
                 qs = search_queries(home, away, kickoff_utc=kickoff_utc,
                                     stage=stage, group=group, window=window)
                 if qs:
-                    results = web_search_many(qs, n=PER_QUERY_RESULTS,
-                                               snippet_len=SNIPPET_LEN)
-                    web_txt = _fmt_web_results(results, SNIPPET_LEN)
-                    n_fetched_web = len(results)
-                    n_included_web = min(len(results), WEB_RESULTS_IN_CONTEXT)
+                    raw_results = web_search_many(qs, n=PER_QUERY_RESULTS,
+                                                    snippet_len=SNIPPET_LEN)
+                    # Day-9.25: title-similarity dedup ON TOP of the URL
+                    # dedup that web_search_many already does. Brave can
+                    # return the same article via /amp/ + /preview/ URLs
+                    # with subtle slug differences that pass the URL
+                    # dedup but are semantically identical.
+                    from orchestrator.agents.news_ranker import (
+                        dedup_by_url_or_title, rank_articles
+                    )
+                    results = dedup_by_url_or_title(raw_results)
+                    # Day-9.25: rank BEFORE formatting so the audit trail
+                    # can show top-K scored titles + the lowest-dropped
+                    # score. The ranker is pure, deterministic, no side
+                    # effects.
+                    scored = rank_articles(results, home, away)
+                    web_txt = _fmt_web_results(results, SNIPPET_LEN,
+                                                home=home, away=away)
+                    n_fetched_web = len(raw_results)
+                    n_after_dedup = len(results)
+                    n_included_web = min(n_after_dedup, WEB_RESULTS_IN_CONTEXT)
+                    # Surface ranked top-3 + lowest-included score so the
+                    # audit trail can show which articles drove the LLM.
+                    top3_titles = [s.title[:60] for s in scored[:3]]
+                    lowest_included_score = (
+                        scored[n_included_web - 1].score
+                        if scored and n_included_web > 0 else None)
+                    n_dropped = n_after_dedup - n_included_web
                     # Day-9.19: surface silent drops on the audit trail
-                    if n_fetched_web > n_included_web:
+                    if n_fetched_web > n_after_dedup:
                         log.info(
-                            "brave_search: fetched %d unique results, "
-                            "including %d in context (dropped %d to fit cap)",
-                            n_fetched_web, n_included_web,
-                            n_fetched_web - n_included_web)
+                            "brave_search: %d raw → %d after title-dedup",
+                            n_fetched_web, n_after_dedup)
+                    if n_after_dedup > n_included_web:
+                        log.info(
+                            "brave_search: ranked %d articles, including "
+                            "top %d in context (dropped %d below threshold; "
+                            "lowest included score %.0f)",
+                            n_after_dedup, n_included_web, n_dropped,
+                            lowest_included_score if lowest_included_score
+                            is not None else float("nan"))
+                    # Stash for audit visibility via context_meta
+                    brave_extras.update({
+                        "brave_top3_titles": top3_titles,
+                        "brave_lowest_included_score":
+                            lowest_included_score,
+                        "brave_n_raw": n_fetched_web,
+                        "brave_n_after_dedup": n_after_dedup,
+                        "brave_n_dropped_low_score": n_dropped,
+                    })
+                    lowest_str = (f"{lowest_included_score:.0f}"
+                                   if lowest_included_score is not None
+                                   else "n/a")
                     if web_txt:
                         parts.append(f"[SOURCE: brave_search × {len(qs)} queries; "
-                                       f"{n_included_web} of {n_fetched_web} included]\n"
+                                       f"{n_included_web} of {n_after_dedup} included "
+                                       f"after relevance ranking; lowest included "
+                                       f"score={lowest_str}]\n"
                                        f"{web_txt}")
                         sources_ok.append("brave_search")
                     else:
@@ -424,13 +507,15 @@ def gather_context(match: dict, window: str = "T-60m",
 
     # Stash on the ContextVar — build_card / analyze callers read via
     # context_meta() to surface on the card without changing our return type.
-    _last_context_meta.set({
+    meta = {
         "ctx_failures": ctx_failures,
         "sources_ok": sources_ok,
         "context_truncated_chars": context_truncated_chars,
         "context_chars": len(txt),
         "brave_gate": brave_gate_reason,        # Day-9.11
-    })
+    }
+    meta.update(brave_extras)                   # Day-9.25 ranking diagnostics
+    _last_context_meta.set(meta)
     return txt
 
 

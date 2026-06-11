@@ -19,13 +19,26 @@ DELTA_CLAMP = float(os.environ.get("NEWS_DELTA_CLAMP", "0.6"))
 # the LLM richer context AT NO COST — Brave bills per QUERY not per result,
 # so PER_QUERY_RESULTS is free; the extra input tokens to the LLM cost a
 # fraction of a cent. See docs/NEWS_AGENT_PLAYBOOK.md for trade-off math.
-SNIPPET_LEN       = int(os.environ.get("NEWS_SNIPPET_LEN",       "400"))
-CONTEXT_MAX_CHARS = int(os.environ.get("NEWS_CONTEXT_MAX_CHARS", "3000"))
-PER_QUERY_RESULTS = int(os.environ.get("NEWS_PER_QUERY_RESULTS", "5"))
+SNIPPET_LEN       = int(os.environ.get("NEWS_SNIPPET_LEN",       "600"))
+# Day-9.25: bumped 3000 → 12000. Gemini Flash supports 1M tokens (~4M chars);
+# 12000 is 0.3% of that. Lets the LLM see more rich context at zero token
+# cost. Original 3000 truncated ~25% of Korea's T-24h Brave results and
+# ~17% of Mexico's — silently losing potentially useful signal.
+CONTEXT_MAX_CHARS = int(os.environ.get("NEWS_CONTEXT_MAX_CHARS", "12000"))
+# Day-9.25: bumped 5 → 8. Brave returns up to 20 per query and bills per
+# query (not per result) so larger n is FREE. More raw material → more
+# survivors after relevance ranking → better signal density.
+PER_QUERY_RESULTS = int(os.environ.get("NEWS_PER_QUERY_RESULTS", "8"))
 # How many UNIQUE Brave results from across all queries actually make it
-# into the context block (before final char cap). Was implicitly 8 in
-# _fmt_web_results; promoted to an explicit knob in Day-9.19.
-WEB_RESULTS_IN_CONTEXT = int(os.environ.get("NEWS_WEB_RESULTS_IN_CONTEXT", "15"))
+# into the context block (before final char cap). Day-9.25 bumped 15 → 20
+# to take advantage of the bigger context budget.
+WEB_RESULTS_IN_CONTEXT = int(os.environ.get("NEWS_WEB_RESULTS_IN_CONTEXT", "20"))
+# Day-9.25: top-K ranked articles get LONGER snippets so the most-relevant
+# content keeps detail past the 600-char baseline. Mid-pack articles use
+# the baseline; below-threshold get dropped first when the context cap
+# bites.
+TOP_K_LONG_SNIPPET = int(os.environ.get("NEWS_TOP_K_LONG_SNIPPET", "5"))
+LONG_SNIPPET_LEN   = int(os.environ.get("NEWS_LONG_SNIPPET_LEN",   "1200"))
 
 # Per-window query counts — used by news_agent.search_queries(...)
 # Calibrated to fit in Brave's $5/mo = 1,000-request free credit:
