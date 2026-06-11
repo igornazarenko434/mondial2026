@@ -266,6 +266,43 @@ def sync_standings(*, tournament_id: str | None = None,
     if new_members:
         log.info("NEW MEMBERS detected and added to standings: %s", new_members)
 
+    # Day-9.25: DEPARTED-MEMBER reconciliation. The UPSERT loop above keeps
+    # the DB strictly inclusive of Negev — anyone still in Negev's roster
+    # gets their row updated. But rows for people who LEFT Negev (or who
+    # appear under a renamed `displayName`, creating a phantom duplicate)
+    # never get cleaned up. Live evidence (2026-06-11): we had 66 rows in
+    # standings but Negev had 65 humans, because two phantoms persisted
+    # ("Yahav", "yahav sarfati") AND one new joiner ("Shuki") wasn't synced
+    # yet. Phantoms pollute leaderboard rendering (`len(rows)` wrong) and
+    # the strategy-tilt "gap-to-leader" math (a phantom could beat you).
+    #
+    # Reconciliation: after upsert, delete any standings row whose
+    # participant is NOT in the current Negev roster. The DB now strictly
+    # mirrors Negev. This runs only when we DID upsert (i.e. Negev fetch
+    # succeeded with ≥1 row) so a transient empty fetch never wipes the
+    # table.
+    departed_members: list[str] = []
+    if conn is not None and not dry and n_upserted > 0:
+        try:
+            current_negev = {r["player"] for r in rows_for_db}
+            existing = {row[0] for row in conn.execute(
+                "SELECT participant FROM standings").fetchall()}
+            # Day-9.5: protect rows owned by MY_PARTICIPANT (the user might
+            # be running both standings_set.py manual entry AND Negev sync;
+            # we don't want to delete their own row even if their name
+            # somehow doesn't match the Negev `displayName`).
+            stale = existing - current_negev - ({me} if me else set())
+            for participant in stale:
+                conn.execute("DELETE FROM standings WHERE participant=?",
+                              (participant,))
+                departed_members.append(participant)
+            if departed_members:
+                conn.commit()
+                log.info("DEPARTED MEMBERS removed from standings: %s",
+                          departed_members)
+        except sqlite3.Error as e:
+            log.warning("departed-member reconciliation failed: %s", e)
+
     # `leader` / `gap to leader`: use the bot-filtered list so we don't
     # chase a phantom (bots randomly score every match — they'd top the
     # standings briefly and our strategy would tilt incorrectly).
@@ -288,6 +325,8 @@ def sync_standings(*, tournament_id: str | None = None,
         result["warning"] = f"MY_PARTICIPANT={me!r} not in standings"
     if new_members:
         result["new_members"] = new_members      # Day-9.15
+    if departed_members:
+        result["departed_members"] = departed_members   # Day-9.25
 
     # Day-9.8: also sync Negev's match results into our matches table. This
     # gives us a second source of truth (football-data is primary, but Negev
@@ -311,6 +350,13 @@ def sync_standings(*, tournament_id: str | None = None,
             if new_members:
                 body = (f"👋 New member(s) joined: {', '.join(new_members)}\n\n"
                         + body)
+            # Day-9.25: prepend a "departed/renamed" note when phantoms
+            # were cleaned up. So the operator sees WHO got pruned in the
+            # same message as the leaderboard — phantom drift is visible
+            # at the moment it heals.
+            if departed_members:
+                body = (f"🧹 Removed stale roster entries: "
+                        f"{', '.join(sorted(departed_members))}\n\n" + body)
             # `summary` (not `alert`) — keeps 📊 clean without ⚠️ prefix
             ok = delivery.summary(title, body)
             result["telegram_delivered"] = bool(ok)
