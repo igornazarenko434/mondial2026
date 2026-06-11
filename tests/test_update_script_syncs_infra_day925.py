@@ -118,3 +118,42 @@ def test_update_script_summary_includes_drift_flags():
     src = _read_update_script()
     assert "SYSTEMD_CHANGED" in src and "CRON_CHANGED" in src, \
         "post-deploy summary must report drift-and-resync of systemd unit + crontab"
+
+
+def test_error_count_is_single_line_integer():
+    """Day-9.25: the `errs=...||echo 0` pattern produced a "0\\n0" string
+    when grep -c matched zero AND the journal slice was empty — the
+    integer test then errored "line 110: [: 0 0: integer expression
+    expected". Pin the fix: `tail -1` coerces to single line + `2>/dev/null`
+    on the test swallows non-integer values gracefully."""
+    src = _read_update_script()
+    # The fixed pattern uses tail -1 to ensure single-line output
+    assert "tail -1" in src, \
+        "update.sh must coerce errs count to a single integer line via tail -1"
+    # And the integer test is guarded against non-integer values
+    assert '[ "${errs:-0}" -gt 0 ] 2>/dev/null' in src, \
+        "the integer test must redirect stderr so a non-numeric errs " \
+        "doesn't poison the deploy output"
+
+
+def test_error_count_logic_handles_zero_matches_gracefully():
+    """Behavioral test: run the exact bash idiom on a fixture string that
+    contains zero ERROR markers. Must produce errs=0 and the integer test
+    must NOT print to stderr."""
+    import subprocess
+    cmd = r"""
+        errs="$(printf '0\n0\n' | grep -c xMARKER_NOT_THERE 2>/dev/null || true)"
+        errs="${errs:-0}"
+        errs="$(printf '%s' "$errs" | tail -1)"
+        if [ "${errs:-0}" -gt 0 ] 2>/dev/null; then
+            echo "would_alert"
+        else
+            echo "ok errs=$errs"
+        fi
+    """
+    r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+    assert r.returncode == 0, f"shell exited non-zero: {r.stderr!r}"
+    assert r.stdout.strip() == "ok errs=0", \
+        f"unexpected stdout: {r.stdout!r}"
+    # Critical: no "integer expression expected" garbage on stderr
+    assert "integer expression expected" not in r.stderr

@@ -104,10 +104,18 @@ restart_and_verify() {
 
     # Count ERROR lines in the last 60 seconds (post-restart). Non-zero =
     # something broke loudly even though the process is technically running.
+    # Day-9.25: `grep -c` exits 1 (with stdout "0") when there are zero
+    # matches. The `|| echo 0` was meant to handle that, but bash's
+    # `||` chains the second command's output ON TOP of the first, producing
+    # a two-line "0\n0" string that fails the integer test below with
+    # "line 110: [: 0 0: integer expression expected". Use `grep -c ... ||
+    # true` + `tail -1` to coerce to a single integer line.
     local errs
     errs="$(journalctl -u "$SERVICE" --since "60 seconds ago" --no-pager \
-            2>/dev/null | grep -c '"level": "ERROR"' || echo 0)"
-    if [ "$errs" -gt 0 ]; then
+            2>/dev/null | grep -c '"level": "ERROR"' 2>/dev/null || true)"
+    errs="${errs:-0}"
+    errs="$(printf '%s' "$errs" | tail -1)"
+    if [ "${errs:-0}" -gt 0 ] 2>/dev/null; then
         warn "$errs ERROR line(s) in journal since restart — inspect below"
         return 1
     fi
