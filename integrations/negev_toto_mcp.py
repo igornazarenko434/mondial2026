@@ -1380,37 +1380,47 @@ def toto_submit_side_bet_answer(side_bet_id: str,
 
     DISABLED unless NEGEV_ALLOW_WRITES=1.
 
-    **Verified 2026-06-11** against the first published side bet
-    `sb_2026-06-11` ("Mexico - South Africa total goals over 2.5"). The
-    Negev app's "Side Bets" panel reads from a flat doc in the top-level
-    `bets` collection, with id `{tid}_{side_bet_id}_{uid}` — i.e. the same
-    layout as per-match picks (`bets/{tid}_{match_id}_{uid}`), with
-    `side_bet_id` taking the role of `match_id`. Earlier guesses A
-    (`tournaments/{tid}/sideBets/{sbid}/answers/{uid}`) were rejected by
-    the Firestore security rules with 403 PERMISSION_DENIED.
+    **Verified 2026-06-11** against the live Negev v2.60 JS bundle
+    (negev-toto.web.app/assets/index-D_Y7NaNn.js). The app's side-bet
+    save handler is:
 
-    Verified doc shape (no extra fields):
-      userId        — my uid
-      tournamentId  — tid
-      sideBetId     — e.g. "sb_2026-06-11"
-      answer        — bool (True=Yes, False=No)
-      submittedAt   — ISO-8601 timestamp
+        const $ = doc(db, "tournaments", tid, "sideBetAnswers", uid);
+        await setDoc($, {userId, answers, updatedAt}, {merge: true});
 
-    Idempotent: re-submitting overwrites my prior answer (PATCH on same
-    doc id). The app immediately shows "✅ BET RECEIVED" once the doc
-    exists with these fields.
+    So the canonical path is `tournaments/{tid}/sideBetAnswers/{uid}` —
+    ONE doc per user, with all side-bet answers accumulated in a `answers`
+    MAP field. Answers are STRING "Yes" / "No" (not bool). Earlier guesses
+    that wrote to `bets/{tid}_{sbid}_{uid}` or `tournaments/{tid}/sideBets/
+    {sbid}/answers/{uid}` were both ignored by the app (the first was
+    accepted by Firestore rules but never read by the UI; the second was
+    rejected with 403). The orphan `bets/...sb_...` docs from those guesses
+    have been cleaned up via toto_delete_document.
 
-    Future side-bet variants (multiple-choice, integer threshold, etc.)
-    will need a sibling tool — the verified shape here is Yes/No only.
-    If the founder publishes a new side bet variant whose UI doesn't
-    accept this tool's output, re-run the DevTools capture recipe in
-    `SCHEMA_negev.md` and add a parallel tool.
+    Verified doc shape:
+      userId    — my uid (top-level)
+      answers   — MAP { "sb_2026-06-11": "Yes", "sb_2026-06-12": "No", ... }
+      updatedAt — ISO-8601 timestamp
+
+    We use Firestore's updateMask with dotted path `answers.{side_bet_id}`
+    so subsequent submissions for OTHER side bets merge into the same
+    answers map instead of overwriting it. Idempotent.
+
+    UI propagation: the app's Side Bets component reads this doc via
+    getDoc (one-shot, NOT onSnapshot), so a write from this tool does
+    NOT live-update the running UI. To see the change, the user must
+    re-mount the Side Bets page (navigate Side Bets → Standings → Side
+    Bets, or hard-refresh). After re-mount: the button highlight follows
+    `a[side_bet_id]` (the saved value), and "✅ BET RECEIVED" appears
+    when the highlighted answer matches the saved answer.
+
+    Future side-bet variants (multi-choice, numeric threshold) would
+    need their own tool — the `answers` map is typed as Yes/No string in
+    the current app; submitting other strings may render but not score.
 
     Args:
-      side_bet_id: the side-bet doc id, expected pattern `sb_YYYY-MM-DD`
-                   (validated — typos like `2026-06-11` without the `sb_`
-                   prefix get rejected before any network call).
-      answer:      True = Yes, False = No
+      side_bet_id: side-bet doc id, expected pattern `sb_YYYY-MM-DD`
+                   (validated pre-network — typos fail fast).
+      answer:      True → "Yes", False → "No"
       dry_run:     plan-and-return without calling Firestore
     """
     if not _SIDE_BET_ID_RE.match(side_bet_id):
@@ -1423,24 +1433,52 @@ def toto_submit_side_bet_answer(side_bet_id: str,
         _id_token()
         uid = _token.get("uid")
     from datetime import datetime, timezone
-    fields = {
-        "userId":     uid,
-        "tournamentId": tid,
-        "sideBetId":  side_bet_id,
-        "answer":     bool(answer),
-        "submittedAt": datetime.now(timezone.utc).isoformat(),
+    answer_str = "Yes" if answer else "No"
+    updated_at = datetime.now(timezone.utc).isoformat()
+    path = f"tournaments/{tid}/sideBetAnswers/{uid}"
+
+    # Build Firestore body with nested map for `answers.{side_bet_id}`.
+    # updateMask with the dotted path tells Firestore to set ONLY that
+    # single entry in the map, preserving any other entries already in
+    # `answers`. If the doc doesn't exist yet, it's created.
+    body = {
+        "fields": {
+            "userId":    {"stringValue": uid},
+            "answers":   {"mapValue": {"fields": {
+                            side_bet_id: {"stringValue": answer_str}}}},
+            "updatedAt": {"stringValue": updated_at},
+        }
     }
-    path = f"bets/{tid}_{side_bet_id}_{uid}"
+    # Backtick-quote the side_bet_id segment: Firestore's unquoted property
+    # path regex is [a-zA-Z_][a-zA-Z_0-9]* (no hyphens), so `sb_2026-06-11`
+    # must be quoted to be a valid dotted field path.
+    params = [
+        ("updateMask.fieldPaths", "userId"),
+        ("updateMask.fieldPaths", f"answers.`{side_bet_id}`"),
+        ("updateMask.fieldPaths", "updatedAt"),
+    ]
 
     if dry_run:
-        return {"dry_run": True, "would_patch": path, "fields": fields}
+        return {"dry_run": True, "would_patch": path,
+                "answer_string": answer_str,
+                "update_mask": [p[1] for p in params],
+                "body": body}
 
     if os.environ.get("NEGEV_ALLOW_WRITES") != "1":
         return {"error": "writes disabled. Set NEGEV_ALLOW_WRITES=1 to enable. "
                           "Re-run with dry_run=True to see the planned PATCH.",
                 "would_patch": path}
 
-    return toto_patch_document(path, json.dumps(fields))
+    r = _fs("PATCH", f"{_base()}/{path}",
+             endpoint="firestore:patch_document",
+             headers=_headers(), params=params, json=body, timeout=20)
+    if not r.ok:
+        return {"error": f"{r.status_code}: {r.text[:300]}", "path": path}
+    return {"updated": path, "side_bet_id": side_bet_id,
+            "answer": answer_str,
+            "note": "App reads this via getDoc (one-shot), not onSnapshot — "
+                    "user must re-mount Side Bets page (navigate away+back, "
+                    "or hard-refresh) to see the change in the UI."}
 
 
 @mcp.tool()
