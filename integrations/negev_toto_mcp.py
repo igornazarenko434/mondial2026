@@ -424,6 +424,44 @@ def _is_bot(u: dict) -> bool:
     return False
 
 
+def _load_side_bet_overrides(tid: str) -> dict:
+    """Day-9.26: read the operator's manual side-bet override file.
+
+    Negev stores per-user side-bet picks at a Firestore path our
+    regular-user auth token cannot read (403 across every probed
+    convention). So the operator maintains a small JSON file mapping
+    `displayName → cumulative_side_bet_points`, updated after each
+    match-day to mirror the app.
+
+    File path: `store/side_bet_overrides_<tid>.json` (gitignored).
+    Shape:
+      {"users": {"Igor": 1.0, "Vaadia": 1.0, ...},
+       "captured_at": "2026-06-12T18:30:00+00:00",
+       "notes": "post Mexico v SA side bet"}
+
+    Returns {} when file missing → side stays 0 for everyone (under-
+    reported but no false data). Missing file path is safe; bad JSON
+    logs a warning and falls back to {} so a typo can't break the sync.
+    """
+    import json
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "store", f"side_bet_overrides_{tid}.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        users = data.get("users") or {}
+        return {k: float(v) for k, v in users.items()
+                if isinstance(v, (int, float))}
+    except Exception as e:                                 # noqa: BLE001
+        import logging
+        logging.getLogger("negev_toto").warning(
+            "side-bet override file %s exists but failed to load: %s",
+            path, e)
+        return {}
+
+
 def _load_baseline(tid: str) -> dict:
     """Day-9.16: load the pre-tournament pointsTotal snapshot if it exists.
 
@@ -558,6 +596,39 @@ def toto_get_standings(tournament_id: str | None = None,
     # tournament resolves the categories. Leave `broad` at 0 here; when
     # Negev publishes futures points (likely via its Cloud Function writing
     # to a separate collection or the user doc), we'll wire that up.
+
+    # ── Side bets (Day-9.26 override mechanism) ──
+    # Side-bet user picks live at a Firestore path we can't read with the
+    # operator's regular-user token (403 across every probed convention —
+    # `tournaments/{tid}/standings`, `sideBetPicks/`, `users/{uid}/picks/{sb}`,
+    # subcollections of the shell, etc.). The Negev web app shows them via
+    # a privileged read our token doesn't include. So we let the operator
+    # supply the per-user side-bet totals via a JSON override that gets
+    # ADDED to the bet-aggregated direction/knockout numbers.
+    #
+    # File: store/side_bet_overrides_<tid>.json  (gitignored runtime state)
+    # Shape: {"users": {"<displayName>": <total side bet pts so far>, …},
+    #         "captured_at": "<ISO timestamp>"}
+    # After each match-day the operator updates the file (manually or via
+    # `tools/standings_set.py side-bet <name> <pts>`); the next 📊 sync
+    # picks it up and the leaderboard totals + ranks match the app exactly.
+    side_overrides = _load_side_bet_overrides(tid)
+    # Build a case-insensitive partial-match index so the operator can write
+    # "G. Cain" or "Cain" or "GILAD CAIN" and we'll still find "Gilad Cain"
+    # in the displayName. Exact match wins over partial.
+    by_name = {a["player"]: a for a in agg.values()}
+    for override_name, pts in side_overrides.items():
+        # Exact match first
+        if override_name in by_name:
+            by_name[override_name]["side"] = float(pts)
+            continue
+        # Fall back to a normalized startswith / contains match
+        on = "".join(c for c in override_name.lower() if c.isalnum())
+        for player_name, a in by_name.items():
+            pn = "".join(c for c in player_name.lower() if c.isalnum())
+            if on and (on == pn or on in pn or pn in on):
+                a["side"] = float(pts)
+                break
 
     rows = []
     for a in agg.values():

@@ -157,7 +157,34 @@ def main(argv: list[str] | None = None) -> int:
     s_imp = sub.add_parser("import", help="bulk-import from a JSON file")
     s_imp.add_argument("path")
 
+    # Day-9.26: side-bet override editor — patches
+    # store/side_bet_overrides_<tid>.json so toto_get_standings adds
+    # cumulative side-bet points per user. Use after each match-day so
+    # the leaderboard totals + ranks match what the Negev app shows.
+    s_sb = sub.add_parser("side-bet",
+                            help="set cumulative side-bet pts for one user "
+                                 "(updates store/side_bet_overrides_<tid>.json)")
+    s_sb.add_argument("participant", help="displayName as shown in Negev app")
+    s_sb.add_argument("points", type=float,
+                       help="cumulative side-bet pts so far (e.g. 1.0)")
+    s_sb.add_argument("--tid", default=None,
+                       help="tournament id (default: NEGEV_TOURNAMENT_ID env)")
+
+    s_sb_dump = sub.add_parser("side-bet-dump",
+                                help="show current side-bet overrides JSON")
+    s_sb_dump.add_argument("--tid", default=None)
+
+    s_sb_bulk = sub.add_parser("side-bet-bulk",
+                                help="bulk-import side-bet overrides from a "
+                                      "JSON file: {\"Igor\": 1, ...}")
+    s_sb_bulk.add_argument("path")
+    s_sb_bulk.add_argument("--tid", default=None)
+
     args = p.parse_args(argv)
+
+    # side-bet commands don't need the local DB — they write to JSON
+    if args.cmd in ("side-bet", "side-bet-dump", "side-bet-bulk"):
+        return _side_bet_dispatch(args)
 
     conn = connect(args.db) if args.db else connect()
     try:
@@ -169,6 +196,61 @@ def main(argv: list[str] | None = None) -> int:
         }[args.cmd](args, conn)
     finally:
         conn.close()
+
+
+def _side_bet_dispatch(args) -> int:
+    import os, json
+    tid = (getattr(args, "tid", None)
+            or os.environ.get("NEGEV_TOURNAMENT_ID", "").strip())
+    if not tid:
+        print("✗ NEGEV_TOURNAMENT_ID not set — pass --tid", file=sys.stderr)
+        return 2
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(here, "store", f"side_bet_overrides_{tid}.json")
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except Exception as e:                              # noqa: BLE001
+            print(f"✗ {path} exists but failed to load: {e}", file=sys.stderr)
+            return 1
+    users = data.get("users") or {}
+
+    if args.cmd == "side-bet":
+        users[args.participant] = float(args.points)
+        from datetime import datetime, timezone
+        data["users"] = users
+        data["captured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"✓ {args.participant}: side-bet pts = {args.points}")
+        print(f"  saved to {path}")
+        return 0
+
+    if args.cmd == "side-bet-dump":
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        print(f"\n(file: {path})")
+        return 0
+
+    if args.cmd == "side-bet-bulk":
+        with open(args.path) as f:
+            incoming = json.load(f)
+        if not isinstance(incoming, dict):
+            print("✗ JSON must be {<name>: <pts>, ...}", file=sys.stderr)
+            return 2
+        for k, v in incoming.items():
+            users[k] = float(v)
+        from datetime import datetime, timezone
+        data["users"] = users
+        data["captured_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print(f"✓ {len(incoming)} side-bet overrides written to {path}")
+        return 0
+    return 0
 
 
 if __name__ == "__main__":
