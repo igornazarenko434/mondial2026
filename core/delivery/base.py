@@ -107,6 +107,57 @@ def _penalty_line(card: dict) -> str | None:
     return f"► If pens: {winner_team} ({p * 100:.0f}%)"
 
 
+def _top5_candidates_section(card: dict) -> str | None:
+    """Day-9.26: render the top-5 EV alternatives so the operator can see WHY
+    a pick was chosen and what the next-best options were. Marks the cell that
+    was actually picked (which may differ from #1 when the direction gate is
+    active). Also surfaces the gate decision in plain English.
+
+    Format (appended after the existing ≤8/≤9-line cap, like friend_picks):
+
+        ─────────────────  📊 Top 5 candidates  ──────────────────
+        1. 2-0 (H)  P=15.6%  ×2.25  EV=2.56  ← picked
+        2. 0-0 (D)  P= 9.6%  ×2.75  EV=3.51
+        3. 1-1 (D)  P=10.0%  ×2.25  EV=3.12
+        4. 3-0 (H)  P= 8.4%  ×3.25  EV=2.54
+        5. 2-1 (H)  P=10.1%  ×1.50  EV=2.21
+        Gate: dominant H @ 68% (≥55%) → restricted to H cells.
+
+    The block is suppressed when ranked_alternatives is empty (the modal-
+    fallback path with no usable odds).
+    """
+    ranked = card.get("ranked_alternatives") or []
+    if not ranked:
+        return None
+    pick = card.get("pick_exact_score") or {}
+    ph, pa = pick.get("home"), pick.get("away")
+
+    rows = ["─────────────────  📊 Top 5 candidates  ─────────────────"]
+    for n, r in enumerate(ranked[:5], 1):
+        h, a, d = r.get("home"), r.get("away"), r.get("direction", "?")
+        p = r.get("p_score")
+        mult = r.get("exact_multiplier")
+        ev = r.get("expected_points")
+        marker = "  ← picked" if (h == ph and a == pa) else ""
+        p_str  = f"P={p*100:5.1f}%" if isinstance(p, (int, float)) else "P=  ?"
+        m_str  = f"×{mult:.2f}"     if isinstance(mult, (int, float)) else "× ?"
+        ev_str = f"EV={ev:.2f}"     if isinstance(ev, (int, float)) else "EV= ?"
+        rows.append(f"  {n}. {h}-{a} ({d})  {p_str}  {m_str}  {ev_str}{marker}")
+
+    # If the picked cell is not in top-5 by raw EV (i.e. the gate moved it
+    # outside the EV top-5), append it explicitly so the reader knows where
+    # it came from. Should be rare but possible when the mild-favorite gate's
+    # half-EV-half-P score lands on a mid-table cell.
+    in_top5 = any(r.get("home") == ph and r.get("away") == pa for r in ranked[:5])
+    if not in_top5 and ph is not None and pa is not None:
+        rows.append(f"  ← picked: {ph}-{pa} (outside top-5 by raw EV — gate selected)")
+
+    note = card.get("gate_note")
+    if note:
+        rows.append(f"Gate: {note}")
+    return "\n".join(rows)
+
+
 def render_card(card: dict) -> str:
     """Recommendation dict → compact, plain-text human card.
 
@@ -209,6 +260,14 @@ def render_card(card: dict) -> str:
         logging.getLogger("delivery").warning(
             "render_card overflowed cap (%d > %d); truncating", len(lines), cap)
         lines = lines[:cap]
+
+    # Day-9.26: append the top-5 candidates considered (with the picked one
+    # marked + the direction-gate decision in plain English). Like the
+    # friend-picks footer, this is supplementary and bypasses the line cap
+    # because it's analytic context the operator should always see.
+    top5 = _top5_candidates_section(card)
+    if top5:
+        lines.append(top5)
 
     # Day-9.22: append tracked-friends' picks footer (when configured) AFTER
     # the model cap. The cap exists to keep the model output compact; the

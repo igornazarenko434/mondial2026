@@ -7,7 +7,12 @@ SEARCH_WINDOWS = ("T-24h", "T-60m", "T-15m")
 PRIMARY_WINDOW = "T-60m"                                  # lineups land ~1h out
 NEWS_MAX_QUERIES = int(os.environ.get("NEWS_MAX_QUERIES", "6"))
 NEWS_RECENCY_HOURS = int(os.environ.get("NEWS_RECENCY_HOURS", "48"))
-DELTA_CLAMP = float(os.environ.get("NEWS_DELTA_CLAMP", "0.6"))
+# Day-9.26: tightened 0.6 → 0.15. The Korea-Czechia T-15m card had a
+# home -0.30 LLM delta that swung dominant direction Korea→Czechia and lost
+# us a direction-only floor on a 38/30/32 toss-up. ±0.15 per side caps how
+# much one LLM call can move λ before the LLM has to back it up with strong
+# confidence (and ideally multiple sources). Still env-overridable for A/B.
+DELTA_CLAMP = float(os.environ.get("NEWS_DELTA_CLAMP", "0.15"))
 
 # Day-8 additions — token-budget control on the gathered context that we
 # pass to the LLM. Caps prevent a single long Brave snippet from blowing the

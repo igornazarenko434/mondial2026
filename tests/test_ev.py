@@ -28,7 +28,11 @@ def test_recommend_shape():
                 "modal_score", "model_prob"):
         assert key in rec
     probs = rec["model_prob"]
-    assert abs(probs["H"] + probs["D"] + probs["A"] - 1.0) < 1e-6
+    # model_prob values are round(v, 3) for display; the rounded sum can drift
+    # up to ±0.0015 from 1.0 (three values × 5e-4 max round error each). Use a
+    # 2e-3 tolerance to keep the structural check meaningful while tolerating
+    # the display-side rounding.
+    assert abs(probs["H"] + probs["D"] + probs["A"] - 1.0) < 2e-3
 
 
 def test_matrix_normalised():

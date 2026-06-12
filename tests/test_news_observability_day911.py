@@ -219,11 +219,15 @@ def test_router_instrument_passes_units_zero_on_token_record(monkeypatch):
 
 def test_validate_clamp_surfaces_clamp_provenance():
     from orchestrator.agents.news_agent import _validate_and_clamp
-    out = _validate_and_clamp({"home_goal_delta": 1.2, "away_goal_delta": 0.3,
+    from config.news import DELTA_CLAMP
+    # home delta well over the clamp → clamped; away delta below it → preserved.
+    # Day-9.26: read DELTA_CLAMP from config so this test stays correct as the
+    # clamp is tuned (now 0.15, was 0.6).
+    out = _validate_and_clamp({"home_goal_delta": 1.2, "away_goal_delta": 0.05,
                                 "confidence": "high", "notes": []})
-    assert out["home_goal_delta"] == 0.6     # clamped to DELTA_CLAMP
+    assert out["home_goal_delta"] == DELTA_CLAMP     # clamped
     assert out["home_delta_clamped"] is True
-    assert "away_delta_clamped" not in out   # only set when actually clamped
+    assert "away_delta_clamped" not in out           # only set when actually clamped
     assert out["confidence"] == "high"
     assert "confidence_was_defaulted" not in out
 

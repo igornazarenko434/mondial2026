@@ -187,20 +187,27 @@ class _RawRouter:
 
 
 def test_strict_json_parse_succeeds():
-    payload = {"home_goal_delta": -0.3, "away_goal_delta": 0.15,
+    # Day-9.26: DELTA_CLAMP tightened from 0.6 → 0.15. Use values strictly
+    # inside the clamp so this test asserts parse-success without colliding
+    # with the validator clamp (clamping is covered by
+    # test_clamp_enforces_delta_cap below).
+    payload = {"home_goal_delta": -0.10, "away_goal_delta": 0.05,
                "confidence": "high", "notes": ["test"],
                "discarded_sources": []}
     out = na.analyze("A", "B", "ctx",
                       router=_RawRouter(json.dumps(payload)))
-    assert out["home_goal_delta"] == -0.3 and out["confidence"] == "high"
+    assert out["home_goal_delta"] == -0.10 and out["confidence"] == "high"
 
 
 def test_repair_mode_json_parse_handles_text_around_json():
-    """L5: LLM emits 'Here's the JSON: {...}' — extract via regex."""
-    raw = "Here is the JSON adjustment you asked for:\n```json\n{\"home_goal_delta\":0.1,\"away_goal_delta\":-0.2,\"confidence\":\"medium\",\"notes\":[],\"discarded_sources\":[]}\n```\nLet me know if you need more."
+    """L5: LLM emits 'Here's the JSON: {...}' — extract via regex.
+
+    Day-9.26: deltas chosen to lie inside the tightened ±0.15 clamp so this
+    test stays narrowly about regex-extraction; clamping is tested separately."""
+    raw = "Here is the JSON adjustment you asked for:\n```json\n{\"home_goal_delta\":0.1,\"away_goal_delta\":-0.12,\"confidence\":\"medium\",\"notes\":[],\"discarded_sources\":[]}\n```\nLet me know if you need more."
     out = na.analyze("A", "B", "ctx", router=_RawRouter(raw))
     assert out["home_goal_delta"] == 0.1
-    assert out["away_goal_delta"] == -0.2
+    assert out["away_goal_delta"] == -0.12
 
 
 def test_malformed_json_returns_neutral_via_safe():
@@ -305,8 +312,12 @@ def test_read_prior_deltas_reuses_recent_high_confidence(tmp_path):
     conn.row_factory = sqlite3.Row
     with open("store/schema.sql") as f:
         conn.executescript(f.read())
+    # Day-9.26: deltas chosen inside the tightened ±0.15 clamp so the read-back
+    # preserves the stored values exactly. The cache-reuse mechanism (what this
+    # test exercises) is independent of the clamp; clamping on read is a
+    # safety belt that this test isn't trying to exercise.
     payload = json.dumps({
-        "news_home_delta": -0.30, "news_away_delta": +0.15,
+        "news_home_delta": -0.12, "news_away_delta": +0.10,
         "news_confidence": "high",
         "news_notes": ["Norway rotates", "Mbappé starts"]})
     now = datetime.now(timezone.utc).isoformat()
@@ -319,8 +330,8 @@ def test_read_prior_deltas_reuses_recent_high_confidence(tmp_path):
     prior = na.read_prior_deltas(conn, match_id=1,
                                    max_age_min=75, min_confidence="medium")
     assert prior is not None
-    assert prior["home_goal_delta"] == -0.30
-    assert prior["away_goal_delta"] == 0.15
+    assert prior["home_goal_delta"] == -0.12
+    assert prior["away_goal_delta"] == 0.10
     assert prior["confidence"] == "high"
 
 

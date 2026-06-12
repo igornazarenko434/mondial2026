@@ -33,8 +33,19 @@ def _dc_tau(i: int, j: int, lam: float, mu: float, rho: float) -> float:
 
 
 def score_matrix(exp_home: float, exp_away: float,
-                 rho: float = -0.13, max_goals: int = 8) -> np.ndarray:
-    """Probability matrix M[i, j] = P(home i goals, away j goals)."""
+                 rho: float = 0.0, max_goals: int = 8) -> np.ndarray:
+    """Probability matrix M[i, j] = P(home i goals, away j goals).
+
+    Day-9.26: default rho changed -0.13 → 0.0. The negative rho inflates the
+    0-0/1-1 cells by ~5-8% to match the empirical "draws cluster low" pattern
+    in CLUB football. International football has different scoring dynamics
+    (more spread results when a clear favorite plays a underdog), and the
+    inflated 0-0/1-1 cells were the structural reason EV-max kept picking
+    draw anchors over modal home wins — costing us points on Mexico 2-0 and
+    Korea 2-1 (zero on both). Setting rho=0 removes the correction; callers
+    that want it back can pass rho explicitly. The fitted rho stored in
+    store/dc_strengths.json is now informational only — blend.py ignores it.
+    """
     m = np.zeros((max_goals + 1, max_goals + 1))
     for i in range(max_goals + 1):
         for j in range(max_goals + 1):

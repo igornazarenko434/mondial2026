@@ -93,7 +93,12 @@ CINDERELLA_PAYOUT = {  # §9
 }
 
 # --- Model blend weights (tune via backtest) -------------------------------
-BLEND_WEIGHTS = {"dixon_coles": 0.30, "elo": 0.20, "market": 0.50}
+# Day-9.26: shifted DC 0.30→0.20, Market 0.50→0.60. Market is the only signal
+# where actual money is at stake (calibrated against thousands of bettors);
+# DC was fit on pre-tournament data and doesn't update with daily news. The
+# news agent's job is to update DC, but it's noisy — leaning into the market
+# reduces single-agent risk.
+BLEND_WEIGHTS = {"dixon_coles": 0.20, "elo": 0.20, "market": 0.60}
 
 # Knockout-stage penalty-winner trigger: only show "If pens: <team>" on the
 # card when the model-blended draw probability is at least this. Tunable so
