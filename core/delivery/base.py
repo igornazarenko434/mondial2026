@@ -12,8 +12,13 @@ import abc
 
 
 # Display caps (a strict assertion in tests; logged warning at runtime).
-MAX_LINES_NORMAL = 8
-MAX_LINES_KO_PEN = 9
+# Day-9.26.2: bumped 8→10 / 9→11 to accommodate the always-on news status
+# line + the conditional signal-disagreement line that now ride along with
+# every card. Telegram's hard limit is 4096 chars — at ~50-80 chars/line,
+# 11 lines is ~700 chars, well within budget. The cap is purely a phone-
+# readability constraint, not a delivery limit.
+MAX_LINES_NORMAL = 10
+MAX_LINES_KO_PEN = 11
 
 
 class Notifier(abc.ABC):
@@ -105,6 +110,55 @@ def _penalty_line(card: dict) -> str | None:
     winner_team = home if pen.get("winner") == "H" else away
     p = pen.get("p_winner", 0.5)
     return f"► If pens: {winner_team} ({p * 100:.0f}%)"
+
+
+def _news_status_line(card: dict) -> str | None:
+    """Day-9.26.2: ALWAYS render a one-line news status when news is in
+    signals_used (or signals_failed handled elsewhere by _signals_line).
+
+    Three shapes:
+      1. Failure case → already covered by `Signals: ... ⚠news: ...` line;
+         this helper returns None so we don't duplicate.
+      2. Success with non-zero deltas →
+         ℹ news (provider, conf, ×scale): home -0.05, away +0.00  (raw -0.15, +0.00)
+      3. Success with both deltas zero →
+         ℹ news (provider, conf): no actionable findings
+    """
+    used = card.get("signals_used") or []
+    failed = card.get("signals_failed") or []
+    if "news" in failed or "news" not in used:
+        return None  # _signals_line handles failure case
+    provider = card.get("news_provider") or "?"
+    conf     = card.get("news_confidence") or "low"
+    scale    = card.get("news_confidence_scale")
+    h_app    = card.get("news_home_delta", 0.0)
+    a_app    = card.get("news_away_delta", 0.0)
+    h_raw    = card.get("news_raw_home_delta", h_app)
+    a_raw    = card.get("news_raw_away_delta", a_app)
+
+    if abs(h_app) < 1e-6 and abs(a_app) < 1e-6:
+        return f"ℹ news ({provider}, {conf}): no actionable findings"
+
+    scale_tag = f", ×{scale:.2f}" if isinstance(scale, (int, float)) and scale != 1.0 else ""
+    raw_tag   = (f"  (raw {h_raw:+.2f}, {a_raw:+.2f})"
+                 if (abs(h_raw - h_app) > 1e-3 or abs(a_raw - a_app) > 1e-3)
+                 else "")
+    return (f"ℹ news ({provider}, {conf}{scale_tag}): "
+            f"home {h_app:+.2f}, away {a_app:+.2f}{raw_tag}")
+
+
+def _signal_disagreement_line(card: dict) -> str | None:
+    """Day-9.26.2: surface when DC / Elo / Market disagree on dominant
+    direction. Helps the operator know when to look at the top-5 alternatives
+    and consider an override.
+    """
+    if not card.get("signal_disagreement"):
+        return None
+    summary = card.get("signal_disagreement_summary")
+    if not summary:
+        return None
+    picked = card.get("pick_direction", "?")
+    return f"⚠ signal disagreement: {summary} — picked {picked}"
 
 
 def _top5_candidates_section(card: dict) -> str | None:
@@ -247,6 +301,7 @@ def render_card(card: dict) -> str:
     lines.append(_signals_line(card))
 
     # 9. Context — at most 2 bullets, joined on one line, each <= 60 chars
+    # (legacy fallback for any caller still setting card["context"])
     ctx = (card.get("context") or [])[:2]
     if ctx:
         bullets = "    ".join(f"ℹ {str(c)[:60]}" for c in ctx)
@@ -260,6 +315,17 @@ def render_card(card: dict) -> str:
         logging.getLogger("delivery").warning(
             "render_card overflowed cap (%d > %d); truncating", len(lines), cap)
         lines = lines[:cap]
+
+    # Day-9.26.2: always-on news status + signal-disagreement lines come AFTER
+    # the line cap (like top-5 / friend-picks) so they always show without
+    # competing for the 8-line core-card budget. Operator wants visibility
+    # on every card whether news fired with data or returned a NEUTRAL.
+    news_line = _news_status_line(card)
+    if news_line:
+        lines.append(news_line)
+    disagree_line = _signal_disagreement_line(card)
+    if disagree_line:
+        lines.append(disagree_line)
 
     # Day-9.26: append the top-5 candidates considered (with the picked one
     # marked + the direction-gate decision in plain English). Like the

@@ -104,3 +104,42 @@ BLEND_WEIGHTS = {"dixon_coles": 0.20, "elo": 0.20, "market": 0.60}
 # card when the model-blended draw probability is at least this. Tunable so
 # we can demand higher confidence later (e.g. mid-tournament after data).
 DRAW_PEN_THRESHOLD = 0.15
+
+# --- Direction-confidence gate thresholds (Day-9.26.2) --------------------
+# The EV optimizer uses these to decide how strongly to restrict the pick to
+# the model's dominant direction. SMOOTH transition between mild_lower and
+# strong (no boundary cliff): weight ramps 0→1 across that range.
+#
+#   weight_to_dom = clip((dom_p - mild_lower) / (strong - mild_lower), 0, 1)
+#
+#   weight = 0   → pure EV-max across all cells (tossup behavior)
+#   weight = 1   → restricted to dom-direction cells, EV-max within  (strong)
+#   weight ≈ 0.5 → restricted to dom-direction cells, half-EV-half-P (mild)
+#
+# KO/Final matches DEMAND earlier protection because:
+#   • BASE_POINTS is 1.5x (KO) / 2.0x (Final) — direction-correct floor is
+#     worth more, so banking it is more valuable.
+#   • Variance on a single match matters MORE when there are fewer matches
+#     ahead to average out — and group has 72, KO has 16, SF/Final 4.
+# Detonator matches similarly get earlier protection: 2× EV cuts both ways
+# and tournament survival prefers the lower-variance direction-locked floor.
+GATE_THRESHOLDS = {
+    "group":       {"strong": 0.55, "mild_lower": 0.30},
+    "ko":          {"strong": 0.50, "mild_lower": 0.28},
+    "final":       {"strong": 0.48, "mild_lower": 0.25},
+    "detonator":   {"strong": 0.50, "mild_lower": 0.28},   # ANY detonator match
+}
+
+# Tied-direction guardrail: when top-two direction probs are within this
+# margin, treat as a true tossup regardless of which one is alphabetically
+# first. Prevents Python dict-insertion-order tie-breaks from determining
+# the pick in close 3-way matchups.
+GATE_TIE_MARGIN = 0.02
+
+# News-confidence delta scaling. The clamp ceiling (NEWS_DELTA_CLAMP=0.15)
+# limits MAX delta the LLM can push; this scales how much of the clamped
+# value is actually applied based on the LLM's self-reported confidence.
+# A low-confidence -0.15 becomes -0.045 (0.3× scale); a high-confidence
+# -0.15 stays -0.15 (1.0× scale). Defends against confident-looking but
+# weakly-grounded LLM calls flipping the gate decision.
+NEWS_CONFIDENCE_SCALE = {"low": 0.30, "medium": 0.70, "high": 1.00}

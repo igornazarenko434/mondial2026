@@ -54,6 +54,8 @@ def match_card(home: str, away: str, stage: str, detonator: bool,
                 "ranked_alternatives": [], "detonator": detonator, "locked_odds": scoring_odds,
                 "note": "no usable odds — modal pick (cannot EV-optimize)"}
     card.update({"home": home, "away": away, "stage": stage})
-    if any(news_deltas):
-        card["context"] = [f"news deltas applied: home {news_deltas[0]:+.2f}, away {news_deltas[1]:+.2f}"]
+    # Day-9.26.2: news/disagreement rendering moved to delivery.base.render_card
+    # so the line ALWAYS shows (with confidence + scale annotation), even when
+    # both deltas are 0.0 — visibility was the operator's main complaint after
+    # USA-Paraguay's silent news section.
     return card

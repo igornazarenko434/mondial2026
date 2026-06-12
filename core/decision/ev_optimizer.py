@@ -7,7 +7,7 @@ Raw EV per scoreline s with direction d:
 
     EV(s) = odds(d) * detonator * [ base * (P(d) - P(s)) + tableMult(s) * P(s) ]
 
-Direction-confidence gate (Day-9.26 — tournament-survival fix):
+Direction-confidence gate (Day-9.26 + 9.26.2 smoothing):
   Pure EV-max picks high-multiplier draw anchors (0-0, 1-1) whenever P(D) is
   not tiny — because fair-market odds make direction-EV roughly equal across
   H/D/A, and the grid rewards 0-0/1-1 with mult 2.75/2.25 vs 1-0/2-1 at 1.50.
@@ -16,23 +16,47 @@ Direction-confidence gate (Day-9.26 — tournament-survival fix):
   pick to the model's dominant direction when there IS a dominant direction,
   banking the base×odds direction-only floor on most matches.
 
-  P(dominant) ≥ 0.55 → only dominant-direction cells considered (strong fav)
-  0.40 ≤ P(dom)<0.55 → only dom-direction cells, scored as 0.5*EV + 0.5*P
-                       (so we honour the modal-in-direction when EV is close)
-  P(dom) < 0.40      → pure EV-max across all cells (toss-up)
+  Day-9.26.2 SMOOTH BOUNDARY (no cliff at 0.40 / 0.55):
+    weight_to_dom = clip((P(dom) - mild_lower) / (strong - mild_lower), 0, 1)
+    score(c) =
+      if cell c is in dom direction:
+        (1-alpha)*EV_norm + alpha*P_norm     # alpha peaks at mild zone
+      else:
+        EV_norm * (1 - weight_to_dom)        # penalty grows linearly
+    where alpha = 2*weight*(1-weight)  (peaks at 0.5 at mid-range)
+
+  At weight=1 (strong-fav)  → pure EV-max within dom direction only.
+  At weight=0 (tossup)      → pure EV-max across ALL cells.
+  In between                → smoothly blends; out-of-dom cells get a
+                              gradual penalty rather than a hard cutoff.
+
+  Thresholds come from config.rules.GATE_THRESHOLDS — KO/Final/Detonator
+  matches activate protection EARLIER because their stakes are higher.
+
+  Tied-direction guardrail: when top-two direction probs are within
+  GATE_TIE_MARGIN (default 0.02), force tossup mode regardless of dom_p.
+  Prevents arbitrary insertion-order tie-breaks from determining picks.
 
 The grid multipliers, blend, news, detonator and the base EV formula are
-all unchanged — we only constrain which cells the argmax sees.
+all unchanged — we only smoothly weight which cells the argmax considers.
 """
 from __future__ import annotations
 import numpy as np
-from config.rules import STAGE_TYPE, BASE_POINTS, DETONATOR_FACTOR
+from config.rules import (STAGE_TYPE, BASE_POINTS, DETONATOR_FACTOR,
+                          GATE_THRESHOLDS, GATE_TIE_MARGIN)
 from core.scoring.engine import direction, exact_multiplier, direction_probs
 
-# Direction-confidence gate thresholds (Day-9.26). Override via env if we
-# want to A/B mid-tournament.
-DOM_GATE_STRONG = 0.55
-DOM_GATE_MILD   = 0.40
+
+def _thresholds_for(stage_type: str, detonator: bool) -> dict:
+    """Return the {strong, mild_lower} pair for this match's risk profile.
+
+    A detonator-flagged match uses the more aggressive 'detonator' thresholds
+    REGARDLESS of stage (high-stakes matches deserve earlier protection).
+    Otherwise we pick the per-stage default from config.rules.GATE_THRESHOLDS.
+    """
+    if detonator:
+        return GATE_THRESHOLDS["detonator"]
+    return GATE_THRESHOLDS.get(stage_type, GATE_THRESHOLDS["group"])
 
 
 def rank_scores(matrix: np.ndarray, stage: str, odds: dict,
@@ -69,16 +93,26 @@ def rank_scores(matrix: np.ndarray, stage: str, odds: dict,
 
 def recommend(matrix: np.ndarray, stage: str, odds: dict,
               detonator: bool = False) -> dict:
-    """Direction-gated EV recommendation.
+    """Smooth direction-gated EV recommendation (Day-9.26.2).
 
-    Returns the same shape as before (back-compat) with three new fields:
+    No more hard 0.40/0.55 cliff. Single smooth scoring function that
+    interpolates between three behaviors based on dom_p:
+      - dom_p ≤ mild_lower    : pure EV-max across all cells (tossup)
+      - dom_p ≥ strong        : EV-max restricted to dom-direction cells
+      - mild_lower < dom_p < strong : smoothly blended; out-of-dom cells get
+                                       a linear penalty; within-dom cells get
+                                       an EV+P_norm mix peaking at mid-range.
+
+    Tied-direction guardrail: if top two direction probs are within
+    GATE_TIE_MARGIN, force tossup mode regardless of dom_p — prevents the
+    pick from depending on arbitrary tie-breaking.
+
+    Returns the same shape as before (back-compat) plus four gate fields:
       - dominant_direction       : H | D | A
       - dominant_strength        : float in [0,1]
-      - gate_mode                : 'strong_favorite' | 'mild_favorite' | 'tossup'
+      - gate_mode                : 'strong_favorite' | 'mild_favorite' |
+                                    'tossup' | 'tossup_tied'
       - gate_note                : human-readable one-line explanation
-    The chosen pick honours the gate; `ranked_alternatives` is the TOP-5 BY
-    RAW EV (unchanged) so the card can display "what EV-only would have picked"
-    side-by-side with the actual pick.
     """
     # 1. Full table sorted by raw EV (for the alternatives display)
     n = matrix.shape[0]
@@ -86,34 +120,84 @@ def recommend(matrix: np.ndarray, stage: str, odds: dict,
     top5 = full_ranked[:5]
 
     pdir = direction_probs(matrix)
-    dom = max(pdir, key=lambda d: pdir[d])
-    dom_p = float(pdir[dom])
 
-    # 2. Apply the gate
-    if dom_p >= DOM_GATE_STRONG:
-        eligible = [r for r in full_ranked if r["direction"] == dom]
-        gate_mode = "strong_favorite"
-        gate_note = (f"Dominant direction {dom} at {dom_p*100:.0f}% (≥55%) — "
-                     f"restricted to {dom}-cells; chose top-EV in {dom}")
-        best = max(eligible, key=lambda r: r["expected_points"]) if eligible else full_ranked[0]
-    elif dom_p >= DOM_GATE_MILD:
-        eligible = [r for r in full_ranked if r["direction"] == dom]
-        gate_mode = "mild_favorite"
-        # half-EV / half-probability score, normalised so weights are comparable
-        max_ev = max((r["expected_points"] for r in eligible), default=1.0) or 1.0
-        max_p  = max((r["p_score"]         for r in eligible), default=1.0) or 1.0
-        def _gate_score(r):
-            return 0.5 * (r["expected_points"] / max_ev) + 0.5 * (r["p_score"] / max_p)
-        gate_note = (f"Dominant direction {dom} at {dom_p*100:.0f}% (40-55%) — "
-                     f"restricted to {dom}-cells; scored 50% EV + 50% P(score)")
-        best = max(eligible, key=_gate_score) if eligible else full_ranked[0]
+    # 2. Identify dominant direction with tied-direction guardrail
+    sorted_dirs = sorted(pdir.items(), key=lambda kv: -kv[1])
+    dom, dom_p_raw = sorted_dirs[0]
+    second_dir, second_p = sorted_dirs[1]
+    dom_p = float(dom_p_raw)
+    tied = (dom_p - float(second_p)) < GATE_TIE_MARGIN
+
+    # 3. Pick thresholds based on stage + detonator profile
+    stype = STAGE_TYPE.get(stage)
+    thr = _thresholds_for(stype, detonator)
+    strong = thr["strong"]
+    mild_lower = thr["mild_lower"]
+
+    # 4. Smooth weight: 0 at mild_lower or below, 1 at strong or above
+    if tied or dom_p <= mild_lower:
+        weight = 0.0
+    elif dom_p >= strong:
+        weight = 1.0
     else:
-        gate_mode = "tossup"
-        gate_note = (f"No dominant direction (max {pdir[dom]*100:.0f}% < 40%) — "
-                     f"full EV-max across all cells")
-        best = full_ranked[0]
+        weight = (dom_p - mild_lower) / (strong - mild_lower)
 
-    # Most-likely (modal) score, for transparency
+    # alpha peaks at 0.5 in the middle of the smooth band (mild zone)
+    # alpha = 2*w*(1-w):  w=0 → 0,  w=0.5 → 0.5,  w=1 → 0
+    alpha = 2.0 * weight * (1.0 - weight)
+
+    # 5. Score every cell with the SMOOTH gate function
+    max_ev = max((r["expected_points"] for r in full_ranked), default=1.0) or 1.0
+    max_p  = max((r["p_score"]         for r in full_ranked), default=1.0) or 1.0
+
+    def _smooth_score(r):
+        ev_norm = r["expected_points"] / max_ev
+        p_norm  = r["p_score"] / max_p
+        if r["direction"] == dom:
+            # In dominant direction: blend EV-norm and P-norm.
+            # At weight=0 or weight=1, alpha=0 → pure EV.
+            # At weight=0.5, alpha=0.5 → half EV + half P (preserves original
+            # mild-favorite spec at the midpoint of the smooth band).
+            return (1.0 - alpha) * ev_norm + alpha * p_norm
+        # Out of dominant direction: linear penalty grows with weight.
+        # At weight=0: no penalty (tossup — every cell competes on raw EV).
+        # At weight=1: full penalty (effectively excluded — strong-fav).
+        return ev_norm * (1.0 - weight)
+
+    best = max(full_ranked, key=_smooth_score)
+
+    # 6. Label the gate mode for the audit trail
+    if tied:
+        gate_mode = "tossup_tied"
+        gate_note = (
+            f"Top two directions tied within {GATE_TIE_MARGIN:.2f} "
+            f"({dom} {dom_p*100:.0f}%, {second_dir} {second_p*100:.0f}%) "
+            f"— full EV-max across all cells"
+        )
+    elif weight == 0.0:
+        gate_mode = "tossup"
+        gate_note = (
+            f"Dominant direction {dom} at {dom_p*100:.0f}% ≤ "
+            f"{mild_lower*100:.0f}% — full EV-max across all cells"
+        )
+    elif weight == 1.0:
+        gate_mode = "strong_favorite"
+        gate_note = (
+            f"Dominant direction {dom} at {dom_p*100:.0f}% ≥ "
+            f"{strong*100:.0f}% — restricted to {dom}-cells; chose top-EV "
+            f"in {dom}"
+        )
+    else:
+        gate_mode = "mild_favorite"
+        gate_note = (
+            f"Dominant direction {dom} at {dom_p*100:.0f}% "
+            f"(smooth band {mild_lower*100:.0f}-{strong*100:.0f}%, "
+            f"weight {weight:.2f}, alpha {alpha:.2f}) — "
+            f"smooth blend of EV-max + modal-P within {dom}; out-of-{dom} "
+            f"cells penalized {(1-weight)*100:.0f}% × raw EV"
+        )
+
+    # 7. Most-likely (modal) score, for transparency
     idx = np.unravel_index(np.argmax(matrix), matrix.shape)
 
     return {
@@ -122,12 +206,14 @@ def recommend(matrix: np.ndarray, stage: str, odds: dict,
         "expected_points": best["expected_points"],
         "modal_score": {"home": int(idx[0]), "away": int(idx[1])},
         "model_prob": {k: round(v, 3) for k, v in pdir.items()},
-        "ranked_alternatives": top5,           # top-5 by RAW EV (unchanged shape)
+        "ranked_alternatives": top5,
         "detonator": detonator,
         "locked_odds": odds,
-        # Day-9.26 gate provenance
+        # Gate provenance (Day-9.26 + 9.26.2)
         "dominant_direction": dom,
         "dominant_strength": round(dom_p, 3),
         "gate_mode": gate_mode,
         "gate_note": gate_note,
+        "gate_weight": round(weight, 3),
+        "gate_thresholds": {"strong": strong, "mild_lower": mild_lower},
     }

@@ -238,11 +238,23 @@ def build_card(match: dict, conn=None, *,
                 context_text = ""                    # T-7m / unknown window
             deltas = news_analyzer(home, away, context_text=context_text)
 
-        news_deltas = (float(deltas.get("home_goal_delta", 0.0)),
-                       float(deltas.get("away_goal_delta", 0.0)))
+        # Day-9.26.2: scale by LLM-reported confidence BEFORE applying.
+        # The hard clamp at ±NEWS_DELTA_CLAMP (config/news.py) is the
+        # ceiling; this is the quality discount on top. A low-confidence
+        # -0.15 becomes -0.045 (0.30× scale); high-confidence -0.15 stays
+        # -0.15. Raw values are preserved on news_meta for audit.
+        from config.rules import NEWS_CONFIDENCE_SCALE
+        _conf = deltas.get("confidence", "low")
+        _scale = NEWS_CONFIDENCE_SCALE.get(_conf, NEWS_CONFIDENCE_SCALE["low"])
+        _raw_h = float(deltas.get("home_goal_delta", 0.0))
+        _raw_a = float(deltas.get("away_goal_delta", 0.0))
+        news_deltas = (_raw_h * _scale, _raw_a * _scale)
         # Stash for audit / future reuse by next-window's read_prior_deltas
         news_meta = {
             "home": news_deltas[0], "away": news_deltas[1],
+            "raw_home": _raw_h,                      # Day-9.26.2
+            "raw_away": _raw_a,                      # Day-9.26.2
+            "confidence_scale": _scale,              # Day-9.26.2
             "confidence": deltas.get("confidence", "low"),
             "notes": deltas.get("notes") or [],
             "provider": deltas.get("provider"),          # which LLM answered
@@ -305,6 +317,38 @@ def build_card(match: dict, conn=None, *,
                        "failure_stage": _failure_stage,
                        "ctx_failures": [], "context_sources_ok": [],
                        "context_truncated_chars": 0, "context_chars": 0}
+
+    # ───── 4.5. Per-agent dominant directions (for signal-disagreement check) ─────
+    # Day-9.26.2: compute each agent's "this is who I think wins" so we can
+    # flag disagreements on the card. None means signal isn't usable.
+    per_agent_dir = {}
+    try:
+        from core.data.soccerdata_io import elo_of
+        from core.models.dixon_coles import score_matrix as _dc_sm
+        from core.scoring.engine import direction_probs as _dirp
+        lh_dc, la_dc = eg_fn(home, away)
+        lh_dc = max(0.05, lh_dc + news_deltas[0])
+        la_dc = max(0.05, la_dc + news_deltas[1])
+        dc_dirs = _dirp(_dc_sm(lh_dc, la_dc))
+        per_agent_dir["dc"] = max(dc_dirs, key=dc_dirs.get)
+    except Exception:                              # noqa: BLE001
+        per_agent_dir["dc"] = None
+    try:
+        from core.models.elo import outcome_probs as _ep
+        from core.data.soccerdata_io import elo_of as _elo_of
+        elo_dirs = _ep(_elo_of(elo, home), _elo_of(elo, away))
+        per_agent_dir["elo"] = max(elo_dirs, key=elo_dirs.get)
+    except Exception:                              # noqa: BLE001
+        per_agent_dir["elo"] = None
+    try:
+        from core.data.oddsapi import devig as _devig
+        if scoring_odds:
+            mkt_dirs = _devig(scoring_odds)
+            per_agent_dir["market"] = max(mkt_dirs, key=mkt_dirs.get)
+        else:
+            per_agent_dir["market"] = None
+    except Exception:                              # noqa: BLE001
+        per_agent_dir["market"] = None
 
     # ───── 5. Run the model assembler ─────
     try:
@@ -377,7 +421,18 @@ def build_card(match: dict, conn=None, *,
     # up by next-window's read_prior_deltas for the T-15m reuse).
     card["news_home_delta"]     = news_meta.get("home", 0.0)
     card["news_away_delta"]     = news_meta.get("away", 0.0)
+    card["news_raw_home_delta"] = news_meta.get("raw_home", 0.0)      # Day-9.26.2
+    card["news_raw_away_delta"] = news_meta.get("raw_away", 0.0)      # Day-9.26.2
+    card["news_confidence_scale"] = news_meta.get("confidence_scale", 1.0)  # Day-9.26.2
     card["news_confidence"]     = news_meta.get("confidence", "low")
+    # Day-9.26.2: per-agent dominant direction + disagreement flag for the card.
+    card["per_agent_direction"] = per_agent_dir
+    _dirs_voted = {v for v in per_agent_dir.values() if v}
+    card["signal_disagreement"] = len(_dirs_voted) > 1
+    card["signal_disagreement_summary"] = (
+        ", ".join(f"{k}={v}" for k, v in per_agent_dir.items() if v)
+        if card["signal_disagreement"] else None
+    )
     card["news_notes"]          = news_meta.get("notes", [])
     card["news_provider"]       = news_meta.get("provider")
     card["news_fallbacks_used"] = news_meta.get("fallbacks_used", [])

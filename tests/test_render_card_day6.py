@@ -51,8 +51,11 @@ def test_ko_with_penalty_within_9_line_cap():
 def test_card_with_many_context_bullets_truncated_to_two():
     card = _base_card(context=["A", "B", "C", "D", "E", "F"])
     txt = render_card(card)
-    # Only the bullets-line; should show exactly 2 bullets joined
-    bullet_lines = [ln for ln in txt.split("\n") if "ℹ " in ln]
+    # Only the legacy bullets-line; should show exactly 2 bullets joined.
+    # Day-9.26.2: the always-on news status line ALSO starts with `ℹ news`
+    # but is a single bullet — filter by content so we narrow to legacy bullets.
+    bullet_lines = [ln for ln in txt.split("\n")
+                    if "ℹ " in ln and "news" not in ln]
     assert len(bullet_lines) == 1
     assert bullet_lines[0].count("ℹ ") == 2
 
