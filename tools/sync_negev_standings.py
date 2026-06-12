@@ -372,6 +372,22 @@ def sync_standings(*, tournament_id: str | None = None,
         result["results_synced"] = 0
         result["results_error"] = str(e)[:120]
 
+    # Day-9.26: side-bet resolution watchdog. Fires its OWN Telegram alert
+    # (not the standings summary) when a side-bet shell flips to
+    # isResolved=true. Idempotent via the side_bet_state table — alerts
+    # fire EXACTLY once per resolution. Safe on every cron tick.
+    if not dry:
+        try:
+            from tools.sidebet_watch import detect_and_alert
+            sb_out = detect_and_alert(conn, tid, ntm)
+            result["side_bets_detected"] = sb_out.get("detected") or []
+            result["side_bets_resolved_count"] = sb_out.get("resolved_count")
+            if sb_out.get("errors"):
+                result["side_bet_errors"] = sb_out["errors"]
+        except Exception as e:                         # noqa: BLE001
+            log.warning("side-bet watch failed: %s", e)
+            result["side_bet_errors"] = [str(e)[:120]]
+
     # Telegram delivery — only on real sync (not dry-run) and only when asked.
     # Failure to deliver is non-fatal; the standings already wrote OK.
     if send_telegram and not dry:

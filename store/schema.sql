@@ -41,6 +41,22 @@ CREATE TABLE IF NOT EXISTS standings (
     side_points REAL DEFAULT 0     -- Day-9.26: Negev's Side Bets column
 );
 
+-- Day-9.26: track which side-bet shells we've already alerted on.
+-- The Negev app marks shells as isResolved=true + correctAnswer=Yes/No when
+-- a side bet resolves. We poll on every sync tick; when we see a new
+-- resolution we send a Telegram alert with ready-to-paste CLI commands
+-- for the operator (since per-user side-bet picks are at an admin-only
+-- Firestore path our auth cannot read).
+CREATE TABLE IF NOT EXISTS side_bet_state (
+    side_bet_id     TEXT PRIMARY KEY,
+    tournament_id   TEXT NOT NULL,
+    question        TEXT,
+    correct_answer  TEXT,
+    is_resolved     INTEGER DEFAULT 0,
+    notified_at     TEXT,
+    seen_at         TEXT
+);
+
 -- Observability: cost/quota ledger (also created by core/obs/cost.py).
 CREATE TABLE IF NOT EXISTS api_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
