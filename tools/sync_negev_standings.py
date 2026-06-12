@@ -52,26 +52,58 @@ def _import_or_fail():
         )
 
 
+def _migrate_standings_schema(conn: sqlite3.Connection) -> None:
+    """Day-9.26: idempotent ALTER for the new side_points column.
+
+    Older DB instances (deployed before Day-9.26) have a 4-column standings
+    table; the rewritten sync needs side_points to round out Negev's 4-way
+    breakdown (Group / KO / Side / Futures). ALTER is no-op when the
+    column is already present.
+    """
+    try:
+        conn.execute("ALTER TABLE standings ADD COLUMN side_points REAL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass         # column already exists — sqlite3 raises "duplicate column"
+
+
 def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
     """One-row UPSERT matching tools/standings_set.py::_upsert shape so the
-    two writers can coexist (manual entry via the CLI, automated via this)."""
+    two writers can coexist (manual entry via the CLI, automated via this).
+
+    Day-9.26 mapping (NEW — aligned with Negev's app columns):
+      Negev `direction` (group-stage match points)    → group_points
+      Negev `knockout`  (KO match points)             → knockout_points
+      Negev `side`      (side-bet pts — limited;       → side_points
+                          see toto_get_standings docstring)
+      Negev `broad`     (futures, awarded at end)     → futures_points
+
+    Pre-Day-9.26 this mapped `direction` → group_points and 0 → KO, because
+    the OLD toto_get_standings read user-doc globals where group + KO were
+    folded together. Now they're split correctly by stage at the source.
+    """
     participant = row["player"]
-    group_pts = float(row["direction"])               # see mapping in module docstring
-    ko_pts = 0.0
-    futures_pts = float(row["broad"])
+    group_pts = float(row.get("direction") or 0)
+    ko_pts = float(row.get("knockout") or 0)
+    side_pts = float(row.get("side") or 0)
+    futures_pts = float(row.get("broad") or 0)
     if dry:
-        log.info("[dry-run] would upsert %s: group=%.2f ko=%.2f futures=%.2f total=%.2f",
-                 participant, group_pts, ko_pts, futures_pts,
-                 group_pts + ko_pts + futures_pts)
+        log.info("[dry-run] would upsert %s: group=%.2f ko=%.2f side=%.2f "
+                  "futures=%.2f total=%.2f",
+                 participant, group_pts, ko_pts, side_pts, futures_pts,
+                 group_pts + ko_pts + side_pts + futures_pts)
         return
+    # Migrate first run (idempotent)
+    _migrate_standings_schema(conn)
     conn.execute(
         "INSERT INTO standings (participant, group_points, knockout_points, "
-        "futures_points) VALUES (?, ?, ?, ?) "
+        "futures_points, side_points) VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(participant) DO UPDATE SET "
         "group_points = excluded.group_points, "
         "knockout_points = excluded.knockout_points, "
-        "futures_points = excluded.futures_points",
-        (participant, group_pts, ko_pts, futures_pts))
+        "futures_points = excluded.futures_points, "
+        "side_points = excluded.side_points",
+        (participant, group_pts, ko_pts, futures_pts, side_pts))
 
 
 def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, str]:

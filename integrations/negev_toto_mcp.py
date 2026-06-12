@@ -450,91 +450,131 @@ def toto_get_standings(tournament_id: str | None = None,
                        extended: bool = False,
                        include_bots: bool = True) -> list[dict]:
     """Sorted leaderboard for a tournament: [{rank, player, total, direction,
-    broad, exactCount, role, uid}]. Filters users whose tournaments[] contains
-    the tid. Ties broken by exactScoreCount desc (per PDF §19), then by uid
-    ascending — matches what the Negev web app shows when fully tied.
+    knockout, side, broad, exactCount, role, uid}]. Filters users whose
+    tournaments[] contains the tid. Ties broken by exactScoreCount desc
+    (per PDF §19), then by uid ascending — matches what the Negev web app
+    shows when fully tied.
 
-    Day-9.15: default `include_bots=True` so the row count + ranks match
-    the app exactly. The strategy layer that needs human-only competitors
-    for "gap to leader" math should pass `include_bots=False` explicitly.
+    Day-9.26 REWRITE — aggregate from `bets/` (per-match points) +
+    `tournaments/{tid}/broadBets/` (futures), since Negev's `users/{uid}`
+    GLOBAL fields stayed at zero post-Mexico-v-SA. Mexico v SA finished
+    2026-06-11 21:00 UTC; the app showed updated leaderboard (G. Cain 11.3,
+    Vaadia 7.8, Igor 1.0) within minutes but `users/{uid}.pointsTotal`
+    stayed at 0 for all 65 humans. Cloud Function stopped writing the
+    GLOBAL field; the app aggregates client-side from `bets/`.
 
-    Day-9.16: the user doc's `pointsTotal` / `directionPoints` /
-    `broadBetPoints` / `exactScoreCount` fields are GLOBAL across every
-    tournament the user has joined (Chinchilla has 4.3 pts residue from
-    22 prior tournaments). The Negev app shows tournament-specific points,
-    which live in a subcollection we can't read (403). To compute
-    WC2026-specific contribution we subtract a baseline snapshot:
+    Day-9.26 aggregation:
+      1. Match bets (`bets/{tid}_{matchId}_{uid}`): sum points per user,
+         split by stage. Group-stage matches → `direction`. KO matches
+         (R32/R16/QF/SF/3rd/Final) → `knockout`. Count `isExactScore`
+         hits → `exactCount`.
+      2. Futures (`tournaments/{tid}/broadBets/{uid}`): the shells carry
+         user selections only — points are awarded at tournament end.
+         For now `broad` stays 0; that's the same as Negev's "Broad Bets"
+         column (currently hidden in app's default view).
+      3. Side bets: KNOWN LIMITATION. The per-user side-bet pick doc
+         lives at a security-rule-blocked path (403 across every
+         convention probed). Cannot aggregate per-user; `side` stays 0.
+         The user can see their OWN side-bet total in the app's
+         top-right. Friend rows show 0 in this column even when the app
+         shows non-zero. See `docs/SCHEMA_negev.md` for the gap detail.
+      4. `total = direction + knockout + side + broad`.
 
-      contribution = max(0, current_pointsTotal - baseline_pointsTotal)
-
-    The baseline is captured by `tools/snapshot_negev_baseline.py`,
-    persisted at `store/negev_baseline_<tid>.json`. If the baseline file
-    EXISTS (recommended), every user's contribution is computed
-    correctly — humans (baseline=0) show real WC2026 pts, bots
-    (baseline=4.3) show only the new gain. If the baseline file is
-    MISSING, we fall back to Day-9.15's bot-override (zero bot stats
-    entirely) which only works correctly pre-tournament.
+    Day-9.15 sort behaviour preserved: total desc, exactCount desc, uid asc.
     """
     tid = _tid(tournament_id)
     users = _read_all("users")
-    baseline = _load_baseline(tid)                     # {} if no snapshot
-    has_baseline = bool(baseline)
-    rows = []
+    uid_to_user = {u.get("uid"): u for u in users if u.get("uid")}
+
+    # ── Match bets (group + KO) ──
+    # Filter `bets/` to this tournament. The schema is consistent across
+    # all 1026 docs (verified live 2026-06-12): every bet has matchId,
+    # tournamentId, userId, points, isExactScore.
+    bets = [b for b in _read_all("bets") if b.get("tournamentId") == tid]
+
+    # We need the stage of each match to bucket points into group vs KO.
+    # Negev's match docs are in the top-level `matches` collection with
+    # `tournamentId` field. Their `stage` is a string like 'Group Stage - 1'
+    # or 'Round of 16' / 'Quarter-final' / 'Semi-final' / 'Final' / 'Third place'.
+    # Build apiFixtureId → stage map.
+    matches = [m for m in _read_all("matches") if m.get("tournamentId") == tid]
+    fixture_to_stage = {}
+    for m in matches:
+        # Match doc paths look like 'matches/{tid}_{apiFixtureId}', so apiFixtureId
+        # is also queryable directly.
+        fid = m.get("apiFixtureId")
+        if fid is not None:
+            fixture_to_stage[str(fid)] = (m.get("stage") or "").strip()
+
+    def _is_ko_stage(stage: str) -> bool:
+        s = (stage or "").lower()
+        return any(k in s for k in ("round of", "quarter", "semi",
+                                      "final", "third"))
+    # Note: "Group Stage - 1/2/3" contains "Stage" but NOT any KO marker.
+    # "Round of 16" / "Quarter-final" / "Semi-final" / "Final" / "Third place"
+    # all match _is_ko_stage. Anything unrecognised defaults to direction (safe
+    # default — won't double-count).
+
+    agg = {}                                            # uid -> dict
     for u in users:
         if tid not in (u.get("tournaments") or []):
             continue
         is_bot = _is_bot(u)
         if not include_bots and is_bot:
             continue
-        # Read raw globals
-        cur_total = float(u.get("pointsTotal") or 0)
-        cur_direction = float(u.get("directionPoints") or 0)
-        cur_broad = float(u.get("broadBetPoints") or 0)
-        cur_exact = int(u.get("exactScoreCount") or 0)
-
-        if has_baseline:
-            # Day-9.16: subtract baseline to get WC2026-specific contribution.
-            # Works correctly for bots AND for humans who might have residue
-            # from other concurrent tournaments. Clamped to 0 so a residue
-            # mismatch can't go negative.
-            b = baseline.get(u.get("uid"), {})
-            total = max(0.0, cur_total - float(b.get("pointsTotal") or 0))
-            direction = max(0.0, cur_direction - float(b.get("directionPoints") or 0))
-            broad = max(0.0, cur_broad - float(b.get("broadBetPoints") or 0))
-            exact = max(0, cur_exact - int(b.get("exactScoreCount") or 0))
-        elif is_bot:
-            # Day-9.15 fallback: no baseline available. Zero bots entirely so
-            # historical residue (Chinchilla 4.3) doesn't put them at the top
-            # pre-tournament. Once games start without a baseline, this
-            # under-counts bots; capture a baseline to upgrade behaviour.
-            total = direction = broad = 0.0
-            exact = 0
-        else:
-            total, direction, broad, exact = cur_total, cur_direction, cur_broad, cur_exact
-
-        rows.append({
-            "player": u.get("displayName") or u.get("uid", "?"),
+        agg[u.get("uid")] = {
             "uid": u.get("uid"),
-            "total": total,
-            "direction": direction,
-            "broad": broad,
-            "exactCount": exact,
+            "player": u.get("displayName") or u.get("uid", "?"),
             "role": u.get("role"),
+            "direction": 0.0,
+            "knockout": 0.0,
+            "side": 0.0,
+            "broad": 0.0,
+            "exactCount": 0,
             **({"_full": u} if extended else {}),
+        }
+
+    for b in bets:
+        uid = b.get("userId")
+        if uid not in agg:
+            continue
+        pts = float(b.get("points") or 0)
+        match_id = str(b.get("matchId") or "")
+        # matchId format on real tournament: '{tid}_{apiFixtureId}'.
+        # Mock tournament docs have a different prefix; we filtered above
+        # via tournamentId so those are already excluded.
+        fid = match_id.rsplit("_", 1)[-1] if "_" in match_id else match_id
+        stage = fixture_to_stage.get(fid, "")
+        if _is_ko_stage(stage):
+            agg[uid]["knockout"] += pts
+        else:
+            agg[uid]["direction"] += pts
+        if b.get("isExactScore"):
+            agg[uid]["exactCount"] += 1
+
+    # ── Futures (broad bets) — placeholder; points awarded at tournament end ──
+    # The selection docs at tournaments/{tid}/broadBets/{uid} carry only the
+    # user's selections, not points. Negev scores futures only after the
+    # tournament resolves the categories. Leave `broad` at 0 here; when
+    # Negev publishes futures points (likely via its Cloud Function writing
+    # to a separate collection or the user doc), we'll wire that up.
+
+    rows = []
+    for a in agg.values():
+        total = a["direction"] + a["knockout"] + a["side"] + a["broad"]
+        rows.append({
+            "player": a["player"],
+            "uid": a["uid"],
+            "total": round(total, 3),
+            "direction": round(a["direction"], 3),
+            "knockout": round(a["knockout"], 3),
+            "side": round(a["side"], 3),
+            "broad": round(a["broad"], 3),
+            "exactCount": a["exactCount"],
+            "role": a["role"],
+            **({"_full": a.get("_full")} if extended and a.get("_full") else {}),
         })
-    # Sort to match the Negev web-app's own ordering EXACTLY (Day-9.15 fix):
-    #   1. pointsTotal desc        (primary — who has more points wins)
-    #   2. exactScoreCount desc    (PDF §19 tie-break — more exact-score hits)
-    #   3. uid asc                 (Firestore document ID — final tie-break)
-    #
-    # Earlier this sorted by displayName ascending which put Igor at rank
-    # 26/63 pre-tournament (everyone at 0 → alphabetical); the app puts him
-    # at 56 because the app's final tie-break is the uid (= Firestore _id).
-    # Confirmed by comparing the app's screenshot top-8 ('Malul', 'Noam',
-    # 'YahavHaMeleh', 'Patishi', 'Kelman', 'Bengo', 'Avner', 'Kobi') to a
-    # uid-asc sort of the same data — exact match. The displayName key was
-    # an early guess that worked for alpha-test data but diverges from the
-    # production app once you scroll past the first few names.
+
     rows.sort(key=lambda r: (-r["total"], -r["exactCount"], r.get("uid") or ""))
     for i, r in enumerate(rows, 1):
         r["rank"] = i

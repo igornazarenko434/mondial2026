@@ -97,12 +97,17 @@ def from_db_row(row: dict | None) -> dict | None:
     return {
         "player": row.get("participant"),
         "rank": row.get("rank", 0),
+        # Day-9.26: separate group + knockout + side + futures so render_block
+        # can show the 4 categories distinctly (matching the Negev app's
+        # Standings page columns).
         "total": float(row.get("group_points") or 0)
                   + float(row.get("knockout_points") or 0)
+                  + float(row.get("side_points") or 0)
                   + float(row.get("futures_points") or 0),
-        "direction": float(row.get("group_points") or 0)
-                      + float(row.get("knockout_points") or 0),
-        "broad": float(row.get("futures_points") or 0),
+        "direction": float(row.get("group_points") or 0),
+        "knockout":  float(row.get("knockout_points") or 0),
+        "side":      float(row.get("side_points") or 0),
+        "broad":     float(row.get("futures_points") or 0),
         "exactCount": 0,
         "role": "player",
         "uid": None,
@@ -143,15 +148,30 @@ def render_block(rows: list[dict], name: str,
     tag = "  ← you" if is_me else ""
 
     direction = float(row.get("direction") or 0)
+    knockout = float(row.get("knockout") or 0)
+    side = float(row.get("side") or 0)
     broad = float(row.get("broad") or 0)
     total = float(row.get("total") or 0)
     rank = row.get("rank") or "?"
+
+    # Day-9.26: split line now mirrors Negev's 4-column standings page.
+    # Show only the non-zero categories on mobile to keep the line tight;
+    # always show 'group' since that's the dominant signal early-tournament.
+    split_parts = [f"group {direction:.1f}"]
+    if knockout > 0:
+        split_parts.append(f"KO {knockout:.1f}")
+    if side > 0:
+        split_parts.append(f"side {side:.1f}")
+    if broad > 0 or sum((knockout, side, broad)) == 0:
+        # always include futures when we want to make explicit nothing else fired
+        split_parts.append(f"futures {broad:.1f}")
+    split_line = "  •  ".join(split_parts)
 
     lines = [
         f"👤 {name}{tag}",
         f"   Rank:       {rank} / {n}  (app view)",
         f"   Total:      {total:.1f} pts",
-        f"   Split:      group {direction:.1f}  •  futures {broad:.1f}",
+        f"   Split:      {split_line}",
     ]
     if leader.get("player") != name:
         gap = leader["total"] - total

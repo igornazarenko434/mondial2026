@@ -40,13 +40,18 @@ def test_tracked_participants_ignores_empty_csv_entries(monkeypatch):
 
 # ───────────────────────── from_db_row ─────────────────────────
 
-def test_from_db_row_collapses_three_columns_into_negev_shape():
+def test_from_db_row_collapses_four_columns_into_negev_shape():
+    """Day-9.26: 4 separate columns (group / knockout / side / futures) →
+    Negev row shape with direction + knockout + side + broad fields, and
+    a `total` that's the sum of all 4."""
     db = {"participant": "Igor", "group_points": 10.5,
-          "knockout_points": 2.0, "futures_points": 4.3}
+          "knockout_points": 2.0, "side_points": 1.0, "futures_points": 4.3}
     r = people.from_db_row(db)
     assert r["player"] == "Igor"
-    assert r["total"] == 10.5 + 2.0 + 4.3
-    assert r["direction"] == 10.5 + 2.0
+    assert r["total"] == 10.5 + 2.0 + 1.0 + 4.3
+    assert r["direction"] == 10.5
+    assert r["knockout"] == 2.0
+    assert r["side"] == 1.0
     assert r["broad"] == 4.3
     assert r["role"] == "player"
 

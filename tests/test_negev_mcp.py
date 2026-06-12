@@ -111,27 +111,80 @@ def test_list_tournaments_handles_inaccessible_tournaments(fake_firestore):
 # ─────────────────────────── toto_get_standings ───────────────────────────
 
 def _seed_standings(state, tid):
+    """Day-9.26 rewrite: seed `users` + `matches` + `bets` collections.
+
+    Negev's `users/{uid}.pointsTotal` GLOBAL field stays at 0 even after
+    matches resolve (Cloud Function no longer updates it). The app
+    aggregates per-tournament points client-side from `bets/`. Our
+    `toto_get_standings()` does the same; tests must seed bet docs that
+    add up to the expected per-user totals.
+
+    Seed: 3 humans + 1 bot in `tid`, + 1 outside-tournament user. Each
+    human's totals (Igor 12, Alice 20, Bob 20) are split across mock
+    fixture bets; bot Chinchilla has 0 bets in `tid`.
+    """
     state["collections"]["users"] = [
         {"path": "users/u1", "fields": {"uid": "u1", "displayName": "Igor",
-                                        "role": "player", "tournaments": [tid],
-                                        "pointsTotal": 12, "directionPoints": 10,
-                                        "broadBetPoints": 2, "exactScoreCount": 1}},
+                                        "role": "player", "tournaments": [tid]}},
         {"path": "users/u2", "fields": {"uid": "u2", "displayName": "Alice",
-                                        "role": "player", "tournaments": [tid],
-                                        "pointsTotal": 20, "directionPoints": 18,
-                                        "broadBetPoints": 2, "exactScoreCount": 3}},
+                                        "role": "player", "tournaments": [tid]}},
         {"path": "users/u3", "fields": {"uid": "u3", "displayName": "Bob",
-                                        "role": "player", "tournaments": [tid],
-                                        "pointsTotal": 20, "directionPoints": 17,
-                                        "broadBetPoints": 3, "exactScoreCount": 5}},
+                                        "role": "player", "tournaments": [tid]}},
         {"path": "users/u4", "fields": {"uid": "u4", "displayName": "Chinchilla",
                                         "role": "bot", "isBot": True,
-                                        "tournaments": [tid],
-                                        "pointsTotal": 999, "exactScoreCount": 99}},
+                                        "tournaments": [tid]}},
         {"path": "users/u5", "fields": {"uid": "u5", "displayName": "OutsideUser",
-                                        "role": "player", "tournaments": ["other-tid"],
-                                        "pointsTotal": 50}},
+                                        "role": "player", "tournaments": ["other-tid"]}},
     ]
+    # 5 mock fixtures — all Group Stage so points land in `direction`.
+    state["collections"]["matches"] = [
+        {"path": f"matches/{tid}_{1000+i}",
+         "fields": {"apiFixtureId": 1000+i, "tournamentId": tid,
+                    "stage": "Group Stage - 1"}}
+        for i in range(5)
+    ]
+    # Bets: Igor 12 total (1 exact), Alice 20 total (3 exact), Bob 20 (5 exact).
+    state["collections"]["bets"] = [
+        # Igor: 12 pts total = 3+4+5; 1 exact
+        {"path": f"bets/{tid}_1000_u1",
+         "fields": {"userId": "u1", "tournamentId": tid,
+                    "matchId": f"{tid}_1000", "points": 3.0,
+                    "isExactScore": True, "isCorrectDir": True}},
+        {"path": f"bets/{tid}_1001_u1",
+         "fields": {"userId": "u1", "tournamentId": tid,
+                    "matchId": f"{tid}_1001", "points": 4.0,
+                    "isExactScore": False, "isCorrectDir": True}},
+        {"path": f"bets/{tid}_1002_u1",
+         "fields": {"userId": "u1", "tournamentId": tid,
+                    "matchId": f"{tid}_1002", "points": 5.0,
+                    "isExactScore": False, "isCorrectDir": True}},
+        # Alice: 20 pts total = 7+7+6; 3 exact
+        {"path": f"bets/{tid}_1000_u2",
+         "fields": {"userId": "u2", "tournamentId": tid,
+                    "matchId": f"{tid}_1000", "points": 7.0,
+                    "isExactScore": True, "isCorrectDir": True}},
+        {"path": f"bets/{tid}_1001_u2",
+         "fields": {"userId": "u2", "tournamentId": tid,
+                    "matchId": f"{tid}_1001", "points": 7.0,
+                    "isExactScore": True, "isCorrectDir": True}},
+        {"path": f"bets/{tid}_1002_u2",
+         "fields": {"userId": "u2", "tournamentId": tid,
+                    "matchId": f"{tid}_1002", "points": 6.0,
+                    "isExactScore": True, "isCorrectDir": True}},
+    ]
+    # Bob: 20 pts total = 4×5; 5 exact (one for each)
+    for i in range(5):
+        state["collections"]["bets"].append({
+            "path": f"bets/{tid}_{1000+i}_u3",
+            "fields": {"userId": "u3", "tournamentId": tid,
+                       "matchId": f"{tid}_{1000+i}", "points": 4.0,
+                       "isExactScore": True, "isCorrectDir": True}})
+    # An outside-tournament bet that must NOT count for Igor/Alice/Bob
+    state["collections"]["bets"].append({
+        "path": "bets/other-tid_999_u1",
+        "fields": {"userId": "u1", "tournamentId": "other-tid",
+                   "matchId": "other-tid_999", "points": 1000.0,
+                   "isExactScore": True}})
 
 
 def test_get_standings_filters_by_tournament_and_excludes_bots_when_asked(fake_firestore):
@@ -154,20 +207,18 @@ def test_get_standings_tie_break_by_exact_score_count(fake_firestore):
 
 
 def test_get_standings_default_includes_bots_with_zeroed_points(fake_firestore):
-    """Day-9.15: default include_bots=True matches what the Negev web app
-    shows (the app displays bots in the standings list). But the user
-    doc's pointsTotal is GLOBAL (across all the bot's previous
-    tournaments), so we override bot stats to 0 — the bot sits at the
-    bottom of the all-tied-at-0 list, not at the top with its 999-pt
-    historical residue."""
+    """Day-9.26: default include_bots=True matches what the Negev web app
+    shows. Bots that have no bets in the current tournament show 0 by
+    construction (no aggregation from a stale global field — the bug fixed
+    in Day-9.26)."""
     _seed_standings(fake_firestore, "tid-x")
     rows = ntm.toto_get_standings("tid-x")  # default: include_bots=True
     chinchilla = next(r for r in rows if r["player"] == "Chinchilla")
-    # Chinchilla's seed data has pointsTotal=999 but Day-9.15 overrides to 0
+    # Chinchilla has 0 bets in tid-x → total=0 naturally (no baseline subtract)
     assert chinchilla["total"] == 0, \
-        f"bot total should be zeroed; got {chinchilla['total']}"
+        f"bot total should be zero with no bets; got {chinchilla['total']}"
     assert chinchilla["exactCount"] == 0
-    # And it should NOT rank #1 anymore — Bob (20 pts) is ahead
+    # And it should NOT rank #1 — Bob (20 pts) is ahead
     assert rows[0]["player"] == "Bob"
 
 
@@ -177,86 +228,62 @@ def test_get_standings_include_bots_explicit_false_excludes_them(fake_firestore)
     assert all(r.get("role") != "bot" for r in rows)
 
 
-def test_get_standings_baseline_present_subtracts_residue(fake_firestore, monkeypatch):
-    """Day-9.16: when a pre-tournament baseline snapshot exists, every user's
-    contribution = max(0, current_pointsTotal - baseline_pointsTotal). This
-    handles bot residue (Chinchilla's 4.3 from old tournaments) AND survives
-    the case where games start (humans gain real pts which should display)."""
-    tid = "tid-baseline"
-    # Seed: Igor's pre-game state is 0; Chinchilla has 4.3 residue.
-    # Post-game (right now): Igor scored 5 pts in WC2026, Chinchilla scored 1.
+def test_get_standings_aggregates_group_and_knockout_separately(fake_firestore):
+    """Day-9.26: bets land in `direction` (Group) or `knockout` based on the
+    match's stage field. The Negev app's standings page shows them in
+    distinct columns; we mirror that."""
+    tid = "tid-mixed"
     fake_firestore["collections"]["users"] = [
-        {"path": "users/u-igor", "fields": {
-            "uid": "u-igor", "displayName": "Igor",
-            "role": "player", "tournaments": [tid],
-            "pointsTotal": 5.0,           # gained 5 pts post-game
-            "exactScoreCount": 1}},
-        {"path": "users/bot_chinchilla", "fields": {
-            "uid": "bot_chinchilla", "displayName": "Chinchilla",
-            "role": "bot", "isBot": True, "tournaments": [tid],
-            "pointsTotal": 5.3,           # was 4.3 baseline + 1 new pt
-            "exactScoreCount": 1}},
+        {"path": "users/u-x", "fields": {"uid": "u-x", "displayName": "X",
+                                          "role": "player",
+                                          "tournaments": [tid]}},
     ]
-
-    # Patch _load_baseline to return our test baseline (no real disk file)
-    def fake_baseline(tid_arg):
-        return {
-            "u-igor":          {"pointsTotal": 0.0,  "exactScoreCount": 0},
-            "bot_chinchilla":  {"pointsTotal": 4.3,  "exactScoreCount": 0},
-        }
-    monkeypatch.setattr(ntm, "_load_baseline", fake_baseline)
-
-    rows = ntm.toto_get_standings(tid)
-    by_name = {r["player"]: r for r in rows}
-    # Igor's contribution = 5.0 - 0 = 5.0 (correct WC2026 score)
-    assert by_name["Igor"]["total"] == 5.0
-    # Chinchilla's contribution = 5.3 - 4.3 = 1.0 (the new WC2026 pt, not the residue)
-    assert by_name["Chinchilla"]["total"] == 1.0
-    # Igor should rank #1 (5 pts > Chinchilla's 1 pt)
-    assert rows[0]["player"] == "Igor"
-
-
-def test_get_standings_baseline_missing_falls_back_to_bot_override(fake_firestore, monkeypatch):
-    """Day-9.16: when no baseline file exists, fall back to Day-9.15's
-    bot-override (bots zeroed entirely). Maintains pre-tournament app match
-    even without taking a snapshot."""
-    tid = "tid-no-baseline"
-    fake_firestore["collections"]["users"] = [
-        {"path": "users/u-igor", "fields": {
-            "uid": "u-igor", "displayName": "Igor",
-            "role": "player", "tournaments": [tid],
-            "pointsTotal": 0.0}},
-        {"path": "users/bot_chinchilla", "fields": {
-            "uid": "bot_chinchilla", "displayName": "Chinchilla",
-            "role": "bot", "isBot": True, "tournaments": [tid],
-            "pointsTotal": 4.3}},
+    fake_firestore["collections"]["matches"] = [
+        # Group + KO matches in the same tournament
+        {"path": f"matches/{tid}_2000",
+         "fields": {"apiFixtureId": 2000, "tournamentId": tid,
+                    "stage": "Group Stage - 2"}},
+        {"path": f"matches/{tid}_2100",
+         "fields": {"apiFixtureId": 2100, "tournamentId": tid,
+                    "stage": "Round of 16"}},
+        {"path": f"matches/{tid}_2200",
+         "fields": {"apiFixtureId": 2200, "tournamentId": tid,
+                    "stage": "Final"}},
     ]
-    monkeypatch.setattr(ntm, "_load_baseline", lambda tid_arg: {})
-    rows = ntm.toto_get_standings(tid)
-    chinchilla = next(r for r in rows if r["player"] == "Chinchilla")
-    assert chinchilla["total"] == 0.0    # bot override kicks in despite 4.3 raw
-    # Note: rows[0] may still be Chinchilla because all are tied at 0 and the
-    # uid 'bot_chinchilla' sorts before 'u-igor' in uid-asc. The CRITICAL
-    # assertion is that Chinchilla's 4.3 raw residue did NOT make it dominate
-    # other tied users by raw pointsTotal — it's the uid tiebreak that ranks
-    # it now, which is correct and what the app does.
-
-
-def test_get_standings_baseline_protects_negative_contribution(fake_firestore, monkeypatch):
-    """Day-9.16: if a baseline somehow exceeds the current pointsTotal
-    (manual edit, data anomaly), clamp contribution to 0 — never go
-    negative which would corrupt the sort order."""
-    tid = "tid-baseline"
-    fake_firestore["collections"]["users"] = [
-        {"path": "users/u-test", "fields": {
-            "uid": "u-test", "displayName": "TestUser",
-            "role": "player", "tournaments": [tid],
-            "pointsTotal": 3.0}},
+    fake_firestore["collections"]["bets"] = [
+        {"path": f"bets/{tid}_2000_u-x",
+         "fields": {"userId": "u-x", "tournamentId": tid,
+                    "matchId": f"{tid}_2000", "points": 4.0,
+                    "isExactScore": False}},
+        {"path": f"bets/{tid}_2100_u-x",
+         "fields": {"userId": "u-x", "tournamentId": tid,
+                    "matchId": f"{tid}_2100", "points": 6.0,
+                    "isExactScore": True}},
+        {"path": f"bets/{tid}_2200_u-x",
+         "fields": {"userId": "u-x", "tournamentId": tid,
+                    "matchId": f"{tid}_2200", "points": 8.0,
+                    "isExactScore": False}},
     ]
-    monkeypatch.setattr(ntm, "_load_baseline",
-                        lambda tid_arg: {"u-test": {"pointsTotal": 10.0}})
     rows = ntm.toto_get_standings(tid)
-    assert rows[0]["total"] == 0.0   # 3 - 10 = -7, clamped to 0
+    r = rows[0]
+    assert r["direction"] == 4.0           # group only
+    assert r["knockout"] == 14.0           # Round of 16 (6) + Final (8)
+    assert r["side"] == 0.0
+    assert r["broad"] == 0.0
+    assert r["total"] == 18.0
+    assert r["exactCount"] == 1
+
+
+def test_get_standings_bets_outside_tournament_are_ignored(fake_firestore):
+    """Day-9.26 safety: a bet with the wrong tournamentId must NEVER
+    contribute to this tournament's leaderboard, even if userId matches."""
+    _seed_standings(fake_firestore, "tid-x")
+    # _seed_standings adds an outside-tournament bet for Igor worth 1000 pts
+    rows = ntm.toto_get_standings("tid-x")
+    igor = next(r for r in rows if r["player"] == "Igor")
+    # Igor's tid-x bets sum to 12 (3+4+5); the 1000-pt outside bet must NOT show
+    assert igor["total"] == 12.0
+    assert igor["direction"] == 12.0
 
 
 def test_get_standings_fully_tied_falls_back_to_uid_asc(fake_firestore):
@@ -301,8 +328,10 @@ def test_get_standings_fully_tied_falls_back_to_uid_asc(fake_firestore):
 def test_get_standings_extended_returns_full_user_doc(fake_firestore):
     _seed_standings(fake_firestore, "tid-x")
     rows = ntm.toto_get_standings("tid-x", extended=True)
+    # Day-9.26: Bob ranks #1 by exactCount tiebreak (Alice + Bob both 20 pts)
+    assert rows[0]["player"] == "Bob"
     assert "_full" in rows[0]
-    assert rows[0]["_full"]["uid"] in ("u2", "u3")            # one of the tied top
+    assert rows[0]["_full"]["uid"] == "u3"
 
 
 def test_get_standings_resolves_tid_from_env(fake_firestore, monkeypatch):

@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS standings (
     participant TEXT PRIMARY KEY,
     group_points REAL DEFAULT 0,
     knockout_points REAL DEFAULT 0,
-    futures_points REAL DEFAULT 0
+    futures_points REAL DEFAULT 0,
+    side_points REAL DEFAULT 0     -- Day-9.26: Negev's Side Bets column
 );
 
 -- Observability: cost/quota ledger (also created by core/obs/cost.py).
