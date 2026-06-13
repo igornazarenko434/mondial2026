@@ -61,7 +61,8 @@ def _db():
     conn.executescript("""
       CREATE TABLE matches (match_id INTEGER PRIMARY KEY, status TEXT);
       CREATE TABLE standings (participant TEXT PRIMARY KEY, group_points REAL,
-        knockout_points REAL, futures_points REAL);
+        knockout_points REAL, futures_points REAL,
+        side_points REAL DEFAULT 0);
     """)
     return conn
 
@@ -79,8 +80,14 @@ def test_standings_context_built():
     conn = _db()
     conn.execute("INSERT INTO matches VALUES (1,'FINISHED')")
     conn.execute("INSERT INTO matches VALUES (2,'TIMED')")
-    conn.execute("INSERT INTO standings VALUES ('Igor',  85, 0, 0)")   # post-reset Igor
-    conn.execute("INSERT INTO standings VALUES ('Dana', 170, 0, 0)")   # post-reset Dana
+    # Day-9.27: standings table gained a side_points column. Use explicit
+    # column list to avoid breaking when columns are added.
+    conn.execute("INSERT INTO standings (participant, group_points, "
+                  "knockout_points, futures_points, side_points) "
+                  "VALUES ('Igor', 85, 0, 0, 0)")
+    conn.execute("INSERT INTO standings (participant, group_points, "
+                  "knockout_points, futures_points, side_points) "
+                  "VALUES ('Dana', 170, 0, 0, 0)")
     conn.commit()
     ctx = repo.standings_context(conn, me="Igor")
     assert ctx["games_left"] == 1

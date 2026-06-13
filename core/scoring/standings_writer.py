@@ -101,28 +101,61 @@ def update_standings(conn: sqlite3.Connection, participant: str = "me",
     if apply_reset_after_groups and ko_pts > 0:
         group_pts = apply_group_reset(group_pts)
 
-    # Preserve futures_points if a prior row exists (Day 7 sets it independently)
+    # Day-9.27: NEVER clobber the Negev-sourced row.
+    # `sync_negev_standings` writes the authoritative app-exact totals to
+    # `participant=<MY_PARTICIPANT>` (e.g. "Igor"). The local writer here
+    # (which runs on EVERY 60-second daemon tick) was overwriting those
+    # values with score_match-computed numbers from the LOCAL predictions
+    # table — which is either empty (=> 0/0) or based on the EV-optimal
+    # pick (which can differ from the user's REAL Negev pick). The result
+    # was Igor's group_points being reset to 0 every minute, undoing the
+    # 07:00 Negev sync within seconds.
+    #
+    # Fix: skip the upsert when EITHER
+    #   (a) scored_matches == 0 (nothing to write), OR
+    #   (b) a Negev-sourced row already exists for this participant
+    #       (detect via the side_points column being non-NULL OR the row
+    #        having any non-zero category — both signal the Negev sync ran).
+    # The local writer's data is still computed + returned in the dict so
+    # post-match audits + observability still see the value, just NOT
+    # written to the standings table.
     existing = conn.execute(
-        "SELECT futures_points FROM standings WHERE participant=?",
-        (participant,)
+        "SELECT futures_points, side_points, group_points, knockout_points "
+        "FROM standings WHERE participant=?", (participant,)
     ).fetchone()
     futures = float(existing["futures_points"]) if existing else 0.0
-    total = round(group_pts + ko_pts + futures, 3)
+    side    = float(existing["side_points"] or 0) if existing else 0.0
+    total = round(group_pts + ko_pts + futures + side, 3)
 
-    conn.execute(
-        "INSERT INTO standings (participant, group_points, knockout_points, "
-        "futures_points) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT(participant) DO UPDATE SET "
-        "group_points = excluded.group_points, "
-        "knockout_points = excluded.knockout_points",
-        (participant, round(group_pts, 3), round(ko_pts, 3), futures))
-    conn.commit()
+    has_negev_row = bool(existing) and (
+        (existing["side_points"] is not None and existing["side_points"] > 0)
+        or (existing["futures_points"] or 0) > 0
+        or (existing["group_points"] or 0) > 0
+        or (existing["knockout_points"] or 0) > 0)
+
+    if scored == 0 or has_negev_row:
+        log.info("standings (local) computed for %s but NOT written "
+                  "(scored=%d, has_negev_row=%s) — Negev sync is source of truth",
+                  participant, scored, has_negev_row)
+    else:
+        conn.execute(
+            "INSERT INTO standings (participant, group_points, knockout_points, "
+            "futures_points, side_points) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(participant) DO UPDATE SET "
+            "group_points = excluded.group_points, "
+            "knockout_points = excluded.knockout_points",
+            (participant, round(group_pts, 3), round(ko_pts, 3), futures, side))
+        conn.commit()
+        log.info("standings updated (local writer): %s",
+                  {"participant": participant, "group_points": round(group_pts, 3),
+                   "knockout_points": round(ko_pts, 3)})
 
     out = {"participant": participant, "scored_matches": scored,
            "group_points": round(group_pts, 3),
            "knockout_points": round(ko_pts, 3),
-           "futures_points": round(futures, 3), "total": total}
-    log.info("standings updated: %s", out)
+           "futures_points": round(futures, 3),
+           "side_points": round(side, 3), "total": total,
+           "written_to_db": not (scored == 0 or has_negev_row)}
     return out
 
 
@@ -134,7 +167,9 @@ def compute_prize_distribution(conn: sqlite3.Connection,
     """
     rows = conn.execute(
         "SELECT participant, group_points, knockout_points, futures_points, "
-        "(group_points + knockout_points + futures_points) AS total "
+        "COALESCE(side_points, 0) AS side_points, "
+        "(group_points + knockout_points + futures_points "
+        " + COALESCE(side_points, 0)) AS total "
         "FROM standings "
         "ORDER BY total DESC, participant ASC"      # stable order on ties
     ).fetchall()

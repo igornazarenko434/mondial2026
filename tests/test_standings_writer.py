@@ -116,7 +116,12 @@ def test_update_standings_applies_minus_15_after_groups():
 
 
 def test_update_standings_idempotent():
-    """Running twice gives the same totals — no double-counting."""
+    """Running twice gives the same DB STATE — no double-counting.
+
+    Day-9.27 contract change: the SECOND call now returns
+    `written_to_db=False` (Negev-row guard kicks in), but the database
+    state is identical. Idempotency is asserted on the DB, not on the
+    return dict."""
     conn = _schema_conn()
     _seed_match(conn, 1, "France", "Spain", "Group", 2, 1)
     _seed_prediction(conn, 1, 2, 1, "H")
@@ -124,7 +129,13 @@ def test_update_standings_idempotent():
 
     a = update_standings(conn)
     b = update_standings(conn)
-    assert a == b
+    # Computed totals are identical
+    assert a["group_points"] == b["group_points"]
+    assert a["knockout_points"] == b["knockout_points"]
+    assert a["total"] == b["total"]
+    # Second call doesn't write (Negev-row guard fires)
+    assert a["written_to_db"] is True
+    assert b["written_to_db"] is False
     rows = conn.execute("SELECT COUNT(*) FROM standings WHERE participant='me'"
                         ).fetchone()
     assert rows[0] == 1   # upsert, not duplicate

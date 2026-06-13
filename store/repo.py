@@ -61,9 +61,16 @@ def standings_context(conn: sqlite3.Connection, me: str | None = None) -> dict |
     straight (NO additional 0.85 multiplier — that was a bug that
     double-applied the reset post-knockouts).
     """
+    # Day-9.27: include side_points so the gap-to-leader math matches what
+    # the Negev app shows. Pre-Day-9.27 this column was always 0 (we couldn't
+    # read side bets), so summing 3 columns was correct; now that
+    # tournamentStats gives us the authoritative side_points, the strategy
+    # tilt would miscalibrate without it.
+    # COALESCE protects older DB rows that pre-date the side_points migration.
     rows = conn.execute(
         "SELECT participant, "
-        "(group_points + knockout_points + futures_points) AS total "
+        "(group_points + knockout_points "
+        " + COALESCE(side_points, 0) + futures_points) AS total "
         "FROM standings ORDER BY total DESC").fetchall()
     if not rows or len(rows) < 2:                  # need ≥ 2 to define "leader vs me"
         return None
