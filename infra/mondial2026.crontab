@@ -23,9 +23,11 @@
 # 07:00 IDT — daily Negev standings + match results sync + 📊 Telegram leaderboard
 0 7 * * *  flock -n /tmp/mondial-negev-sync.lock timeout 300 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet --telegram' >> /home/mondial/mondial2026/reports/cron-sync.log 2>&1
 
-# 16:00 / 18:00 / 20:00 / 22:00 / 00:00 / 02:00 IDT — silent evening-window
-# Negev sync so post-match points land in our DB within ~2h of full-time
-0 16,18,20,22,0,2 * * *  flock -n /tmp/mondial-negev-sync.lock timeout 300 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet' >> /home/mondial/mondial2026/reports/cron-sync.log 2>&1
+# 10:00 / 16:00 / 20:00 / 22:00 / 00:00 / 02:00 IDT — silent sync window
+# 10:00: catches late-morning FT (UTC 03:00/04:00 kickoffs, IDT 06:00/07:00,
+#         FT ~07:50–09:35) — closes the 07:01–15:59 dead zone for 9 matches.
+# 18:00 dropped: was redundant with 16:00 (no matches end between 10:00–19:00 IDT).
+0 10,16,20,22,0,2 * * *  flock -n /tmp/mondial-negev-sync.lock timeout 300 bash -c 'cd /home/mondial/mondial2026 && set -a && . ./.env && set +a && PYTHONPATH=. .venv/bin/python tools/sync_negev_standings.py --quiet' >> /home/mondial/mondial2026/reports/cron-sync.log 2>&1
 
 # 08:00 IDT — post-match audit: our score_match() vs Negev's awarded points.
 # Sends 🔍 Telegram ONLY if any discrepancy > 0.01 pts (silent otherwise).
