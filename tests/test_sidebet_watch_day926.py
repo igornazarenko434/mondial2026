@@ -29,11 +29,25 @@ def conn():
     return c
 
 
-def _ntm(shells):
-    """Build a fake ntm module returning the given side-bet shells."""
+def _ntm(shells, voters=None):
+    """Build a fake ntm module returning the given side-bet shells.
+
+    Day-9.27: also serves a stub `toto_get_side_bet_voters` so the
+    alert body's voter-list block can render.
+    """
+    voters = voters or {}
+    def _voters(sb_id, tournament_id=None):
+        # Default: no winners, no losers — alert still fires with the
+        # graceful-degradation branch
+        return voters.get(sb_id, {
+            "side_bet_id": sb_id, "question": "?",
+            "yes_count": 0, "no_count": 0,
+            "winners": [], "winner_count": 0,
+        })
     return SimpleNamespace(
         _read_all=lambda path, **_kw:
-            shells if "sideBets" in path else [])
+            shells if "sideBets" in path else [],
+        toto_get_side_bet_voters=_voters)
 
 
 def test_new_resolution_fires_one_telegram(conn):
@@ -58,8 +72,9 @@ def test_new_resolution_fires_one_telegram(conn):
     assert "Side bet resolved" in title
     assert "Mexico - South Africa total goals over 2.5" in body
     assert "Correct answer: No" in body
-    assert 'side-bet "Igor"' in body
-    assert 'side-bet "Vaadia"' in body
+    # Day-9.27: standings auto-update from tournamentStats; alert is
+    # informational only with a clear next-action hint.
+    assert "auto-update" in body
 
 
 def test_already_resolved_doesnt_re_alert(conn):
@@ -125,9 +140,10 @@ def test_transition_from_unresolved_to_resolved_alerts(conn):
     assert "Yes" in sent[0][1]
 
 
-def test_cumulative_count_grows_with_each_resolution(conn):
-    """Body's CLI command uses cumulative count: the operator sets the
-    running total, not the delta. First side bet → set to 1; second → 2."""
+def test_each_resolution_fires_exactly_one_alert(conn):
+    """Day-9.27: standings now auto-update via tournamentStats, so the
+    alert body no longer carries CLI commands. We just pin that each
+    NEW resolution fires exactly one alert."""
     sent = []
     fake_send = lambda t, b: (sent.append(b), True)[1]
     # First resolution
@@ -137,7 +153,8 @@ def test_cumulative_count_grows_with_each_resolution(conn):
                 "question": "Q1", "correctAnswer": "Yes",
                 "isResolved": True}]),
         tracked_names=["Igor"], send_telegram=fake_send, now=NOW)
-    assert "side-bet \"Igor\" 1" in sent[0]
+    assert len(sent) == 1
+    assert "Q1" in sent[0]
 
     # Second resolution (different sb_id, new transition)
     sent.clear()
@@ -150,7 +167,8 @@ def test_cumulative_count_grows_with_each_resolution(conn):
              "question": "Q2", "correctAnswer": "No", "isResolved": True},
         ]),
         tracked_names=["Igor"], send_telegram=fake_send, now=NOW)
-    assert "side-bet \"Igor\" 2" in sent[0]
+    assert len(sent) == 1   # only sb2 is new
+    assert "Q2" in sent[0]
 
 
 def test_telegram_failure_doesnt_kill_subsequent_alerts(conn):
@@ -180,20 +198,34 @@ def test_telegram_failure_doesnt_kill_subsequent_alerts(conn):
 
 
 def test_uses_my_participant_and_friend_participants_env(conn, monkeypatch):
-    """When tracked_names is None, defaults to MY_PARTICIPANT + FRIEND_PARTICIPANTS."""
+    """When tracked_names is None, defaults to MY_PARTICIPANT + FRIEND_PARTICIPANTS.
+    Day-9.27: the alert body shows who from those tracked friends won
+    when the voters lookup succeeds. When voters list is empty (graceful
+    degradation), the body still fires with the question + correct answer."""
     sent = []
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     monkeypatch.setenv("FRIEND_PARTICIPANTS", "Vaadia, Tal")
     shells = [{
         "_path": "tournaments/t1/sideBets/sb_x",
         "question": "Q?", "correctAnswer": "Yes", "isResolved": True}]
+    voters = {"sb_x": {
+        "yes_count": 30, "no_count": 35,
+        "winners": [{"player": "Igor", "uid": "u-igor"},
+                     {"player": "Vaadia", "uid": "u-vaadia"}],
+        "winner_count": 2,
+    }}
     sidebet_watch.detect_and_alert(
-        conn, "t1", _ntm(shells),
+        conn, "t1", _ntm(shells, voters=voters),
         send_telegram=lambda t, b: (sent.append(b), True)[1], now=NOW)
     body = sent[0]
-    assert 'side-bet "Igor"' in body
-    assert 'side-bet "Vaadia"' in body
-    assert 'side-bet "Tal"' in body
+    # Igor + Vaadia are in winners; Tal is not
+    assert "🏆 Tracked friends who got +1 pt" in body
+    assert "Igor" in body and "Vaadia" in body
+    # Tal lost
+    assert "😬 Tracked friends who missed" in body
+    assert "Tal" in body
+    # Community totals echoed
+    assert "30 Yes" in body and "35 No" in body
 
 
 def test_state_persists_question_correct_answer_seen_at(conn):

@@ -139,10 +139,12 @@ def detect_and_alert(conn: sqlite3.Connection, tid: str,
             continue
         detected.append(sb_id)
 
-        # Build the Telegram body — operator-friendly with paste-ready CLI
-        # commands. The cumulative pts for a friend who got it right is
-        # (count of resolved side bets so far INCLUDING this one).
-        cum = _cumulative_so_far(conn, tid)
+        # Day-9.27: now that toto_get_standings reads tournamentStats
+        # directly (which includes side bet points pre-computed by Negev),
+        # the operator no longer needs to manually update overrides — the
+        # standings sync auto-picks up the new side-bet pts.
+        # Telegram alert is now PURELY INFORMATIONAL: shows the question,
+        # correct answer, and who from the tracked friends got it right.
         title = "🎯 Side bet resolved"
         body_lines = [
             f"🎯 Side bet resolved",
@@ -150,22 +152,39 @@ def detect_and_alert(conn: sqlite3.Connection, tid: str,
             f"❓ {question}",
             f"✅ Correct answer: {correct or '(unknown)'}",
             "",
-            f"Per the Negev app, anyone who picked '{correct}' now has +1 pt.",
-            f"Open negev-toto.web.app → Standings → check the Side Bets column.",
-            "",
-            f"📝 For each tracked friend who got it right, paste:",
-            "",
         ]
-        for name in tracked_names:
-            body_lines.append(
-                f"   tools/standings_set.py side-bet \"{name}\" {cum}")
-        body_lines += [
-            "",
-            f"(cumulative pts so far = {cum}; set to the new total — the "
-            f"command stores the running total, not the delta)",
-            "",
-            f"Or bulk via JSON: tools/standings_set.py side-bet-bulk <file>",
-        ]
+        # Pull voters via the Day-9.27 tool — purely informational; the
+        # standings sync already auto-credits via tournamentStats.
+        try:
+            voters = ntm.toto_get_side_bet_voters(sb_id, tournament_id=tid)
+            winner_names = {w.get("player") for w in
+                              (voters.get("winners") or [])}
+            tracked_set = set(tracked_names)
+            won = sorted(tracked_set & winner_names)
+            lost = sorted(tracked_set - winner_names)
+            if won:
+                body_lines.append(f"🏆 Tracked friends who got +1 pt:")
+                for n in won:
+                    body_lines.append(f"   • {n}")
+            if lost:
+                body_lines.append(f"😬 Tracked friends who missed:")
+                for n in lost:
+                    body_lines.append(f"   • {n}")
+            body_lines += [
+                "",
+                f"Community: {voters.get('yes_count', '?')} Yes · "
+                f"{voters.get('no_count', '?')} No",
+                "",
+                "Standings will auto-update on the next sync (within 2h)."
+            ]
+        except Exception as ex:                         # noqa: BLE001
+            log.warning("voters lookup failed for %s: %s", sb_id, ex)
+            body_lines += [
+                f"Open negev-toto.web.app → Side Bets → click 'Click-to-Expand'",
+                f"on the resolved bet to see who got it right.",
+                "",
+                "Standings will auto-update on the next sync (within 2h)."
+            ]
         body = "\n".join(body_lines)
 
         if send_telegram is None:

@@ -462,6 +462,109 @@ def _load_side_bet_overrides(tid: str) -> dict:
         return {}
 
 
+@mcp.tool()
+def toto_get_side_bet_voters(side_bet_id: str,
+                              tournament_id: str | None = None) -> dict:
+    """Day-9.27: read who voted Yes vs No on a specific side bet.
+
+    Reads `tournaments/{tid}/sideBetAnswers` (one doc per user with an
+    `answers: {sb_id: 'Yes'|'No'}` map) + the side-bet shell to get the
+    correct answer.
+
+    Returns:
+      {
+        "side_bet_id": "sb_2026-06-11",
+        "question": "Mexico - South Africa total goals over 2.5",
+        "correct_answer": "No" | "Yes" | None,
+        "is_resolved": True | False,
+        "yes_voters": [{"player": "Vaadia", "uid": "..."}, ...],
+        "no_voters":  [{"player": "Gilad Cain", "uid": "..."}, ...],
+        "yes_count": 22, "no_count": 40,
+        "yes_winners": [...],  # who got pts (correctAnswer == 'Yes')
+        "no_winners":  [...],  # who got pts (correctAnswer == 'No')
+      }
+    """
+    tid = _tid(tournament_id)
+    shell = toto_get_document(
+        f"tournaments/{tid}/sideBets/{side_bet_id}")
+    if isinstance(shell, dict) and shell.get("error"):
+        return {"error": shell["error"], "side_bet_id": side_bet_id}
+
+    users = _read_all("users")
+    uid_to_name = {u.get("uid"): u.get("displayName") or u.get("uid")
+                    for u in users if u.get("uid")}
+
+    answer_docs = _read_all(f"tournaments/{tid}/sideBetAnswers")
+    yes_voters, no_voters = [], []
+    for d in answer_docs:
+        uid = d.get("userId")
+        ans = (d.get("answers") or {}).get(side_bet_id)
+        if ans == "Yes":
+            yes_voters.append({"player": uid_to_name.get(uid, uid), "uid": uid})
+        elif ans == "No":
+            no_voters.append({"player": uid_to_name.get(uid, uid), "uid": uid})
+    correct = shell.get("correctAnswer") if isinstance(shell, dict) else None
+    out = {
+        "side_bet_id": side_bet_id,
+        "question": shell.get("question") if isinstance(shell, dict) else None,
+        "correct_answer": correct,
+        "is_resolved": bool(shell.get("isResolved")) if isinstance(shell, dict) else False,
+        "yes_voters": sorted(yes_voters, key=lambda x: x["player"]),
+        "no_voters": sorted(no_voters, key=lambda x: x["player"]),
+        "yes_count": len(yes_voters),
+        "no_count": len(no_voters),
+    }
+    if correct == "Yes":
+        out["winners"] = out["yes_voters"]
+        out["winner_count"] = out["yes_count"]
+    elif correct == "No":
+        out["winners"] = out["no_voters"]
+        out["winner_count"] = out["no_count"]
+    return out
+
+
+def _build_rows_from_stats(tid: str, tid_stats: list[dict],
+                             uid_to_user: dict,
+                             include_bots: bool = True,
+                             extended: bool = False) -> list[dict]:
+    """Day-9.27: assemble the standings rows from precomputed
+    tournamentStats docs. This is what the Negev SPA does itself when it
+    renders the standings page — we just mirror it byte-for-byte.
+    """
+    rows = []
+    for s in tid_stats:
+        uid = s.get("userId")
+        u = uid_to_user.get(uid) or {}
+        if not include_bots and _is_bot(u):
+            continue
+        direction = float(s.get("groupGamesPoints") or 0)
+        knockout  = float(s.get("koutGamesPoints") or 0)
+        side      = float(s.get("sideBetPoints") or 0)
+        broad     = float(s.get("broadBetPoints") or 0)
+        # Negev's precomputed pointsTotal already includes kodBonus +
+        # deductions. Use it directly so we match the app exactly even
+        # when those small adjustments are in play.
+        total = float(s.get("pointsTotal") or
+                       (direction + knockout + side + broad))
+        rows.append({
+            "player": u.get("displayName") or uid or "?",
+            "uid": uid,
+            "total":      round(total, 3),
+            "direction":  round(direction, 3),
+            "knockout":   round(knockout, 3),
+            "side":       round(side, 3),
+            "broad":      round(broad, 3),
+            "exactCount": int(s.get("exactScoreCount") or 0),
+            "previousRank": s.get("previousRank"),
+            "role": u.get("role"),
+            **({"_full": u} if extended and u else {}),
+        })
+    rows.sort(key=lambda r: (-r["total"], -r["exactCount"], r.get("uid") or ""))
+    for i, r in enumerate(rows, 1):
+        r["rank"] = i
+    return rows
+
+
 def _load_baseline(tid: str) -> dict:
     """Day-9.16: load the pre-tournament pointsTotal snapshot if it exists.
 
@@ -493,36 +596,61 @@ def toto_get_standings(tournament_id: str | None = None,
     (per PDF §19), then by uid ascending — matches what the Negev web app
     shows when fully tied.
 
-    Day-9.26 REWRITE — aggregate from `bets/` (per-match points) +
-    `tournaments/{tid}/broadBets/` (futures), since Negev's `users/{uid}`
-    GLOBAL fields stayed at zero post-Mexico-v-SA. Mexico v SA finished
-    2026-06-11 21:00 UTC; the app showed updated leaderboard (G. Cain 11.3,
-    Vaadia 7.8, Igor 1.0) within minutes but `users/{uid}.pointsTotal`
-    stayed at 0 for all 65 humans. Cloud Function stopped writing the
-    GLOBAL field; the app aggregates client-side from `bets/`.
+    Day-9.27 BREAKTHROUGH — read from `tournamentStats/{tid}_{uid}` directly.
+    Discovered by grepping the Negev SPA's JS bundle: there's a precomputed
+    stats doc per user-per-tournament that the app's standings page reads
+    verbatim. Fields:
+      - pointsTotal      → total
+      - groupGamesPoints → direction (group matches)
+      - koutGamesPoints  → knockout (KO matches)
+      - sideBetPoints    → side (Side Bets column in app)
+      - broadBetPoints   → broad (futures, awarded at tournament end)
+      - exactScoreCount  → exactCount
+      - previousRank     → app's "rank change" arrow
+    Live-verified 2026-06-13: Gilad Cain 22.33/20.33/0/2 ✓, Hershko
+    17.78/16.78/0/1 ✓, Igor 2.91 ✓ — all match the app exactly.
 
-    Day-9.26 aggregation:
-      1. Match bets (`bets/{tid}_{matchId}_{uid}`): sum points per user,
-         split by stage. Group-stage matches → `direction`. KO matches
-         (R32/R16/QF/SF/3rd/Final) → `knockout`. Count `isExactScore`
-         hits → `exactCount`.
-      2. Futures (`tournaments/{tid}/broadBets/{uid}`): the shells carry
-         user selections only — points are awarded at tournament end.
-         For now `broad` stays 0; that's the same as Negev's "Broad Bets"
-         column (currently hidden in app's default view).
-      3. Side bets: KNOWN LIMITATION. The per-user side-bet pick doc
-         lives at a security-rule-blocked path (403 across every
-         convention probed). Cannot aggregate per-user; `side` stays 0.
-         The user can see their OWN side-bet total in the app's
-         top-right. Friend rows show 0 in this column even when the app
-         shows non-zero. See `docs/SCHEMA_negev.md` for the gap detail.
-      4. `total = direction + knockout + side + broad`.
+    Day-9.26 history (replaced by Day-9.27):
+      Old approach aggregated bets/ client-side and used a side-bet
+      override JSON for the side column. That under-reported side bets
+      for non-tracked users and required operator action per resolution.
+      Day-9.27 removes the override file requirement entirely: the
+      tournamentStats path is fully precomputed, instant, and ZERO
+      manual intervention.
+
+    Fallback chain (defensive — handles Negev service degradation):
+      1. tournamentStats/{tid}_{uid} (primary) — direct read, no aggregation
+      2. If tournamentStats is empty/blocked → fall back to bet aggregation
+         from bets/ (the Day-9.26 path), + side override JSON.
 
     Day-9.15 sort behaviour preserved: total desc, exactCount desc, uid asc.
     """
     tid = _tid(tournament_id)
     users = _read_all("users")
     uid_to_user = {u.get("uid"): u for u in users if u.get("uid")}
+
+    # ── PRIMARY: read precomputed tournamentStats (Day-9.27) ──
+    # Path discovered from SPA bundle. One doc per user-per-tournament with
+    # all columns precomputed by Negev's Cloud Function. Listing the whole
+    # collection returns docs across ALL tournaments; we filter by the path
+    # prefix `tournamentStats/{tid}_`.
+    try:
+        all_stats = _read_all("tournamentStats")
+    except Exception:                                  # noqa: BLE001
+        all_stats = []
+    tid_stats = [s for s in all_stats
+                  if (s.get("_path") or "").startswith(f"tournamentStats/{tid}_")]
+    if tid_stats:
+        return _build_rows_from_stats(tid, tid_stats, uid_to_user,
+                                        include_bots=include_bots,
+                                        extended=extended)
+
+    # ── FALLBACK: bet aggregation (Day-9.26 path) ──
+    # Only reached if tournamentStats is empty/blocked. Keeps the system
+    # working under partial Negev outages.
+    import logging
+    logging.getLogger("negev_toto").warning(
+        "tournamentStats empty/unreadable; falling back to bet aggregation")
 
     # ── Match bets (group + KO) ──
     # Filter `bets/` to this tournament. The schema is consistent across
