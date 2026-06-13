@@ -55,9 +55,14 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:                                # noqa: BLE001
         print(f"  ✗ Negev fetch failed: {e}")
         return 2
+    # Day-9.27: include side_points so the drift detection compares apples
+    # to apples. Pre-Day-9.27 the audit reported drift on every user who
+    # had a side-bet point because our total ignored that column.
     local = {r["participant"]: r for r in conn.execute(
         "SELECT participant, group_points, knockout_points, futures_points, "
-        "(group_points + knockout_points + futures_points) AS total "
+        "COALESCE(side_points, 0) AS side_points, "
+        "(group_points + knockout_points + futures_points "
+        " + COALESCE(side_points, 0)) AS total "
         "FROM standings").fetchall()}
     print(f"  Negev: {len(live)} player(s)  ({sum(1 for r in live if r.get('role') != 'bot')} humans + "
           f"{sum(1 for r in live if r.get('role') == 'bot')} bots)")

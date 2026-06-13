@@ -43,9 +43,12 @@ from store.db import connect
 
 
 def _all_rows(conn: sqlite3.Connection) -> list[dict]:
+    # Day-9.27: include side_points so totals match the Negev app exactly.
     cur = conn.execute(
         "SELECT participant, group_points, knockout_points, futures_points, "
-        "(group_points + knockout_points + futures_points) AS total "
+        "COALESCE(side_points, 0) AS side_points, "
+        "(group_points + knockout_points + futures_points "
+        " + COALESCE(side_points, 0)) AS total "
         "FROM standings ORDER BY total DESC, participant ASC")
     return [dict(row) for row in cur.fetchall()]
 
@@ -57,12 +60,14 @@ def cmd_list(args, conn) -> int:
         print(f"  → add one with:  python {sys.argv[0]} set NAME --group X --ko Y --futures Z")
         return 0
     me = os.environ.get("MY_PARTICIPANT", "")
-    print(f"{'rank':>4}  {'participant':<20}  {'group':>7}  {'ko':>6}  {'futures':>7}  {'total':>7}")
-    print("-" * 64)
+    print(f"{'rank':>4}  {'participant':<20}  {'group':>7}  {'ko':>6}  "
+          f"{'side':>6}  {'futures':>7}  {'total':>7}")
+    print("-" * 71)
     for i, r in enumerate(rows, 1):
         marker = "  ← you" if r["participant"] == me else ""
         print(f"{i:>4}  {r['participant']:<20}  "
               f"{r['group_points']:>7.2f}  {r['knockout_points']:>6.2f}  "
+              f"{r['side_points']:>6.2f}  "
               f"{r['futures_points']:>7.2f}  {r['total']:>7.2f}{marker}")
     if me and not any(r["participant"] == me for r in rows):
         print(f"\n  ⚠ MY_PARTICIPANT={me!r} not in standings — strategy layer "
@@ -72,16 +77,25 @@ def cmd_list(args, conn) -> int:
 
 def _upsert(conn: sqlite3.Connection, participant: str,
             group_points: float, knockout_points: float,
-            futures_points: float) -> None:
+            futures_points: float, side_points: float = 0.0) -> None:
+    """Day-9.27: includes side_points so manual entry doesn't reset it.
+    If the row already has a non-NULL side_points and the caller didn't
+    supply one (legacy CLI invocation), preserve the existing value."""
+    existing_side = conn.execute(
+        "SELECT side_points FROM standings WHERE participant=?",
+        (participant,)).fetchone()
+    if existing_side and existing_side[0] is not None and side_points == 0.0:
+        side_points = float(existing_side[0])
     conn.execute(
         "INSERT INTO standings (participant, group_points, knockout_points, "
-        "futures_points) VALUES (?, ?, ?, ?) "
+        "futures_points, side_points) VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(participant) DO UPDATE SET "
         "group_points = excluded.group_points, "
         "knockout_points = excluded.knockout_points, "
-        "futures_points = excluded.futures_points",
+        "futures_points = excluded.futures_points, "
+        "side_points = excluded.side_points",
         (participant, float(group_points), float(knockout_points),
-         float(futures_points)))
+         float(futures_points), float(side_points)))
     conn.commit()
 
 
@@ -89,9 +103,12 @@ def cmd_set(args, conn) -> int:
     if any(v is None for v in (args.group, args.ko, args.futures)):
         print("error: --group, --ko, --futures all required", file=sys.stderr)
         return 2
-    _upsert(conn, args.participant, args.group, args.ko, args.futures)
+    side = getattr(args, "side", None) or 0.0
+    _upsert(conn, args.participant, args.group, args.ko, args.futures,
+             side_points=side)
     print(f"✓ set {args.participant}: group={args.group}, ko={args.ko}, "
-          f"futures={args.futures}, total={args.group + args.ko + args.futures:.2f}")
+          f"side={side}, futures={args.futures}, "
+          f"total={args.group + args.ko + side + args.futures:.2f}")
     return cmd_list(args, conn)
 
 
@@ -150,6 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     s_set.add_argument("--group",   type=float, dest="group")
     s_set.add_argument("--ko",      type=float, dest="ko")
     s_set.add_argument("--futures", type=float, dest="futures")
+    # Day-9.27: optional side-bet column. Omit to preserve the existing
+    # value (typical case — Negev sync writes it; manual entry shouldn't
+    # zero it). Pass explicitly to overwrite (e.g. when entering a row
+    # for a non-Negev pool).
+    s_set.add_argument("--side", type=float, dest="side", default=None)
 
     s_rm = sub.add_parser("remove", help="delete a participant row")
     s_rm.add_argument("participant")

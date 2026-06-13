@@ -98,9 +98,13 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
     me = os.environ.get("MY_PARTICIPANT", "me").strip() or "me"
     stand = None
     try:
+        # Day-9.27: include side_points so the fallback line shows the
+        # SAME total the Negev app shows. COALESCE guards legacy NULL.
         stand = conn.execute(
             "SELECT group_points, knockout_points, futures_points, "
-            "(group_points + knockout_points + futures_points) AS total "
+            "COALESCE(side_points, 0) AS side_points, "
+            "(group_points + knockout_points + futures_points "
+            " + COALESCE(side_points, 0)) AS total "
             "FROM standings WHERE participant=?", (me,)
         ).fetchone()
     except Exception as e:                          # noqa: BLE001
@@ -157,9 +161,13 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
         for name in tracked:
             lines.append(people.render_compact(negev_rows, name, self_name=me))
     elif stand:
+        # Day-9.27: include side in the breakdown so the fallback line
+        # mirrors the Negev app's 4-column split.
         lines.append(
             f"Your score: {stand['total']:.1f} pts "
-            f"(group {stand['group_points']:.1f} / KO {stand['knockout_points']:.1f} / "
+            f"(group {stand['group_points']:.1f} / "
+            f"KO {stand['knockout_points']:.1f} / "
+            f"side {stand['side_points']:.1f} / "
             f"futures {stand['futures_points']:.1f})")
     lines.append(
         f"Budget: Brave {brave.get('used', 0):.0f}/{brave.get('budget') or '∞'}  "

@@ -194,8 +194,12 @@ def audit_me(tid: str) -> None:
     by_name = {r["player"]: r for r in rows}
     if me in by_name:
         r = by_name[me]
+        # Day-9.27: row shape gained knockout + side columns (full Negev
+        # app breakdown). Show all four so an operator can spot drift fast.
         ok(f"{me!r} found in Negev roster: rank {r['rank']}/{len(rows)}, "
-           f"{r['total']:.0f} pts (direction {r['direction']:.0f} + broad {r['broad']:.0f})")
+           f"{r['total']:.1f} pts (group {r.get('direction', 0):.1f} + "
+           f"KO {r.get('knockout', 0):.1f} + side {r.get('side', 0):.1f} + "
+           f"futures {r.get('broad', 0):.1f})")
     else:
         err(f"MY_PARTICIPANT={me!r} NOT in Negev roster of {len(rows)} players")
         # Suggest near-matches
