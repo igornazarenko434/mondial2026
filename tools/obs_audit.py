@@ -8,7 +8,7 @@ Run:
 
 What it checks per provider:
   ✓ obs.external_call wrap exists and fires
-  ✓ ledger().record persisted (provider row visible afterward)
+  ✓ ledger().record persisted (row in mondial.db::api_calls, same DB as game data)
   ✓ rate-limit token-bucket configured and acquirable
   ✓ config matches published free-tier ceiling (printed for human verify)
 

@@ -308,6 +308,8 @@ def test_build_card_news_failure_matches_failure_reasons(monkeypatch):
                 "failure": "AllProvidersFailed: no usable LLM",
                 "failure_class": "AllProvidersFailed"}
 
+    # Day-9.28: T-7m short-circuits to NEUTRAL without calling news_analyzer.
+    # Use T-24h so the failing analyzer is actually invoked.
     card = build_card(
         {"match_id": 1, "home": "Mexico", "away": "South Africa",
          "stage": "Group", "detonator": True},
@@ -315,7 +317,7 @@ def test_build_card_news_failure_matches_failure_reasons(monkeypatch):
         strengths_loader=lambda *_a, **_k: (None, None),
         elo_loader=lambda *_a, **_k: None,
         odds_fetcher=lambda *_a, **_k: None,
-        window="T-7m")
+        window="T-24h")
     assert card["news_failure"] is not None
     assert card["failure_reasons"]["news"] == card["news_failure"]
 

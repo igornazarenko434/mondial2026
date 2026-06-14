@@ -107,8 +107,10 @@ def test_happy_path_all_signals_used():
 # ---------- 3. Per-signal failure → correct audit + degradation ----------
 
 def test_news_failure_marks_signal_failed_with_reason():
+    # Day-9.28: T-7m no longer calls news_analyzer (short-circuits to NEUTRAL).
+    # Use T-60m so the analyzer is invoked and can fail.
     def boom(*a, **k): raise RuntimeError("gemini 429; claude empty")
-    card = build_card(_match(),
+    card = build_card(_match(), window="T-60m",
                       strengths_loader=lambda _r: _good_strengths(),
                       elo_loader=lambda: _good_elo(),
                       odds_fetcher=lambda h, a, **k: _good_odds(),
@@ -129,7 +131,8 @@ def test_news_provider_stamped_on_card_when_analyzer_returns_one():
                 "confidence": "high", "notes": ["Mbappé starts"],
                 "discarded_sources": [], "provider": "gemini",
                 "fallbacks_used": []}
-    card = build_card(_match(),
+    # Day-9.28: T-7m short-circuits to NEUTRAL — use T-60m so the analyzer runs.
+    card = build_card(_match(), window="T-60m",
                       strengths_loader=lambda _r: _good_strengths(),
                       elo_loader=lambda: _good_elo(),
                       odds_fetcher=lambda h, a, **k: _good_odds(),
@@ -149,7 +152,8 @@ def test_news_provider_records_fallback_chain():
                 "confidence": "medium", "notes": [],
                 "discarded_sources": [], "provider": "claude",
                 "fallbacks_used": ["gemini"]}
-    card = build_card(_match(),
+    # Day-9.28: T-7m short-circuits to NEUTRAL — use T-60m so the analyzer runs.
+    card = build_card(_match(), window="T-60m",
                       strengths_loader=lambda _r: _good_strengths(),
                       elo_loader=lambda: _good_elo(),
                       odds_fetcher=lambda h, a, **k: _good_odds(),
@@ -300,7 +304,9 @@ def test_persist_is_idempotent_on_same_match_window():
 
 def test_never_raises_even_when_everything_fails():
     def boom(*a, **k): raise RuntimeError("boom")
-    card = build_card(_match(),
+    # Day-9.28: T-7m short-circuits news to NEUTRAL (no LLM call), so use T-60m
+    # to exercise the news failure path (boom raises after gather_context fails).
+    card = build_card(_match(), window="T-60m",
                       strengths_loader=boom,
                       elo_loader=boom,
                       odds_fetcher=boom,

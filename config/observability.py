@@ -6,7 +6,7 @@ Everything here is data so the obs layer is fully configurable via env:
   OBS_LOG_LEVEL=INFO
   OTEL_TRACES_EXPORTER=console  console | otlp | none
   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318   (Jaeger/Tempo/Honeycomb)
-  OBS_DB=store/obs.db           SQLite cost/quota ledger
+  OBS_DB=store/mondial.db       SQLite cost/quota ledger (merged with game DB)
 """
 import os
 
@@ -16,7 +16,7 @@ LOG_LEVEL = os.environ.get("OBS_LOG_LEVEL", "INFO")
 SERVICE_NAME = os.environ.get("OTEL_SERVICE_NAME", "mondial2026")
 TRACES_EXPORTER = os.environ.get("OTEL_TRACES_EXPORTER", "console")  # console|otlp|none
 OTLP_ENDPOINT = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
-OBS_DB = os.environ.get("OBS_DB", os.path.join(os.path.dirname(__file__), "..", "store", "obs.db"))
+OBS_DB = os.environ.get("OBS_DB", os.path.join(os.path.dirname(__file__), "..", "store", "mondial.db"))
 
 # Free-tier rate limits + budgets per external provider.
 #   rate/per  -> token-bucket smoothing (requests per `per` seconds)

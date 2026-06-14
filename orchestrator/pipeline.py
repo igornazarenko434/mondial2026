@@ -68,8 +68,13 @@ def process_match(match: dict, window: str, build_card: Callable[[dict], dict],
                      card["pick_exact_score"], card["strategy"]["ev_optimal_score"])
 
         delivered = delivery.deliver_card(card)
+        # Day-9.28: populate fell_back (True when Gemini failed and Claude answered)
+        # and provider (the LLM that actually served the news signal).
+        _fell_back = bool(card.get("news_fallbacks_used"))
+        _provider = card.get("news_provider") or card.get("odds_source")
         ledger.finish(run_id, "ok", attempts=attempts["n"],
-                      provider=card.get("odds_source"), card_delivered=delivered,
+                      provider=_provider, fell_back=_fell_back,
+                      card_delivered=delivered,
                       detail=None if delivered else "card built but delivery failed")
         if not delivered:
             delivery.alert(f"Delivery FAILED — {match.get('home')} vs {match.get('away')}",

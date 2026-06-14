@@ -57,14 +57,23 @@ CREATE TABLE IF NOT EXISTS side_bet_state (
     seen_at         TEXT
 );
 
--- Observability: cost/quota ledger (also created by core/obs/cost.py).
+-- Observability: cost/quota ledger (also created/migrated by core/obs/cost.py).
+-- api_calls and runs are in the same DB as game data (mondial.db) so all
+-- diagnostic queries can join predictions ↔ api_calls ↔ runs without ATTACH.
+-- Each LLM call produces TWO rows: units=1 (the call) + units=0 (token update).
+-- Filter WHERE units > 0 when counting actual calls by provider.
 CREATE TABLE IF NOT EXISTS api_calls (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT, provider TEXT, endpoint TEXT,
     units REAL DEFAULT 1, tokens INTEGER DEFAULT 0,
-    duration_ms REAL DEFAULT 0,          -- kept in sync with core/obs/cost.py
+    duration_ms REAL DEFAULT 0,
     est_cost REAL DEFAULT 0, ok INTEGER DEFAULT 1,
-    correlation_id TEXT
+    correlation_id TEXT,
+    error_class TEXT,       -- type(e).__name__ on failure
+    error_message TEXT,     -- first 200 chars of str(e)
+    status_code INTEGER,    -- HTTP status if available (401/429/503)
+    retry_after TEXT,       -- Retry-After header value if any
+    error_kind TEXT         -- 'http'/'timeout'/'network'/'ratelimit_timeout'/'other'
 );
 
 -- Run-status ledger (also created by core/obs/runs.py): success/failure/fallback
@@ -73,8 +82,11 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT, finished_at TEXT,
     match_id INTEGER, window TEXT,
-    status TEXT, fell_back INTEGER DEFAULT 0,
-    provider TEXT, attempts INTEGER DEFAULT 1,
+    status TEXT,            -- started | ok | failed
+    fell_back INTEGER DEFAULT 0,
+    provider TEXT,          -- LLM provider that actually answered (news_provider)
+    attempts INTEGER DEFAULT 1,
     card_delivered INTEGER DEFAULT 0,
-    detail TEXT, correlation_id TEXT
+    detail TEXT,            -- error message / note
+    correlation_id TEXT
 );

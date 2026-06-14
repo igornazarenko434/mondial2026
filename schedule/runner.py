@@ -264,7 +264,11 @@ if __name__ == "__main__":
             return repo.upcoming_matches(conn)
 
     def ingest():
-        with closing(connect()) as conn:
+        # Day-9.28: named correlation_id for calendar refreshes so Honeycomb
+        # can distinguish them from card-window runs (was correlation_id="-").
+        from datetime import datetime, timezone
+        _label = f"calendar-refresh-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M')}"
+        with obs.run(_label), closing(connect()) as conn:
             football_data.refresh(conn)   # calendar + results + bracket + detonator tags
 
     def build(match):

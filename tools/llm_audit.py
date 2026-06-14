@@ -1,7 +1,7 @@
 """LLM agent observability audit (Day-9.10).
 
-Reads the persisted cost ledger (`store/obs.db::api_calls`) and the
-`predictions` table (`store/mondial.db::predictions.payload_json`) to answer
+Reads the persisted cost ledger (`store/mondial.db::api_calls`, same DB as
+game data since Day-9.28 DB merge) and the `predictions` table to answer
 the questions you actually have at 2am when a card didn't fire:
 
   • Which LLM provider actually answered each match-window?
@@ -82,12 +82,14 @@ def show_per_provider_ledger(hours: int, provider_filter: str | None) -> None:
 
     for p in providers:
         rows = L.conn.execute(
+            # units > 0: each LLM call produces 2 rows (call=units=1, token-update=units=0).
+            # Filtering units > 0 counts real calls only (not the token-update rows).
             "SELECT ok, error_class, error_message, COUNT(*) AS n, "
             "       COALESCE(SUM(tokens), 0) AS toks, "
             "       COALESCE(AVG(duration_ms), 0) AS avg_ms, "
             "       COALESCE(SUM(est_cost), 0) AS cost "
             "  FROM api_calls "
-            " WHERE provider=? AND ts>=? "
+            " WHERE provider=? AND ts>=? AND units > 0 "
             " GROUP BY ok, error_class "
             " ORDER BY ok DESC, n DESC",
             (p, since)).fetchall()

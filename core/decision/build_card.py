@@ -142,60 +142,95 @@ def build_card(match: dict, conn=None, *,
     failure_reasons: dict[str, str] = {}
 
     # ───── 1. Dixon-Coles fit → expected_goals_fn ─────
+    # Day-9.28: wrapped in obs.staged("dc_model") so Honeycomb shows a span
+    # for this stage (mirrors the existing obs.staged("news") pattern).
     try:
+        from core import obs as _obs_dc
+        _dc_stage = _obs_dc.staged("dc_model", match_id=match.get("match_id"),
+                                    window=window)
+    except Exception:                                # noqa: BLE001
+        from contextlib import nullcontext
+        _dc_stage = nullcontext()
+    with _dc_stage:
+      try:
         results = results_loader()
         strengths = strengths_loader(results)
         if not strengths or not strengths.get("teams"):
             raise ValueError("empty strengths dict")
         eg_fn = expected_goals_fn(strengths)
         signals_used.append("dixon_coles")
-    except Exception as e:                       # noqa: BLE001
+      except Exception as e:                       # noqa: BLE001
         signals_failed.append("dixon_coles")
         failure_reasons["dixon_coles"] = _trim(e)
         eg_fn = lambda h, a: (1.3, 1.1)          # neutral fallback
 
     # ───── 2. Elo ratings ─────
     try:
+        from core import obs as _obs_elo
+        _elo_stage = _obs_elo.staged("elo", match_id=match.get("match_id"))
+    except Exception:                                # noqa: BLE001
+        from contextlib import nullcontext
+        _elo_stage = nullcontext()
+    with _elo_stage:
+      try:
         elo = elo_loader()
         if not elo:
             raise ValueError("empty elo dict")
         signals_used.append("elo")
-    except Exception as e:                       # noqa: BLE001
+      except Exception as e:                       # noqa: BLE001
         signals_failed.append("elo")
         failure_reasons["elo"] = _trim(e)
         elo = {}
 
     # ───── 3. Market odds (the SCORING multiplier) ─────
     try:
+        from core import obs as _obs_mkt
+        _mkt_stage = _obs_mkt.staged("market", match_id=match.get("match_id"),
+                                      window=window)
+    except Exception:                                # noqa: BLE001
+        from contextlib import nullcontext
+        _mkt_stage = nullcontext()
+    with _mkt_stage:
+      try:
         scoring_odds = odds_fetcher(home, away,
                                     kickoff_utc=match.get("utc_kickoff"),
                                     events=events_cache)
         if scoring_odds and all(isinstance(scoring_odds.get(k), (int, float))
                                 and scoring_odds[k] > 1.0 for k in ("H", "D", "A")):
             signals_used.append("market")
+            # Day-9.28: snapshot odds per window so we can query drift across T-24h/T-60m/T-15m
+            if conn is not None and match.get("match_id"):
+                try:
+                    from core.data.oddsapi import snapshot_odds
+                    snapshot_odds(conn, match["match_id"], window,
+                                  scoring_odds.get("book", "unknown"), scoring_odds)
+                except Exception as _snap_e:            # noqa: BLE001
+                    log.debug("snapshot_odds failed for match %s: %s",
+                              match.get("match_id"), _snap_e)
         else:
             signals_failed.append("market")
             failure_reasons["market"] = ("odds_api over budget or no event"
                                          if scoring_odds is None
                                          else "incomplete or invalid odds")
             scoring_odds = None
-    except Exception as e:                       # noqa: BLE001
+      except Exception as e:                       # noqa: BLE001
         signals_failed.append("market")
         failure_reasons["market"] = _trim(e)
         scoring_odds = None
 
     # ───── 4. News-injury deltas (Day 8 — context-gathering wired) ─────
     # At T-24h / T-60m we gather real context from API-Football + Brave Search
-    # before calling analyze_safe. At T-15m we FIRST try to reuse T-60m's
-    # high-confidence result from the predictions table (saves 1 LLM call + 6
-    # Brave calls per match when the XI is already confirmed). At T-7m (lock)
-    # and any other window we pass empty context → LLM returns NEUTRAL → news
-    # still counted as "used" but with zero shift. analyze_safe NEVER raises;
-    # on total LLM failure it returns NEUTRAL.
+    # before calling analyze_safe. At T-15m and T-7m we FIRST try to reuse T-60m's
+    # high-confidence result from the predictions table (saves 1 LLM call + Brave
+    # calls per match when the XI is already confirmed). At T-7m with no cache and
+    # no search window we return NEUTRAL directly — no LLM call needed since context
+    # is always empty at T-7m. analyze_safe NEVER raises; on total LLM failure it
+    # returns NEUTRAL.
     # Day-9.11: wrap the entire news section in obs.staged('news') so api_football
     # + brave_search + LLM spans become children of `stage:news` in Honeycomb
     # under the run's correlation_id. Also captures `stage` on any escaping
     # exception so build_card can stamp news_failure_stage on the card.
+    _news_reuse_window: str | None = None   # set inside news section; used in audit stamp
     try:
         from core import obs as _obs
         _news_stage = _obs.staged("news", match_id=match.get("match_id"),
@@ -208,19 +243,37 @@ def build_card(match: dict, conn=None, *,
         from config.news import (should_search, T15M_REUSE_AGE_MIN,
                                    T15M_REUSE_MIN_CONFIDENCE)
         from orchestrator.agents.news_agent import (
-            gather_context, read_prior_deltas, context_meta
+            gather_context, read_prior_deltas, context_meta, NEUTRAL as _NEUTRAL
         )
 
-        # T-15m cache: reuse if T-60m was recent and confident enough
+        # Day-9.28: T-15m AND T-7m cache — reuse T-60m result when recent + confident.
+        # T-7m is the lock window (no search ever), so cache reuse saves the LLM call
+        # entirely. On cache miss at T-7m we short-circuit to NEUTRAL (no LLM call
+        # with empty context — was: pointless Gemini call that always returned NEUTRAL).
         deltas = None
-        if window == "T-15m" and conn is not None:
+        _news_reuse_window: str | None = None
+        if window in ("T-15m", "T-7m") and conn is not None:
             prior = read_prior_deltas(conn, match.get("match_id"),
                                        max_age_min=T15M_REUSE_AGE_MIN,
                                        min_confidence=T15M_REUSE_MIN_CONFIDENCE)
             if prior is not None:
                 deltas = prior
-                log.info("news/T-15m reused T-60m deltas for match %s "
-                          "(saved 1 LLM + Brave calls)", match.get("match_id"))
+                _news_reuse_window = "T-60m"
+                try:
+                    from core.obs import span as _obs_span
+                    with _obs_span("news_agent.cache_hit", reused_from="T-60m",
+                                   window=window, confidence=prior.get("confidence")):
+                        pass
+                except Exception:                    # noqa: BLE001
+                    pass
+                log.info("news/%s reused T-60m deltas for match %s "
+                          "(saved 1 LLM + Brave calls)", window, match.get("match_id"))
+
+        # T-7m with no prior cache: short-circuit to NEUTRAL, skip LLM entirely.
+        if deltas is None and not should_search(window):
+            deltas = dict(_NEUTRAL)
+            log.info("news/%s: no cache + no search window → NEUTRAL (no LLM call)",
+                     window)
 
         ctx_meta_snapshot = {}
         if deltas is None:                            # cache miss → run fresh
@@ -234,8 +287,20 @@ def build_card(match: dict, conn=None, *,
                     log.warning("gather_context failed for %s vs %s (%s): %s; "
                                 "using empty", home, away, type(e).__name__, e)
                     context_text = ""
+                    # Day-9.28: emit a span so Honeycomb distinguishes
+                    # "gather_context failed" from "T-7m no-search by design"
+                    try:
+                        from core.obs import span as _obs_span
+                        with _obs_span("gather_context.failed",
+                                       error_class=type(e).__name__,
+                                       error_message=str(e)[:120]):
+                            pass
+                    except Exception:                # noqa: BLE001
+                        pass
+                    ctx_meta_snapshot = {"ctx_gather_failed": True,
+                                          "ctx_gather_error": type(e).__name__}
             else:
-                context_text = ""                    # T-7m / unknown window
+                context_text = ""                    # unknown window
             deltas = news_analyzer(home, away, context_text=context_text)
 
         # Day-9.26.2: scale by LLM-reported confidence BEFORE applying.
@@ -270,6 +335,10 @@ def build_card(match: dict, conn=None, *,
             "context_truncated_chars": ctx_meta_snapshot.get("context_truncated_chars") or 0,
             "context_chars": ctx_meta_snapshot.get("context_chars") or 0,
             "brave_gate": ctx_meta_snapshot.get("brave_gate"),    # Day-9.11
+            # Day-9.28: cache reuse + gather_context failure visibility
+            "reuse_window": _news_reuse_window,       # "T-60m" if cache hit, else None
+            "ctx_gather_failed": ctx_meta_snapshot.get("ctx_gather_failed"),
+            "ctx_gather_error": ctx_meta_snapshot.get("ctx_gather_error"),
         }
         # Day-9.11: pass through parse+validate provenance fields. These are
         # only set when there's something interesting to report (clamp,
@@ -316,7 +385,8 @@ def build_card(match: dict, conn=None, *,
                        "failure_class": type(e).__name__,
                        "failure_stage": _failure_stage,
                        "ctx_failures": [], "context_sources_ok": [],
-                       "context_truncated_chars": 0, "context_chars": 0}
+                       "context_truncated_chars": 0, "context_chars": 0,
+                       "reuse_window": None}              # Day-9.28
 
     # ───── 4.5. Per-agent dominant directions (for signal-disagreement check) ─────
     # Day-9.26.2: compute each agent's "this is who I think wins" so we can
@@ -448,6 +518,10 @@ def build_card(match: dict, conn=None, *,
     card["news_context_chars"]  = news_meta.get("context_chars", 0)
     card["news_failure_stage"]  = news_meta.get("failure_stage")
     card["news_brave_gate"]     = news_meta.get("brave_gate")   # Day-9.11
+    # Day-9.28: cache reuse + gather_context failure visibility
+    card["news_reuse_window"]   = news_meta.get("reuse_window") # "T-60m" on hit, None otherwise
+    card["news_ctx_gather_failed"] = news_meta.get("ctx_gather_failed")
+    card["news_ctx_gather_error"]  = news_meta.get("ctx_gather_error")
     # Day-9.11: parse+validate provenance — every silent default / clamp /
     # truncation now visible. The full set of optional flags from
     # _validate_and_clamp passes through `deltas` into news_meta below.
@@ -458,6 +532,23 @@ def build_card(match: dict, conn=None, *,
               "schema_error",
               "json_mode_fallback_used", "json_mode_error_class"):
         card[f"news_{k}"] = news_meta.get(k)
+    # Day-9.28: model output span — stamps pick + model_prob into Honeycomb
+    # so the core computation is visible (not just the LLM latency).
+    try:
+        from core.obs import span as _obs_out_span
+        _mp = card.get("model_prob") or {}
+        with _obs_out_span("build_card.model_output",
+                           pick_dir=card.get("pick_direction"),
+                           expected_points=card.get("expected_points"),
+                           prob_h=round(float(_mp.get("H", 0)), 3),
+                           prob_d=round(float(_mp.get("D", 0)), 3),
+                           prob_a=round(float(_mp.get("A", 0)), 3),
+                           gate_mode=card.get("gate_mode"),
+                           ev_pathway=card.get("ev_pathway"),
+                           signals=",".join(signals_used)):
+            pass
+    except Exception:                                  # noqa: BLE001 — never break a card
+        pass
 
     # Golden auditability rule: every signal must appear somewhere. The
     # production path enforces this by construction (we visit every signal

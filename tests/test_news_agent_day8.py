@@ -294,8 +294,11 @@ def test_build_card_uses_gather_context_at_search_windows():
                 news_analyzer=fake_news_analyzer,
                 results_loader=lambda: [])
 
-    assert seen["contexts"] == [""], \
-        "T-7m must pass empty context — no news search at lock"
+    # Day-9.28: T-7m now short-circuits to NEUTRAL without calling news_analyzer
+    # at all (no LLM call with empty context). Previously it called the analyzer
+    # with context_text="" — now it returns NEUTRAL directly, saving 1 LLM call.
+    assert seen["contexts"] == [], \
+        "T-7m must NOT call news_analyzer — returns NEUTRAL directly (no LLM call)"
 
 
 # ─────────────────── T-15m cache reuse (Brave cost cut) ───────────────────
