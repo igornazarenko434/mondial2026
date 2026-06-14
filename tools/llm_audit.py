@@ -81,13 +81,13 @@ def show_per_provider_ledger(hours: int, provider_filter: str | None) -> None:
     providers = [provider_filter] if provider_filter else LLM_PROVIDERS
 
     for p in providers:
+        # units > 0: each LLM call produces 2 rows — call (units=1, tokens=0) and
+        # token-update (units=0, tokens=N). Filter units > 0 to count real calls only.
+        # Tokens and cost are totalled separately (inclusive of both row types) so
+        # the display isn't misleadingly zero.
         rows = L.conn.execute(
-            # units > 0: each LLM call produces 2 rows (call=units=1, token-update=units=0).
-            # Filtering units > 0 counts real calls only (not the token-update rows).
             "SELECT ok, error_class, error_message, COUNT(*) AS n, "
-            "       COALESCE(SUM(tokens), 0) AS toks, "
-            "       COALESCE(AVG(duration_ms), 0) AS avg_ms, "
-            "       COALESCE(SUM(est_cost), 0) AS cost "
+            "       COALESCE(AVG(duration_ms), 0) AS avg_ms "
             "  FROM api_calls "
             " WHERE provider=? AND ts>=? AND units > 0 "
             " GROUP BY ok, error_class "
@@ -99,9 +99,14 @@ def show_per_provider_ledger(hours: int, provider_filter: str | None) -> None:
             continue
         ok = sum(r[3] for r in rows if r[0] == 1)
         fail = total - ok
-        toks = sum(r[4] for r in rows)
-        avg_ms = (sum(r[5] * r[3] for r in rows) / total) if total else 0
-        cost = sum(r[6] for r in rows)
+        # Tokens + cost: query all rows (call + token-update) for accurate aggregates.
+        tok_cost = L.conn.execute(
+            "SELECT COALESCE(SUM(tokens),0), COALESCE(SUM(est_cost),0) "
+            "  FROM api_calls WHERE provider=? AND ts>=?",
+            (p, since)).fetchone()
+        toks = int(tok_cost[0])
+        cost = float(tok_cost[1])
+        avg_ms = (sum(r[4] * r[3] for r in rows) / total) if total else 0
         print(f"\n  {p:<10}  calls={total}  ok={ok}  fail={fail}  "
               f"tokens≈{toks}  avg={avg_ms:.0f}ms  est=${cost:.4f}")
         if fail:
