@@ -318,9 +318,13 @@ def audit_freshness(conn):
     else:
         warn("no heartbeat file — daemon may not be running locally")
 
-    # Look at api_calls ledger for football_data
+    # Look at api_calls ledger for football_data.
+    # Honors cfg.OBS_DB (consolidated to mondial.db on 2026-06-18).
     try:
-        ledger_path = os.path.join(os.path.dirname(__file__), "..", "store", "obs.db")
+        from config import observability as _obs_cfg
+        ledger_path = _obs_cfg.OBS_DB
+        if not os.path.isabs(ledger_path):
+            ledger_path = os.path.join(os.path.dirname(__file__), "..", ledger_path)
         if os.path.exists(ledger_path):
             led = sqlite3.connect(ledger_path)
             row = led.execute(
