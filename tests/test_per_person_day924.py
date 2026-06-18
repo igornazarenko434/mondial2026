@@ -286,9 +286,9 @@ def test_render_card_appends_per_person_section():
         "window": "T-7m",
         "friend_picks_section": "👥 Picks\n  Igor: Mexico 3-0  ← you",
         "per_person_section": ("🎯 Per-person suggestions\n"
-                                 "  👤 Igor  (tilt 0.0, rank 56):  Mexico 2 — "
+                                 "  👤 Igor  (tilt 0.00, rank 56):  Mexico 2 — "
                                  "South Africa 1   EV 3.42\n"
-                                 "  👤 Vaadia  (tilt 0.4, rank 12):  Mexico 3 — "
+                                 "  👤 Vaadia  (tilt 0.40, rank 12):  Mexico 3 — "
                                  "South Africa 0   EV 2.80   ⚡"),
     }
     body = render_card(card)

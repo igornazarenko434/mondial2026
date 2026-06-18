@@ -172,7 +172,7 @@ def test_match_card_RENDERS_section_when_field_present(monkeypatch):
         "signals_used": ["dixon_coles"], "signals_failed": [],
         "failure_reasons": {}, "ev_pathway": "ev",
         "per_person_section": ("🎯 Per-person suggestions\n"
-                                 "  👤 Igor  (tilt 0.0, rank 56):  Mexico 2 — "
+                                 "  👤 Igor  (tilt 0.00, rank 56):  Mexico 2 — "
                                  "South Africa 1   EV 3.42"),
     }
     body = render_card(card)

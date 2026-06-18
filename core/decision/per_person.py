@@ -191,6 +191,6 @@ def render_section(suggestions: list[dict] | None,
         rank_s = f"rank {rank}" if rank else "rank ?"
         tilt = s.get("tilt", 0)
         dev = "  ⚡" if s.get("deviated_from_ev") else ""
-        lines.append(f"  👤 {s['name']}  (tilt {tilt:.1f}, {rank_s}):  "
+        lines.append(f"  👤 {s['name']}  (tilt {tilt:.2f}, {rank_s}):  "
                       f"{home} {h} — {away} {a}   {ev_s}{dev}")
     return "\n".join(lines)
