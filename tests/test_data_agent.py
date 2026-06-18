@@ -1,5 +1,7 @@
 """Day-2 data agent: cache, Elo loading/normalization/lookup, FBref shaping."""
+import json
 import os
+import threading
 import time
 from core.data.cache import cached_json
 from core.data import soccerdata_io as sdio
@@ -25,6 +27,59 @@ def test_cache_none_path_always_produces():
     cached_json(None, 24, lambda: calls.__setitem__("n", calls["n"] + 1))
     cached_json(None, 24, lambda: calls.__setitem__("n", calls["n"] + 1))
     assert calls["n"] == 2
+
+
+def test_cached_json_no_race_when_many_writers_miss_concurrently(tmp_path):
+    """REGRESSION: cache.py used to hardcode `{path}.tmp` as the atomic-write
+    sentinel. Two daemon workers missing the cache in the same tick both raced
+    on the same tmp filename — the second `os.replace(tmp, path)` raised
+    `FileNotFoundError` because the first had already consumed it. Confirmed
+    in production for Switzerland T-24h (match-537335) on 2026-06-17 22:00 UTC,
+    which caused `signals_failed=['dixon_coles']`.
+
+    This test spawns many workers, all gated on a barrier so they enter the
+    producer path simultaneously. The historic bug would surface as one or more
+    threads raising FileNotFoundError; the fix (tempfile.mkstemp) makes the tmp
+    filename unique per writer so none collide.
+    """
+    p = str(tmp_path / "shared.json")
+    n_workers = 32
+    barrier = threading.Barrier(n_workers)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+    results: list[dict] = []
+    results_lock = threading.Lock()
+
+    def produce():
+        # Tiny sleep widens the rename window so any race surfaces deterministically.
+        time.sleep(0.01)
+        return {"v": "deterministic"}
+
+    def worker():
+        try:
+            barrier.wait()
+            r = cached_json(p, 24, produce)
+            with results_lock:
+                results.append(r)
+        except BaseException as e:                       # noqa: BLE001
+            with errors_lock:
+                errors.append(e)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent cached_json raised: {errors!r}"
+    assert len(results) == n_workers
+    assert all(r == {"v": "deterministic"} for r in results)
+    assert os.path.exists(p)
+    with open(p) as f:
+        assert json.load(f) == {"v": "deterministic"}
+    # No `.tmp` files left behind under any mkstemp prefix
+    leftovers = [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]
+    assert not leftovers, f"leaked tmp files: {leftovers}"
 
 
 # ---------------- Elo ----------------

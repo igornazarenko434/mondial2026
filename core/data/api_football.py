@@ -120,19 +120,25 @@ def _load_team_id_cache() -> dict[str, int]:
 
 
 def _save_team_id_cache() -> None:
-    """Persist current cache to disk atomically (write-then-rename)."""
+    """Persist current cache to disk atomically (write-then-rename).
+
+    Uses the shared race-safe atomic-write helper. `_TEAM_ID_LOCK` already
+    serializes writers within a single process; the helper additionally
+    prevents the `path + ".tmp"` collision pattern that caused the
+    Switzerland T-24h failure on 2026-06-17 (see core/data/cache.py).
+    """
     global _TEAM_ID_CACHE
     with _TEAM_ID_LOCK:
         if _TEAM_ID_CACHE is None:
             return
-        os.makedirs(os.path.dirname(_TEAM_ID_CACHE_PATH), exist_ok=True)
-        tmp = _TEAM_ID_CACHE_PATH + ".tmp"
         try:
-            with open(tmp, "w") as f:
-                json.dump({"teams": _TEAM_ID_CACHE,
-                           "updated_at": datetime.now(timezone.utc).isoformat()},
-                          f, indent=2, ensure_ascii=False)
-            os.replace(tmp, _TEAM_ID_CACHE_PATH)
+            from core.data.cache import _atomic_write_json
+            _atomic_write_json(
+                _TEAM_ID_CACHE_PATH,
+                {"teams": _TEAM_ID_CACHE,
+                 "updated_at": datetime.now(timezone.utc).isoformat()},
+                indent=2, ensure_ascii=False,
+            )
         except Exception as e:                          # noqa: BLE001
             log.warning("team-id cache save failed: %s", e)
 

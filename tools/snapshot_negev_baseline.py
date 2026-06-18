@@ -128,11 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nExisting baseline preserved at: {path}")
             return 1
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(snapshot, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
+    from core.data.cache import _atomic_write_json
+    _atomic_write_json(path, snapshot, indent=2, ensure_ascii=False)
 
     bot_residue = [(u["displayName"], u["pointsTotal"])
                    for u in snapshot["users"].values()
