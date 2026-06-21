@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS standings (
     group_points REAL DEFAULT 0,
     knockout_points REAL DEFAULT 0,
     futures_points REAL DEFAULT 0,
-    side_points REAL DEFAULT 0     -- Day-9.26: Negev's Side Bets column
+    side_points REAL DEFAULT 0,    -- Day-9.26: Negev's Side Bets column
+    -- Day-9.30: full-faithful Negev mirror. role=='bot' for The Owl/Monkey/
+    -- Chinchilla/Fox; strategy math filters them. negev_rank is the rank
+    -- the app shows (with bots in the count); SQL queries can match the
+    -- app exactly via this column.
+    role TEXT DEFAULT 'player',
+    negev_rank INTEGER
 );
 
 -- Day-9.26: track which side-bet shells we've already alerted on.

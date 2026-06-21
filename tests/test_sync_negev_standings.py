@@ -96,7 +96,10 @@ def test_sync_dry_run_doesnt_write(conn, fake_ntm, monkeypatch):
     assert n == 0                                              # nothing written
 
 
-def test_sync_excludes_bots_by_default(conn, fake_ntm, monkeypatch):
+def test_sync_ingests_bots_with_role_tag(conn, fake_ntm, monkeypatch):
+    """Day-9.30: bots ARE ingested (tagged role='bot') so SQL queries match
+    the Negev app's rank-with-bots view. strategy.standings_context filters
+    role!='bot' so the leader/gap math is unaffected."""
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     rows = [
         {"player": "Igor", "rank": 1, "total": 5, "direction": 5, "broad": 0,
@@ -104,10 +107,54 @@ def test_sync_excludes_bots_by_default(conn, fake_ntm, monkeypatch):
         {"player": "Chinchilla", "rank": 2, "total": 4, "direction": 4, "broad": 0,
          "exactCount": 0, "role": "bot"},
     ]
-    # Our fake_ntm fixture filters bots out at the MCP layer by default
     sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows))
-    players = {r[0] for r in conn.execute("SELECT participant FROM standings").fetchall()}
-    assert players == {"Igor"}                                  # bot excluded
+    db = {r[0]: {"role": r[1], "rank": r[2]} for r in conn.execute(
+        "SELECT participant, role, negev_rank FROM standings").fetchall()}
+    assert set(db.keys()) == {"Igor", "Chinchilla"}, "both rows ingested"
+    assert db["Igor"]["role"] == "player"
+    assert db["Chinchilla"]["role"] == "bot"
+    assert db["Igor"]["rank"] == 1                              # Negev app rank
+    assert db["Chinchilla"]["rank"] == 2
+
+
+def test_sync_populates_negev_rank_for_all_rows(conn, fake_ntm, monkeypatch):
+    """The negev_rank column stores the rank Negev's app shows — with bots
+    in the count — so any future SQL can match the app exactly."""
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    rows = [
+        {"player": "Leader", "rank": 1, "total": 100, "direction": 100, "broad": 0,
+         "exactCount": 5, "role": "player"},
+        {"player": "BotMid", "rank": 2, "total": 80, "direction": 80, "broad": 0,
+         "exactCount": 3, "role": "bot"},
+        {"player": "Igor", "rank": 3, "total": 50, "direction": 50, "broad": 0,
+         "exactCount": 2, "role": "player"},
+    ]
+    sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows))
+    ranks = dict(conn.execute(
+        "SELECT participant, negev_rank FROM standings").fetchall())
+    assert ranks == {"Leader": 1, "BotMid": 2, "Igor": 3}
+
+
+def test_standings_context_ignores_bots_in_leader_math(conn, fake_ntm, monkeypatch):
+    """Even if a bot's score outranks every human, the strategy's
+    `leader_points` and `gap` are computed against humans only."""
+    from store import repo
+    monkeypatch.setenv("MY_PARTICIPANT", "Igor")
+    rows = [
+        {"player": "BotHi", "rank": 1, "total": 999, "direction": 999, "broad": 0,
+         "exactCount": 99, "role": "bot"},
+        {"player": "RealLeader", "rank": 2, "total": 80, "direction": 80, "broad": 0,
+         "exactCount": 3, "role": "player"},
+        {"player": "Igor", "rank": 3, "total": 50, "direction": 50, "broad": 0,
+         "exactCount": 2, "role": "player"},
+    ]
+    sns.sync_standings(tournament_id="tid", conn=conn, ntm=fake_ntm(rows))
+    ctx = repo.standings_context(conn, me="Igor")
+    assert ctx is not None
+    assert ctx["leader_points"] == 80                            # NOT 999 (bot)
+    assert ctx["your_points"] == 50
+    # Gap is against the HUMAN leader, not the bot
+    assert ctx["leader_points"] - ctx["your_points"] == 30
 
 
 def test_sync_detects_new_members_and_returns_them(conn, fake_ntm, monkeypatch):

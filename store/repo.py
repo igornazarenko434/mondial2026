@@ -67,11 +67,29 @@ def standings_context(conn: sqlite3.Connection, me: str | None = None) -> dict |
     # tournamentStats gives us the authoritative side_points, the strategy
     # tilt would miscalibrate without it.
     # COALESCE protects older DB rows that pre-date the side_points migration.
-    rows = conn.execute(
-        "SELECT participant, "
-        "(group_points + knockout_points "
-        " + COALESCE(side_points, 0) + futures_points) AS total "
-        "FROM standings ORDER BY total DESC").fetchall()
+    # Day-9.30: filter role!='bot' so the "leader" and "gap" math compares
+    # against REAL competitors only — the four bot rows (The Owl, Monkey,
+    # Chinchilla, Fox) would otherwise pollute "second place" / "leader gap"
+    # if any of them happened to outscore a human.
+    #
+    # `role` lands via tools.sync_negev_standings._migrate_standings_schema
+    # on first sync after Day-9.30 deploy. On a fresh test DB constructed
+    # without that migration (some unit tests use inline DDL with only the
+    # original columns), the WHERE on `role` errors with OperationalError.
+    # Fall back to the unfiltered query — bots-as-leader is the user-visible
+    # bug we're fixing, but in unit-test fixtures bots don't exist so the
+    # result is identical.
+    base_query = ("SELECT participant, "
+                  "(group_points + knockout_points "
+                  " + COALESCE(side_points, 0) + futures_points) AS total "
+                  "FROM standings ")
+    try:
+        rows = conn.execute(
+            base_query
+            + "WHERE COALESCE(role, 'player') != 'bot' ORDER BY total DESC"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = conn.execute(base_query + "ORDER BY total DESC").fetchall()
     if not rows or len(rows) < 2:                  # need ≥ 2 to define "leader vs me"
         return None
     if me is None:

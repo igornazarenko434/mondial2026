@@ -53,18 +53,30 @@ def _import_or_fail():
 
 
 def _migrate_standings_schema(conn: sqlite3.Connection) -> None:
-    """Day-9.26: idempotent ALTER for the new side_points column.
+    """Idempotent ALTERs for the standings table.
 
-    Older DB instances (deployed before Day-9.26) have a 4-column standings
-    table; the rewritten sync needs side_points to round out Negev's 4-way
-    breakdown (Group / KO / Side / Futures). ALTER is no-op when the
-    column is already present.
+    Day-9.26: side_points column (Negev's Group / KO / Side / Futures split).
+    Day-9.30: role + negev_rank columns. Before Day-9.30 the sync dropped
+    bots up-front so the SQLite leaderboard had 65 rows for a 69-row Negev
+    tournament — ranks computed off the cache were off by 1-4 vs the app.
+    Now we ingest every row and tag each with role ('player' / 'manager' /
+    'bot') and `negev_rank` (the rank-with-bots the app displays). Strategy
+    math filters `role != 'bot'`; SQL queries can match the app exactly via
+    negev_rank.
+
+    Each ALTER is no-op when the column is already present (sqlite3 raises
+    "duplicate column" which we swallow).
     """
-    try:
-        conn.execute("ALTER TABLE standings ADD COLUMN side_points REAL DEFAULT 0")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass         # column already exists — sqlite3 raises "duplicate column"
+    for ddl in (
+        "ALTER TABLE standings ADD COLUMN side_points REAL DEFAULT 0",
+        "ALTER TABLE standings ADD COLUMN role TEXT DEFAULT 'player'",
+        "ALTER TABLE standings ADD COLUMN negev_rank INTEGER",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
 
 
 def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
@@ -87,23 +99,32 @@ def _upsert_standings(conn: sqlite3.Connection, row: dict, dry: bool) -> None:
     ko_pts = float(row.get("knockout") or 0)
     side_pts = float(row.get("side") or 0)
     futures_pts = float(row.get("broad") or 0)
+    # Day-9.30: role + negev_rank carry through so SQL queries can match
+    # the Negev app's rank-with-bots exactly. Strategy math filters role!='bot'.
+    role = (row.get("role") or "player")
+    negev_rank = row.get("rank")
     if dry:
         log.info("[dry-run] would upsert %s: group=%.2f ko=%.2f side=%.2f "
-                  "futures=%.2f total=%.2f",
+                  "futures=%.2f total=%.2f role=%s rank=%s",
                  participant, group_pts, ko_pts, side_pts, futures_pts,
-                 group_pts + ko_pts + side_pts + futures_pts)
+                 group_pts + ko_pts + side_pts + futures_pts,
+                 role, negev_rank)
         return
     # Migrate first run (idempotent)
     _migrate_standings_schema(conn)
     conn.execute(
         "INSERT INTO standings (participant, group_points, knockout_points, "
-        "futures_points, side_points) VALUES (?, ?, ?, ?, ?) "
+        "futures_points, side_points, role, negev_rank) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(participant) DO UPDATE SET "
         "group_points = excluded.group_points, "
         "knockout_points = excluded.knockout_points, "
         "futures_points = excluded.futures_points, "
-        "side_points = excluded.side_points",
-        (participant, group_pts, ko_pts, futures_pts, side_pts))
+        "side_points = excluded.side_points, "
+        "role = excluded.role, "
+        "negev_rank = excluded.negev_rank",
+        (participant, group_pts, ko_pts, futures_pts, side_pts,
+         role, negev_rank))
 
 
 def _format_telegram_summary(rows: list[dict], me: str, tid: str) -> tuple[str, str]:
@@ -264,11 +285,12 @@ def sync_standings(*, tournament_id: str | None = None,
     if not rows:
         return {"ok": False, "error": "Negev returned 0 rows — auth failed or tournament empty"}
 
-    # Day-9.15: filter bots from DB upsert so strategy stays clean. The
-    # `include_bots` CLI flag, when True, keeps bots in the DB too — useful
-    # for debug only; default flow strips them.
-    rows_for_db = rows if include_bots else [r for r in rows
-                                              if (r.get("role") != "bot")]
+    # Day-9.30: upsert ALL rows including bots. Strategy math filters
+    # role!='bot' in standings_context(); SQL queries match the Negev app
+    # via the negev_rank column. The `include_bots` CLI flag is preserved
+    # as a no-op alias for backwards compat with any operator muscle memory.
+    rows_for_db = rows                              # noqa: F841 (include_bots unused)
+    _ = include_bots                                # reserved — see docstring above
 
     # Day-9.15: NEW MEMBER DETECTION — compare Negev's roster to our DB,
     # find any displayName that's NEW (in Negev but not yet in our standings

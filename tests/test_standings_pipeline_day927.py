@@ -34,11 +34,11 @@ def test_standings_context_includes_side_points(conn):
     didn't matter. After Day-9.27 side_points carries real values."""
     from store.repo import standings_context
     # Leader: 10 group + 2 side = 12 total
-    conn.execute("INSERT INTO standings VALUES ('Leader', 10, 0, 0, 2)")
+    conn.execute("INSERT INTO standings (participant, group_points, knockout_points, futures_points, side_points) VALUES ('Leader', 10, 0, 0, 2)")
     # Igor: 3 group + 1 side = 4 total  (gap to leader = 8)
-    conn.execute("INSERT INTO standings VALUES ('Igor', 3, 0, 0, 1)")
+    conn.execute("INSERT INTO standings (participant, group_points, knockout_points, futures_points, side_points) VALUES ('Igor', 3, 0, 0, 1)")
     # Second: 5 group + 0 side = 5 total
-    conn.execute("INSERT INTO standings VALUES ('Second', 5, 0, 0, 0)")
+    conn.execute("INSERT INTO standings (participant, group_points, knockout_points, futures_points, side_points) VALUES ('Second', 5, 0, 0, 0)")
     conn.commit()
     ctx = standings_context(conn, me="Igor")
     assert ctx is not None
@@ -109,7 +109,7 @@ def test_standings_context_returns_none_when_only_me(conn):
     """Regression: when only ONE row exists, ctx is None — that contract
     is unaffected by Day-9.27."""
     from store.repo import standings_context
-    conn.execute("INSERT INTO standings VALUES ('Igor', 5, 0, 0, 1)")
+    conn.execute("INSERT INTO standings (participant, group_points, knockout_points, futures_points, side_points) VALUES ('Igor', 5, 0, 0, 1)")
     conn.commit()
     assert standings_context(conn, me="Igor") is None
 
