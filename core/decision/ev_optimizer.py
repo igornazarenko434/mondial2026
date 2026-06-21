@@ -166,6 +166,19 @@ def recommend(matrix: np.ndarray, stage: str, odds: dict,
 
     best = max(full_ranked, key=_smooth_score)
 
+    # 5b. Day-9.29: gate-aware candidate pool for the strategy (tilt) layer.
+    # Sort full_ranked by SMOOTH gate score so the strategy operates on the
+    # SAME scoring function that selects the main pick — no more "tilt ON
+    # silently bypasses the gate and picks the high-multiplier draw".
+    #   strong_favorite (weight=1): out-of-dom cells score 0 → pool is
+    #     pure-in-direction → tilt picks within-direction variance (5-0
+    #     instead of 4-0), preserving the direction-only partial-credit floor.
+    #   mild_favorite (0<weight<1): in-dom cells get EV+P blend boost,
+    #     out-of-dom cells get linear (1-weight) penalty → mostly in-direction.
+    #   tossup (weight=0): every cell scores ev_norm → pool == raw-EV top-5
+    #     (backwards-compatible — true tossups still allow draw picks).
+    strategy_candidates = sorted(full_ranked, key=_smooth_score, reverse=True)[:5]
+
     # 6. Label the gate mode for the audit trail
     if tied:
         gate_mode = "tossup_tied"
@@ -207,6 +220,7 @@ def recommend(matrix: np.ndarray, stage: str, odds: dict,
         "modal_score": {"home": int(idx[0]), "away": int(idx[1])},
         "model_prob": {k: round(v, 3) for k, v in pdir.items()},
         "ranked_alternatives": top5,
+        "strategy_candidates": strategy_candidates,
         "detonator": detonator,
         "locked_odds": odds,
         # Gate provenance (Day-9.26 + 9.26.2)

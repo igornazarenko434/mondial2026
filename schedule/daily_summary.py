@@ -43,9 +43,17 @@ def already_sent_today(led: RunLedger, now_utc: datetime,
 
 
 def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
-                       tz: str = "Asia/Jerusalem") -> str:
+                       tz: str = "Asia/Jerusalem",
+                       hour_local: int = 9) -> str:
     """Plain-text Telegram-safe summary. Never raises — failures degrade to
-    sections being omitted rather than the whole summary failing."""
+    sections being omitted rather than the whole summary failing.
+
+    `hour_local` is the local hour at which the daily summary fires (default 9).
+    Today's-games window extends from local midnight TODAY through
+    `hour_local:00 TOMORROW` so that night kickoffs (e.g. 02:00 / 06:00 local
+    of the next calendar day) appear in TONIGHT's summary instead of being
+    silently dropped into a future-day window that fires after kickoff.
+    """
     tz_obj = ZoneInfo(tz)
     today_local = now_utc.astimezone(tz_obj).date()
 
@@ -54,13 +62,20 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
     # matches reads the real wall clock and would skip future-dated test
     # fixtures during unit tests).
     today_games: list[str] = []
+    has_overnight = False
     try:
-        # local-day window: midnight-to-midnight Jerusalem, expressed in UTC
+        from datetime import timedelta
+        # local-day window: midnight TODAY through hour_local:00 TOMORROW.
+        # Boundary aligns with the next daily summary's start, so each
+        # match is listed in EXACTLY ONE summary — no gaps, no dupes.
         local_midnight = datetime.combine(today_local,
                                           datetime.min.time(), tzinfo=tz_obj)
+        local_window_end = (local_midnight + timedelta(days=1)).replace(
+            hour=hour_local, minute=0, second=0)
+        local_today_end = local_midnight.replace(hour=23, minute=59, second=59)
         day_start_utc = local_midnight.astimezone(timezone.utc).isoformat()
-        day_end_utc = (local_midnight.replace(hour=23, minute=59, second=59)
-                       .astimezone(timezone.utc).isoformat())
+        day_end_utc = local_window_end.astimezone(timezone.utc).isoformat()
+        today_end_utc = local_today_end.astimezone(timezone.utc).isoformat()
         rows = conn.execute(
             "SELECT match_id, utc_kickoff, stage, home, away FROM matches "
             "WHERE status IN ('SCHEDULED','TIMED') AND utc_kickoff IS NOT NULL "
@@ -73,6 +88,8 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
             today_games.append(
                 f"{ko.strftime('%H:%M')} {m['home']} vs {m['away']} "
                 f"({m['stage']})")
+            if m["utc_kickoff"] > today_end_utc:
+                has_overnight = True
     except Exception as e:                          # noqa: BLE001
         log.warning("today's-games read failed: %s", e)
 
@@ -143,7 +160,12 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
     lines = [f"📅 Mondial 2026 — {today_local.isoformat()}"]
     if today_games:
         n_today = len(today_games)
-        lines.append(f"Today ({n_today} game{'s' if n_today != 1 else ''}):")
+        # Note overnight extension when a listed kickoff falls in the
+        # 00:00–hour_local local window of the NEXT calendar day.
+        suffix = (f" — through tomorrow {hour_local:02d}:00"
+                  if has_overnight else "")
+        lines.append(
+            f"Today ({n_today} game{'s' if n_today != 1 else ''}){suffix}:")
         for g in today_games[:5]:
             lines.append(f"  • {g}")
     else:
@@ -196,7 +218,7 @@ def send_if_due(conn: sqlite3.Connection, led: RunLedger, *,
     run_id = led.start(DAILY_SUMMARY_MATCH_ID, window_label,
                         correlation_id=window_label)
     try:
-        body = build_summary_text(conn, now, tz)
+        body = build_summary_text(conn, now, tz, hour_local=hour_local)
         # `summary` (not `alert`) — keeps the ☀️ emoji clean without ⚠️ prefix
         ok = delivery.summary(f"☀️ Daily summary — {day_label}", body)
         led.finish(run_id, "ok" if ok else "failed",

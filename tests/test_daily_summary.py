@@ -100,6 +100,39 @@ def test_summary_text_contains_today_games(conn):
     assert "Group" in txt
 
 
+def test_summary_text_includes_overnight_game_before_next_summary(conn):
+    """Day-9.29: a match kicking off at 03:00 local of TOMORROW should
+    appear in TONIGHT's 09:00 summary — otherwise it falls into a future
+    summary that doesn't fire until AFTER kickoff."""
+    # Match at 2026-06-12 03:00 Asia/Jerusalem (= tomorrow night to user).
+    # 2026-06-11 summary fires at 09:00 local → window 00:00 today through
+    # 09:00 tomorrow → the 03:00 match must be included.
+    ko_utc = _at("2026-06-12 03:00").isoformat()
+    conn.execute(
+        "INSERT INTO matches (match_id, utc_kickoff, stage, grp, home, away, status) "
+        "VALUES (?, ?, 'Group', 'D', 'Argentina', 'Iran', 'SCHEDULED')",
+        (54321, ko_utc))
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-11 09:00"))
+    assert "Argentina vs Iran" in txt
+    assert "03:00" in txt
+    # Header annotation kicks in when overnight games are present
+    assert "through tomorrow 09:00" in txt
+
+
+def test_summary_text_excludes_game_after_next_summary_window(conn):
+    """A match kicking off at 10:00 local of TOMORROW (1h AFTER the next
+    summary fires) belongs to TOMORROW's summary, not today's."""
+    ko_utc = _at("2026-06-12 10:00").isoformat()
+    conn.execute(
+        "INSERT INTO matches (match_id, utc_kickoff, stage, grp, home, away, status) "
+        "VALUES (?, ?, 'Group', 'E', 'Spain', 'Portugal', 'SCHEDULED')",
+        (98765, ko_utc))
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-11 09:00"))
+    assert "Spain vs Portugal" not in txt
+
+
 def test_summary_text_contains_recent_results(conn):
     """Yesterday's results block shows the score."""
     yest_ko = _at("2026-06-10 18:00").isoformat()

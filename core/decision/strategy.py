@@ -76,13 +76,55 @@ def recommend_to_win(rec: dict, context: dict | None = None,
 
     FALLBACK-SAFE: on any missing data / error it returns the original EV pick
     unchanged — strategy can only refine, never break, a recommendation.
+
+    Day-9.29: operates on the GATE-AWARE candidate pool
+    `rec["strategy_candidates"]` (top-5 by smooth gate score). At strong
+    favorite this pool is pure-in-direction → tilt picks within-direction
+    variance (5-0 instead of 4-0) and preserves the direction-only floor.
+    Falls back to `ranked_alternatives` (raw EV) for old card dicts.
     """
     out = dict(rec)
     try:
         eff_tilt = DEFAULT_TILT if tilt is None else max(0.0, min(1.0, tilt))
         if not context or eff_tilt == 0 or "pick_exact_score" not in rec:
             return out                                   # off / nothing to do
-        chosen = strategize(rec.get("ranked_alternatives", []), context, eff_tilt)
+
+        # Prefer the gate-aware candidate pool; fall back to raw-EV top-5
+        # for backwards compatibility with older recommend() output.
+        candidates = (rec.get("strategy_candidates")
+                      or rec.get("ranked_alternatives", []))
+
+        # Anchor the strategy baseline to the GATE pick (not raw-EV top-1).
+        # If the gate pick isn't already in the candidate pool, inject it at
+        # index 0 so `strategize` returns it for low pressure / tilt=0 (the
+        # default-when-no-deviation-warranted behavior).
+        gate_h = rec["pick_exact_score"]["home"]
+        gate_a = rec["pick_exact_score"]["away"]
+        gate_in_pool = any(c.get("home") == gate_h and c.get("away") == gate_a
+                            for c in candidates)
+        if not gate_in_pool:
+            gate_cell = {
+                "home": gate_h,
+                "away": gate_a,
+                "direction": rec["pick_direction"],
+                "expected_points": rec["expected_points"],
+                # p_score / exact_multiplier may be absent on the rec dict but
+                # are required by _upside; pull from the matching raw-EV cell
+                # if available, else use safe defaults.
+                "p_score": next(
+                    (c.get("p_score", 1e-6)
+                     for c in rec.get("ranked_alternatives", [])
+                     if c.get("home") == gate_h and c.get("away") == gate_a),
+                    1e-6),
+                "exact_multiplier": next(
+                    (c.get("exact_multiplier", 0.0)
+                     for c in rec.get("ranked_alternatives", [])
+                     if c.get("home") == gate_h and c.get("away") == gate_a),
+                    0.0),
+            }
+            candidates = [gate_cell] + list(candidates)
+
+        chosen = strategize(candidates, context, eff_tilt)
         if not chosen or "home" not in chosen:
             return out
         deviated = (chosen.get("home") != rec["pick_exact_score"]["home"]
@@ -90,9 +132,25 @@ def recommend_to_win(rec: dict, context: dict | None = None,
         out["pick_exact_score"] = {"home": chosen["home"], "away": chosen["away"]}
         out["pick_direction"] = chosen["direction"]
         out["expected_points"] = chosen["expected_points"]
-        out["strategy"] = {"applied": True, "tilt": eff_tilt,
-                           "deviated_from_ev": deviated,
-                           "ev_optimal_score": rec["pick_exact_score"]}
+        # Day-9.29 audit: first-class visibility into the strategy's choice.
+        out["strategy"] = {
+            "applied": True,
+            "tilt": eff_tilt,
+            "deviated_from_ev": deviated,
+            "ev_optimal_score": rec["pick_exact_score"],
+            # Pool composition
+            "pool_size": len(candidates),
+            "pool_directions": [c.get("direction") for c in candidates],
+            "pool_source": ("strategy_candidates"
+                            if rec.get("strategy_candidates")
+                            else "ranked_alternatives"),
+            # Did the strategy start from the gate pick at index 0?
+            "base_is_gate_pick": (candidates[0].get("home") == gate_h
+                                   and candidates[0].get("away") == gate_a)
+                                  if candidates else False,
+            # Did the final chosen cell change DIRECTION vs the gate?
+            "overrode_gate": chosen.get("direction") != rec["pick_direction"],
+        }
         return out
     except Exception:                                    # noqa: BLE001 - never break the card
         return dict(rec)
