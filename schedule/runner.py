@@ -44,7 +44,17 @@ log = get_logger("scheduler")
 
 # Day-9: windows where odds_api is queried in build_card → batch-fetch them.
 # T-24h is a news/preview-only window (no odds pull), so it's excluded.
-ODDS_WINDOWS = ("T-60m", "T-15m", "T-7m")
+#
+# Day-9.31: env-driven so we can throttle credit burn near a budget edge
+# without a code deploy. Set `ODDS_WINDOWS=T-7m` in .env + restart to keep
+# only the scoring-lock window (saves ~67% of odds_api credits at the cost
+# of pre-game odds-drift tracking — news + DC + Elo still produce the card).
+# Default unchanged: all three windows fetch odds.
+ODDS_WINDOWS = tuple(
+    s.strip() for s in
+    os.environ.get("ODDS_WINDOWS", "T-60m,T-15m,T-7m").split(",")
+    if s.strip()
+) or ("T-60m", "T-15m", "T-7m")    # safety: never empty
 
 
 class SchedulerDaemon:
