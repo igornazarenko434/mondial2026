@@ -125,9 +125,23 @@ def test_no_events_cache_fn_means_no_batching_at_all(monkeypatch):
 
 def test_odds_windows_constant_does_not_include_t24h():
     """Regression: T-24h MUST be excluded from ODDS_WINDOWS or we'd burn an
-    extra odds_api credit 23 hours before each match."""
-    assert "T-24h" not in ODDS_WINDOWS
-    assert set(ODDS_WINDOWS) == {"T-60m", "T-15m", "T-7m"}
+    extra odds_api credit 23 hours before each match.
+
+    Day-9.31: the constant is now env-driven, so this regression check
+    must verify the DEFAULT (env unset) rather than the live value —
+    which on production might be set to T-7m only for budget reasons."""
+    assert "T-24h" not in ODDS_WINDOWS                  # live value: T-24h still forbidden
+    import importlib, os, schedule.runner as rn
+    saved = os.environ.get("ODDS_WINDOWS")
+    try:
+        os.environ.pop("ODDS_WINDOWS", None)
+        importlib.reload(rn)
+        assert set(rn.ODDS_WINDOWS) == {"T-60m", "T-15m", "T-7m"}, \
+            "DEFAULT (unset env) must be the 3-window cycle without T-24h"
+    finally:
+        if saved is not None:
+            os.environ["ODDS_WINDOWS"] = saved
+        importlib.reload(rn)
 
 
 # ─── Day-9.31: env-driven ODDS_WINDOWS — budget-throttle simulation ───

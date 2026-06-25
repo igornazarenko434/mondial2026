@@ -145,7 +145,11 @@ def test_summary_text_contains_recent_results(conn):
     assert "France 2-1 Norway" in txt
 
 
-def test_summary_text_contains_standings_line_when_row_exists(conn):
+def test_summary_text_contains_standings_line_when_row_exists(conn, monkeypatch):
+    """The 'Your score' line in the summary reads the row identified by
+    MY_PARTICIPANT env var (default 'me'). Pin the env so production env
+    pollution (e.g. MY_PARTICIPANT=Igor on the VM) doesn't break the test."""
+    monkeypatch.setenv("MY_PARTICIPANT", "me")
     conn.execute(
         "INSERT INTO standings (participant, group_points, knockout_points, futures_points) "
         "VALUES ('me', 12.5, 0.0, 4.2)")
