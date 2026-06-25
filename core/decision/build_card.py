@@ -191,8 +191,18 @@ def build_card(match: dict, conn=None, *,
         from contextlib import nullcontext
         _mkt_stage = nullcontext()
     with _mkt_stage:
+      # Day-9.31: when runner stamps _skip_market=True, the current window
+      # isn't in ODDS_WINDOWS — do NOT call odds_fetcher. Without this check,
+      # fetch_match_odds would fall back to fetch_all_odds() with events=None
+      # and burn ~2 credits per match, completely undoing the budget save.
+      # Recorded as a deliberate skip in signals_failed so the auditability
+      # golden rule still holds (every signal appears in used or failed).
+      _skip_market = bool(match.get("_skip_market"))
       try:
-        scoring_odds = odds_fetcher(home, away,
+        if _skip_market:
+            scoring_odds = None
+        else:
+            scoring_odds = odds_fetcher(home, away,
                                     kickoff_utc=match.get("utc_kickoff"),
                                     events=events_cache)
         if scoring_odds and all(isinstance(scoring_odds.get(k), (int, float))
@@ -209,9 +219,12 @@ def build_card(match: dict, conn=None, *,
                               match.get("match_id"), _snap_e)
         else:
             signals_failed.append("market")
-            failure_reasons["market"] = ("odds_api over budget or no event"
-                                         if scoring_odds is None
-                                         else "incomplete or invalid odds")
+            if _skip_market:
+                failure_reasons["market"] = "skipped (window not in ODDS_WINDOWS)"
+            elif scoring_odds is None:
+                failure_reasons["market"] = "odds_api over budget or no event"
+            else:
+                failure_reasons["market"] = "incomplete or invalid odds"
             scoring_odds = None
       except Exception as e:                       # noqa: BLE001
         signals_failed.append("market")

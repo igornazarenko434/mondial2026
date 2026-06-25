@@ -254,6 +254,61 @@ def test_t7m_only_still_fetches_at_t7m_dispatch(monkeypatch):
     assert payload in seen
 
 
+def test_skip_market_flag_stamped_when_window_not_in_odds_windows(monkeypatch):
+    """REGRESSION-CLOSER: without this flag, build_card would receive
+    events_cache=None at T-60m and fetch_match_odds would fall back to
+    fetch_all_odds() per-match — burning credits we thought we were saving.
+    Runner now stamps _skip_market=True so build_card can short-circuit
+    odds_fetcher entirely."""
+    _silence_delivery(monkeypatch)
+    import schedule.runner as rn
+    monkeypatch.setattr(rn, "ODDS_WINDOWS", ("T-7m",))
+
+    seen_flags = []
+    def build(match):
+        seen_flags.append((match.get("_window"), match.get("_skip_market")))
+        return {"home": match["home"], "away": match["away"], "stage": "Group",
+                "pick_exact_score": {"home": 1, "away": 0}, "pick_direction": "H",
+                "expected_points": 1.0, "model_prob": {"H": .5, "D": .3, "A": .2},
+                "locked_odds": {"H": 2.0, "D": 3.0, "A": 4.0}}
+
+    # 7 minutes out → all 3 windows (T-60m/T-15m/T-7m) due in same tick
+    matches = [_match(9901, 7)]
+    daemon = rn.SchedulerDaemon(lambda: matches, build,
+                                  events_cache_fn=lambda: [], max_workers=4)
+    daemon.tick()
+    daemon.pool.shutdown(wait=True)
+    # T-60m and T-15m get _skip_market=True (saves per-match fetch_all_odds);
+    # T-7m gets _skip_market=False (scoring lock fires).
+    by_window = dict(seen_flags)
+    assert by_window == {"T-60m": True, "T-15m": True, "T-7m": False}
+
+
+def test_skip_market_flag_default_false_when_all_windows_configured(monkeypatch):
+    """Default config (no env override) → no window is "skip" → backwards-compat
+    with all existing Day-9 events_cache batching behavior."""
+    _silence_delivery(monkeypatch)
+    import schedule.runner as rn
+    monkeypatch.setattr(rn, "ODDS_WINDOWS", ("T-60m", "T-15m", "T-7m"))
+
+    seen_flags = []
+    def build(match):
+        seen_flags.append((match.get("_window"), match.get("_skip_market")))
+        return {"home": match["home"], "away": match["away"], "stage": "Group",
+                "pick_exact_score": {"home": 1, "away": 0}, "pick_direction": "H",
+                "expected_points": 1.0, "model_prob": {"H": .5, "D": .3, "A": .2},
+                "locked_odds": {"H": 2.0, "D": 3.0, "A": 4.0}}
+
+    matches = [_match(9902, 7)]
+    daemon = rn.SchedulerDaemon(lambda: matches, build,
+                                  events_cache_fn=lambda: [], max_workers=4)
+    daemon.tick()
+    daemon.pool.shutdown(wait=True)
+    # All 3 windows get _skip_market=False (their natural behavior)
+    by_window = dict(seen_flags)
+    assert by_window == {"T-60m": False, "T-15m": False, "T-7m": False}
+
+
 def test_credit_savings_simulation_full_day_jun27(monkeypatch):
     """Concrete budget simulation: Jun 27 has 4 distinct kickoff clusters
     (00:00, 03:00, 21:00, 23:30 IDT). With the default 3-window config,

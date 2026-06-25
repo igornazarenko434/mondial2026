@@ -100,7 +100,13 @@ class SchedulerDaemon:
         # each job is fully isolated; failures are handled inside process_match.
         # Stamp the window AND the per-tick events_cache onto the match dict so
         # build_card can use them without process_match changing signature.
-        match = {**match, "_window": window, "_events_cache": events_cache}
+        # Day-9.31: _skip_market=True tells build_card "this window is not in
+        # ODDS_WINDOWS, do NOT call odds_fetcher". Without this flag, build_card
+        # would receive events_cache=None and fetch_match_odds would fall back
+        # to fetch_all_odds() per-match — burning ~2 credits/match at every
+        # T-60m/T-15m window we thought we were saving.
+        match = {**match, "_window": window, "_events_cache": events_cache,
+                 "_skip_market": window not in ODDS_WINDOWS}
         # Day-9.11: open the obs.run scope INSIDE the worker (not at submit
         # time) so its correlation_id is visible to strategy_context_fn AND to
         # every span/log emitted from this job. `match-<id>-<window>` matches

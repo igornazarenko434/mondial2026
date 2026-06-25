@@ -175,6 +175,50 @@ def test_market_failure_falls_back_to_modal():
     assert card["ev_pathway"] == "modal_fallback"
 
 
+def test_skip_market_flag_short_circuits_odds_fetcher():
+    """Day-9.31: when match["_skip_market"]=True (runner stamped because the
+    window isn't in ODDS_WINDOWS), build_card MUST NOT call odds_fetcher —
+    otherwise it would charge ~2 credits per match at every T-60m/T-15m,
+    completely defeating the budget save. signals_failed gets 'market' with
+    the canonical reason 'skipped (window not in ODDS_WINDOWS)' so the
+    auditability golden rule holds."""
+    fetcher_calls = {"n": 0}
+    def fetcher(h, a, **k):
+        fetcher_calls["n"] += 1
+        return {"H": 1.5, "D": 4.0, "A": 6.0, "book": "pinnacle"}
+
+    m = _match()
+    m["_skip_market"] = True
+    card = build_card(m,
+                      strengths_loader=lambda _r: _good_strengths(),
+                      elo_loader=lambda: _good_elo(),
+                      odds_fetcher=fetcher,
+                      news_analyzer=_good_news,
+                      results_loader=lambda: [])
+    assert fetcher_calls["n"] == 0, "_skip_market must short-circuit odds_fetcher"
+    assert "market" in card["signals_failed"]
+    assert card["failure_reasons"]["market"] == "skipped (window not in ODDS_WINDOWS)"
+
+
+def test_skip_market_flag_absent_or_false_calls_fetcher_normally():
+    """Backwards-compat: when the flag isn't set (legacy match dict), the
+    odds_fetcher runs exactly as before. Default path is untouched."""
+    fetcher_calls = {"n": 0}
+    def fetcher(h, a, **k):
+        fetcher_calls["n"] += 1
+        return {"H": 1.5, "D": 4.0, "A": 6.0, "book": "pinnacle"}
+
+    # No _skip_market key at all on the match dict
+    card = build_card(_match(),
+                      strengths_loader=lambda _r: _good_strengths(),
+                      elo_loader=lambda: _good_elo(),
+                      odds_fetcher=fetcher,
+                      news_analyzer=_good_news,
+                      results_loader=lambda: [])
+    assert fetcher_calls["n"] == 1
+    assert "market" in card["signals_used"]
+
+
 def test_odds_returns_invalid_partial_dict_marks_market_failed():
     """A dict missing D or with bad values must not be treated as success."""
     card = build_card(_match(),
