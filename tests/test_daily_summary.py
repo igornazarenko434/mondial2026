@@ -148,8 +148,13 @@ def test_summary_text_contains_recent_results(conn):
 def test_summary_text_contains_standings_line_when_row_exists(conn, monkeypatch):
     """The 'Your score' line in the summary reads the row identified by
     MY_PARTICIPANT env var (default 'me'). Pin the env so production env
-    pollution (e.g. MY_PARTICIPANT=Igor on the VM) doesn't break the test."""
+    pollution (e.g. MY_PARTICIPANT=Igor + FRIEND_PARTICIPANTS=Vaadia on
+    the VM) doesn't break the test — when FRIEND_PARTICIPANTS is set the
+    Tracked 👥 block fires via live Negev which REPLACES the local
+    'Your score' line, and 'me' isn't in Negev's roster."""
     monkeypatch.setenv("MY_PARTICIPANT", "me")
+    monkeypatch.delenv("FRIEND_PARTICIPANTS", raising=False)
+    monkeypatch.delenv("NEGEV_TOURNAMENT_ID", raising=False)
     conn.execute(
         "INSERT INTO standings (participant, group_points, knockout_points, futures_points) "
         "VALUES ('me', 12.5, 0.0, 4.2)")
