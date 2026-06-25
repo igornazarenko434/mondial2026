@@ -6,15 +6,34 @@ backend, including the reason + a short remediation hint based on the error
 classification (auth/network/config/empty).
 
 Best-effort: if Telegram itself is down, log and continue — we never raise.
+
+Day-9.32: respects MONDIAL_TESTING=1 (or =true). When set, both
+`alert_failure` and `alert_failure_once_per_day` short-circuit BEFORE any
+Telegram send or report file write — operator/admin scripts (one-shot
+simulations, edge-case sweeps, dry-runs) can run as the production user
+against the production DB without firing false-positive ⚠ alerts to the
+shared channel. The suppression is logged once per call so the operator
+sees it didn't silently drop a real failure.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from core.obs.logging import get_logger
 
 log = get_logger("negev_alerts")
+
+
+def _testing_mode() -> bool:
+    """True when ad-hoc admin/test runs explicitly opt out of alerts.
+
+    Truthy: '1', 'true', 'yes' (case-insensitive). Anything else (or unset) →
+    production behavior. This is intentionally minimal: a single env var the
+    operator sets at the shell when running one-shot scripts."""
+    return os.environ.get("MONDIAL_TESTING", "").strip().lower() in (
+        "1", "true", "yes")
 
 
 def classify(reason: str) -> tuple[str, str]:
@@ -67,6 +86,10 @@ def alert_failure_once_per_day(*, source: str, reason: str,
     Used by daemon paths (daily_summary, kickoff_cards, build_card
     friend-picks) where a single auth break would otherwise produce
     dozens of identical Telegram alerts in 24h."""
+    if _testing_mode():
+        log.info("Negev alert SUPPRESSED (MONDIAL_TESTING=1): "
+                 "source=%s reason=%r", source, (reason or "")[:120])
+        return False
     global _LAST_ALERT_DATE
     today_local = datetime.now(timezone.utc).astimezone(
         ZoneInfo(tz)).strftime("%Y-%m-%d")
@@ -91,6 +114,10 @@ def alert_failure(*, source: str, reason: str) -> bool:
     Never raises — Telegram-down failures are logged and swallowed so the
     caller's exit code reflects the Negev failure, not the alert failure.
     """
+    if _testing_mode():
+        log.info("Negev alert SUPPRESSED (MONDIAL_TESTING=1): "
+                 "source=%s reason=%r", source, (reason or "")[:120])
+        return False
     try:
         from core import delivery
         category, hint = classify(reason)
