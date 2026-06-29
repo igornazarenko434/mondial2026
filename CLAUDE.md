@@ -275,8 +275,8 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       - `docs/SCHEDULING.md` — Hetzner CX22 §, day-to-day ops table, full
         Telegram alert taxonomy (cards / pipeline / delivery / scheduler /
         stuck / daily summary), "if you stop receiving messages" runbook.
-      Host: **Hetzner CX22, Falkenstein, Ubuntu 24.04, ~€5 for the
-      tournament**. Mac-can-be-closed risk eliminated. Public-repo design:
+      Host: **Hetzner CX22, Falkenstein, Ubuntu 24.04**. Mac-can-be-closed
+      risk eliminated. Public-repo design:
       secrets stay in `/home/mondial/.env` (chmod 600), NEVER committed.
       Edge cases tested (24 new tests, all offline — zero API calls):
         - events_cache fired ONCE per tick (not per match)
@@ -553,8 +553,8 @@ Side bets work today via `sidebets`. Everything else is enhancement.
       tournament if behind: `echo STRATEGY_TILT=0.4 >> .env && systemctl
       restart mondial2026`.
 - [x] **Operational infrastructure done (Day-9.5 era).**
-      - Hetzner CPX22, Falkenstein, Ubuntu 24.04, ~$10/mo total. Live IP
-        167.233.66.192, hostname mondial2026.
+      - Hetzner CPX22, Falkenstein, Ubuntu 24.04. Live IP in operator
+        notes (NOT committed), hostname mondial2026.
       - `infra/bootstrap.sh` — idempotent Ubuntu provisioner. Uses stock
         python3 (3.12); no PPA dependencies.
       - `infra/update.sh` — safe code-update with active-worker guard

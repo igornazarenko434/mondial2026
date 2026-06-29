@@ -14,7 +14,7 @@
 >   5. `docs/STRATEGY.md` — win-the-pool tilt + how to activate
 >
 > Notable updates since this doc was written: 370 tests passing (was 171);
-> system deployed on Hetzner CPX22 at 167.233.66.192; Day-9.5 win-the-pool
+> system deployed on Hetzner CPX22 (IP in operator notes); Day-9.5 win-the-pool
 > wired with `MY_PARTICIPANT` env + `tools/standings_set.py` CLI; group_
 > prefix stripped at ingest; api_football rate bumped to 10/min; opener
 > kickoff confirmed at 2026-06-11 22:00 Israel local (= 19:00 UTC).

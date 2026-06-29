@@ -92,7 +92,7 @@ def _id_token() -> str:
       A long-lived daemon process was started with .env containing inline
       `#` comments. systemd's EnvironmentFile parser does NOT strip inline
       comments, so the daemon's `NEGEV_EMAIL` literal value was
-      `igor434@gmail.com   # your Negev Toto login email`. When the
+      `<your-email>   # your Negev Toto login email`. When the
       refresh-token's cached rotation drifted out-of-sync after ~15 hours
       of uptime, the connector silently fell through to email auth, which
       Firebase rejected with INVALID_EMAIL — and the daily summary

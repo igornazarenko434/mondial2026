@@ -82,13 +82,13 @@ def test_refresh_failure_with_no_password_configured_still_raises(monkeypatch):
 def test_preflight_detects_inline_comment_in_NEGEV_EMAIL(monkeypatch):
     """The smoking-gun shape that caused the 2026-06-10 incident:
     NEGEV_EMAIL value contains '  # <comment>' due to systemd's parser."""
-    monkeypatch.setenv("NEGEV_EMAIL", "igor434@gmail.com   # your login email")
+    monkeypatch.setenv("NEGEV_EMAIL", "test@example.com   # your login email")
     leaks = preflight._detect_inline_comment_leaks()
     assert any(k == "NEGEV_EMAIL" for k, _ in leaks)
 
 
 def test_preflight_no_leak_when_value_clean(monkeypatch):
-    monkeypatch.setenv("NEGEV_EMAIL", "igor434@gmail.com")
+    monkeypatch.setenv("NEGEV_EMAIL", "test@example.com")
     monkeypatch.setenv("MY_PARTICIPANT", "Igor")
     leaks = preflight._detect_inline_comment_leaks()
     assert leaks == []

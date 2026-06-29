@@ -230,7 +230,7 @@ less-likely-but-better-paying scoreline is where math-driven profit comes from.
 Flip the value any time:
 
 ```bash
-ssh root@167.233.66.192 'sed -i "s/^STRATEGY_TILT=.*/STRATEGY_TILT=0.4/" /home/mondial/mondial2026/.env && systemctl restart mondial2026'
+ssh root@<vm-ip> 'sed -i "s/^STRATEGY_TILT=.*/STRATEGY_TILT=0.4/" /home/mondial/mondial2026/.env && systemctl restart mondial2026'
 ```
 
 The tilt activates on the next match-window dispatch (standings-context refresh

@@ -6,7 +6,7 @@ because a key/credential is missing. Never raises — it informs.
 
 Day-9.23: ALSO checks the running env vars for the "inline-comment trap" —
 values that contain ` # ...` because systemd's EnvironmentFile parser doesn't
-strip inline comments. This bit us on 2026-06-10: NEGEV_EMAIL=igor434@gmail.com
+strip inline comments. This bit us on 2026-06-10: NEGEV_EMAIL=<your-email>
 with an inline comment made Firebase reject as INVALID_EMAIL.
 """
 from __future__ import annotations

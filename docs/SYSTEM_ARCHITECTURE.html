@@ -283,7 +283,7 @@
       <li><code>tools/llm_audit.py</code> — 5-section LLM runbook</li>
       <li><code>tools/show_schedule.py</code> — live schedule with countdowns</li>
     </ul>
-    <p><strong>Where:</strong> Hetzner CPX22 VM (€5 for the tournament) at IP <code>167.233.66.192</code>. Daemon under systemd with auto-restart + per-worker SQLite connections. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>. <code>infra/update.sh</code> is self-healing: every invocation runs step 5b (infra sync — systemd unit + crontab) + step 6b (smoke audits — .env hygiene + Negev grid drift).</p>
+    <p><strong>Where:</strong> Hetzner CPX22 VM at IP <code>&lt;vm-ip&gt;</code> (operator notes only — not committed). Daemon under systemd with auto-restart + per-worker SQLite connections. 4-line crontab installed from canonical <code>infra/mondial2026.crontab</code>. <code>infra/update.sh</code> is self-healing: every invocation runs step 5b (infra sync — systemd unit + crontab) + step 6b (smoke audits — .env hygiene + Negev grid drift).</p>
     <p><strong>Tests:</strong> <strong>731 passing</strong> in 36s. Covers everything from per-stage signal failure, news ranker edge cases, SQLite thread-safety stress (24 concurrent dispatches), Negev rename/departure handling, update.sh contract, news/LLM cascade behaviour, scoring multiplier per-card stamp.</p>
   </div>
 </section>
@@ -678,7 +678,7 @@ else:                                          // AHEAD
 
   <h3>How to turn it on (mid-tournament if behind)</h3>
   <ol>
-    <li>SSH to VM: <code>ssh root@167.233.66.192</code></li>
+    <li>SSH to VM: <code>ssh root@&lt;vm-ip&gt;</code></li>
     <li>Enter friends' standings via <code>tools/standings_set.py</code>:
       <pre><code>sudo -u mondial /home/mondial/mondial2026/.venv/bin/python \
   /home/mondial/mondial2026/tools/standings_set.py set "Alice" \
@@ -1162,7 +1162,7 @@ negev_toto | firestore:listCollectionIds | bootstrap discovery</code></pre>
     <tr><td>2026-06-12 09:00</td><td>☀️ daily summary reflects the new results</td><td>Telegram</td></tr>
     <tr><td>2026-06-27</td><td>Group stage ends. If behind, consider <code>STRATEGY_TILT=0.4</code>.</td><td>Manual decision</td></tr>
     <tr><td>2026-07-19</td><td>Final. Run <code>tools.calibrate.run()</code> after for post-tournament tune.</td><td>Manual</td></tr>
-    <tr><td>2026-07-20+</td><td>Destroy the Hetzner VM (~€5 total event cost)</td><td>Hetzner Console</td></tr>
+    <tr><td>2026-07-20+</td><td>Destroy the Hetzner VM</td><td>Hetzner Console</td></tr>
   </table>
 </section>
 

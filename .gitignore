@@ -1,16 +1,55 @@
 # ---- Secrets (NEVER commit) ---------------------------------------
+# Belt-and-braces: .env in any shape, every common cert/key extension,
+# every common cloud-CLI cred directory. The repo also has a regression
+# test `tests/test_no_secrets_leaked.py` that fails CI if PII/IP leaks
+# back into a tracked file.
 .env
 .env.local
 .env.*.local
 .env.production
 .env.development
 .env.test
+.env.bak
+.env.bak.*
+.envrc
 secrets/
+.secrets/
+# Certificate / key material
 *.pem
 *.key
 *.crt
+*.cer
+*.der
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.gpg
+*.asc
+*.pgp
+# Common credential filenames
 credentials.json
+credentials*.json
 service-account*.json
+*service_account*.json
+*-credentials.json
+# SSH / cloud-CLI directories that hold private material
+.ssh/
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+id_ecdsa
+id_ecdsa.*
+.aws/
+.gcp/
+.azure/
+.kube/config
+# Auth tokens dumped from browsers / DevTools
+*token*.txt
+*token*.json
+!*team_ids.json
+!negev_baseline_*.json
 
 # ---- Python -------------------------------------------------------
 __pycache__/

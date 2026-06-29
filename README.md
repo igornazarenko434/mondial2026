@@ -19,7 +19,8 @@
 [![SQLite](https://img.shields.io/badge/sqlite-WAL_mode-003B57?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![systemd](https://img.shields.io/badge/systemd-managed-FCC624?logo=linux&logoColor=black)](https://systemd.io/)
 [![Honeycomb](https://img.shields.io/badge/tracing-Honeycomb_OTLP-FFA500?logo=opentelemetry&logoColor=white)](https://www.honeycomb.io/)
-[![Hetzner](https://img.shields.io/badge/infra-Hetzner_CPX22_€5%2Fmo-D50C2D?logo=hetzner&logoColor=white)](https://www.hetzner.com/)
+[![Hetzner](https://img.shields.io/badge/infra-Hetzner_CPX22-D50C2D?logo=hetzner&logoColor=white)](https://www.hetzner.com/)
+[![MCP](https://img.shields.io/badge/MCP-12_typed_tools-7C3AED)](#-negev-toto-mcp--bi-directional-pool-integration)
 [![Telegram](https://img.shields.io/badge/delivery-Telegram_Bot-26A5E4?logo=telegram&logoColor=white)](https://core.telegram.org/bots)
 
 <!-- LLM cascade -->
@@ -37,6 +38,7 @@
 - [What you see in the chat](#-what-you-see-in-the-chat)
 - [System architecture at a glance](#%EF%B8%8F-system-architecture-at-a-glance)
 - [The pick pipeline in one picture](#-the-pick-pipeline-in-one-picture)
+- [Negev Toto MCP — bi-directional pool integration](#-negev-toto-mcp--bi-directional-pool-integration)
 - [The 17 engineering decisions that make this not toy software](#%EF%B8%8F-the-17-engineering-decisions-that-make-this-not-toy-software)
 - [Tech stack](#-tech-stack)
 - [Project layout](#-project-layout)
@@ -59,7 +61,7 @@
 ## 🎯 The 30-second pitch
 
 **Mondial 2026** is a friends' Toto pool for the FIFA World Cup 2026 — **65 humans + 3 reference bots, 68 entries total**.
-Players submit per-match exact-score picks, four pre-tournament futures (winner / cinderella / golden boot / "best player"), and daily side bets. Points are awarded against a published exact-score multiplier grid; the prize ladder pays the top 10.
+Players submit per-match exact-score picks, four pre-tournament futures (winner / cinderella / golden boot / "best player"), and daily side bets. Points are awarded against a published exact-score multiplier grid; the pool's own platform tallies standings server-side.
 
 This codebase **automates the per-match and futures decisions end-to-end** — no model lives in a Jupyter notebook, no human pushes a button. The daemon ingests fixtures from football-data.org, fits a Dixon-Coles regression on 4,068 historical internationals, blends it with live Elo + Pinnacle-devigged odds + an LLM-curated news signal, runs an EV-optimization against the pool's exact-score multipliers, and ships the recommendation to Telegram **~7 minutes before kickoff** — every match, every window, without supervision.
 
@@ -77,7 +79,7 @@ Validated via Monte Carlo (50,000 tournaments × 68 players × 64 matches): **P(
 | **CLI tools** | 39 (`tools/*.py`) + unified entry `tools/toto.py` |
 | **Independent docs** | 16 (`docs/*.md` + `docs/SYSTEM_ARCHITECTURE.html`) |
 | **External providers** | 10 (football-data, the-odds-api, api-football, Brave, Negev Firestore, Gemini, Anthropic, OpenAI, eloratings.net, Telegram) |
-| **Operational cost** | **€5/mo** (Hetzner CPX22) + ~$0 in API fees (free tiers + budget guards) |
+| **Operational footprint** | Single VM (Hetzner CPX22) + every provider on a free tier or PAYG with budget guards |
 | **Failure modes documented** | every signal-source path has a fallback (see [`docs/FAILURE_MODES.md`](./docs/FAILURE_MODES.md)) |
 | **Concurrent dispatch** | ThreadPoolExecutor + per-worker SQLite (24-dispatch stress test pinned) |
 
@@ -239,6 +241,55 @@ flowchart LR
                        core/delivery → 📲 Telegram channel
                        (📊 standings, ☀️ daily, ⚽ kickoff, 🃏 card)
 ```
+
+---
+
+## 🔌 Negev Toto MCP — bi-directional pool integration
+
+> **Custom hand-built Model Context Protocol (MCP) server with 12 typed tools** that exposes the friends' existing Negev Toto application to *both* the autonomous daemon AND any MCP-aware client (Claude Desktop, Claude Code, etc.) — so picks are not just computed, they're **submitted directly back into the pool's official app** via the same auth path the web client uses.
+
+Lives in `integrations/negev_toto_mcp.py` (~700 lines). Speaks Firebase Identity Toolkit + Firestore REST over `requests`; refresh-token rotation handled in-process; every call wrapped in `obs.external_call("negev_toto", op)` so it traces to Honeycomb and counts in the cost ledger like every other provider.
+
+### 📖 Read tools (no special permission)
+
+| Tool | What it returns |
+|------|-----------------|
+| `toto_list_tournaments` | Every accessible tournament the user belongs to |
+| `toto_get_standings(tid, extended?, include_bots?)` | Ranked roster scoped to one tournament — tie-broken by `exactScoreCount` |
+| `toto_get_matches(date_after?, status?, stage?)` | Negev's match catalog with team names canonicalised via `teams.normalize` and stages mapped to our `RULES_STAGE` |
+| `toto_get_match_details(home, away)` | Match + my pick + every friend's pick + the applicable exact-score grid + bingoMultiplier — *one shot* |
+| `toto_get_broad_bets(tid)` | Per-user futures picks joined with `displayName` |
+| `toto_get_side_bets(tid, active_only?)` | Daily yes/no shells |
+| `toto_get_my_preferences()` | My `pref_*` flags |
+| `toto_next_match()` | Workflow helper — which match is next, what stage_type, whether penalty info is needed |
+| `toto_ping()` | Auth handshake + Firestore round-trip health check |
+
+### ✍️ Write tools (gated by `NEGEV_ALLOW_WRITES=1`)
+
+| Tool | What it does |
+|------|--------------|
+| `toto_submit_match_prediction(home, away, h, a, advances_team?)` | Saves my per-match exact-score pick directly into the pool's app. `advances_team` covers the KO penalty-winner case |
+| `toto_update_match_result(home, away, h, a, penalty_home?, penalty_away?, winner_team?)` | Admin path for the actual final score with full penalty-shootout support |
+| `toto_update_preferences(...)` | Patch my prefs in-place |
+
+### Why this matters
+
+Without the MCP integration the loop is **"daemon computes pick → human copy/pastes into the Negev Toto web app before kickoff"** — a manual step that fails on bad-connectivity nights, gets forgotten on overnight kickoffs, and races the 7-min lock. With it, the same daemon that builds the card can **post it back into the friends pool's official record** automatically (or, when `NEGEV_ALLOW_WRITES=0`, the operator runs the MCP from Claude Desktop and presses ENTER — explicit human-in-the-loop).
+
+The MCP server is **dual-mode** by design:
+
+1. **Headless / programmatic** — the daemon imports the module directly and uses the 12 tools as plain functions. This powers the `tools/sync_negev_standings.py` cron, the `post_match_audit.py` watchdog, the per-card Friends-Picks footer in every Telegram card, etc.
+2. **MCP server** — running `python -m integrations.negev_toto_mcp` exposes the same 12 tools over the MCP wire protocol, so Claude Desktop / Claude Code can ask **"who's leading right now? what did Vaadia pick for Brazil-Japan? submit my pick of 2-1 for tonight's match"** in natural language. Configuration ships in `integrations/claude_desktop_config.json` (with placeholder credentials only — actual values live in `.env`).
+
+Plus the operator-facing CLI wrapper `tools/toto.py` (8 subcommands: `standings / match / player / suggest / sidebets / upcoming / broad / help`) which builds on the same MCP tools and renders human-readable text.
+
+### Negev-specific defenses (other lessons-learned baked in)
+
+- **Refresh-token rotation race** — the token auto-rotates on every refresh; cached in-memory but never written to disk.
+- **Loud refresh-token failure (Day-9.23)** — no silent fallback to email/password by default; explicit opt-in via `NEGEV_ALLOW_PASSWORD_FALLBACK=1` (after a real incident where systemd's `EnvironmentFile` parser didn't strip an inline `#` comment, malforming the email value).
+- **Multiplier-drift watchdog (Day-9.33)** — `tools/audit_negev_multipliers.py` pulls Negev's server-side scoring grids and fails ⚠️ if our `config/rules.py::SCORE_TABLE` diverges. Caught a mid-tournament admin re-price 6 hours before the next match.
+- **Standings reconciliation (Day-9.25)** — sync detects departed members + rename duplicates, DELETEs phantom rows. Bots ingested with `role='bot'` so leader-gap math excludes them.
+- **`MONDIAL_TESTING=1`** — env var that suppresses ⚠️ Telegram alerts from operator shell scripts so the daemon doesn't think its own SSH probes are real outages.
 
 ---
 
@@ -454,7 +505,7 @@ cp .env.example .env                 # then fill in the keys (see "Configuration
 PYTHONPATH=. .venv/bin/python tools/run_one_card_live.py Brazil Japan --window T-7m
 ```
 
-### 3️⃣ Full VM provision (Hetzner CPX22 €5/mo, or any 1 vCPU / 2 GB Linux)
+### 3️⃣ Full VM provision (Hetzner CPX22, or any 1 vCPU / 2 GB Linux)
 
 ```bash
 ssh root@<vm-ip>
@@ -504,7 +555,7 @@ TELEGRAM_CHAT_ID=...           # /start your bot, then call getUpdates to find c
 GEMINI_API_KEY=...             # free at aistudio.google.com — LLM primary (1500/day)
 ANTHROPIC_API_KEY=...          # optional cascade fallback (PAYG, pennies)
 OPENAI_API_KEY=...             # optional last-resort cascade
-BRAVE_SEARCH_API_KEY=...       # free $5/mo at brave.com/search/api — news snippets
+BRAVE_SEARCH_API_KEY=...       # free tier at brave.com/search/api — news snippets
 API_FOOTBALL_KEY=...           # free at api-sports.io — confirmed lineups (T-60m)
 ```
 </details>
@@ -688,7 +739,7 @@ Plus systemic defenses:
 | **football-data.org** | API key | 10 req/min | Fixtures, scores, status | Last DB snapshot |
 | **the-odds-api.com** | API key | **500 credits/mo** | Decimal 1X2 + futures odds (Pinnacle preferred) | Cached snapshot, last-known devigged P |
 | **api-football.com** | API key | 100 req/day | Confirmed XI, injuries (T-60m signal) | Skip lineup signal |
-| **Brave Search API** | API key | 1000 req/mo | Web snippets for the news agent | Empty context; news δ = 0 |
+| **Brave Search API** | API key | Free tier (≈ 1000 req/mo) | Web snippets for the news agent | Empty context; news δ = 0 |
 | **Negev Firestore** | Refresh token | Unlimited | Standings, picks, side bets, broad bets, scoring grids | Last cached standings |
 | **Google Gemini 2.5 Flash** | API key | 1500 req/day | LLM **primary** (free tier) | → Claude cascade |
 | **Anthropic Claude Haiku 4.5** | API key | PAYG | LLM cascade fallback (active) | → OpenAI cascade |
@@ -698,7 +749,7 @@ Plus systemic defenses:
 | **Telegram Bot API** | Bot token | 1 msg/sec/chat | Output delivery (cards, summaries, alerts) | Retry + log |
 | **Honeycomb (OTLP)** | API key | Free tier | Distributed tracing | `OTEL_TRACES_EXPORTER=console` |
 
-**Total operational cost ≈ €5/mo + ~$0 in API fees.** The cost ledger tracks burn rate; budget-guards short-circuit before fees apply (e.g. `ODDS_WINDOWS=T-60m,T-7m` was set Day-9.33 to keep odds_api under 500/mo near reset).
+Every provider sits on a free tier or budget-guarded PAYG; the cost ledger tracks burn rate and budget guards short-circuit before any provider's fee threshold is crossed (e.g. `ODDS_WINDOWS=T-60m,T-7m` was set Day-9.33 to keep odds_api under its 500-call monthly free-tier near reset).
 
 ---
 
@@ -792,9 +843,9 @@ The whole tournament fits in ~10 MB. Postgres would add ops overhead for zero be
 </details>
 
 <details>
-<summary><b>Why €5/mo Hetzner instead of Lambda?</b></summary>
+<summary><b>Why Hetzner instead of Lambda?</b></summary>
 
-Long-polling Telegram + a 24/7 watchdog need a **persistent process**; serverless cold-starts would miss windows. Hetzner gives us 100% control, deterministic latency, and is cheaper than a $0.001/request Lambda at our scale. Falkenstein datacenter ⇒ ~50 ms RTT to most providers.
+Long-polling Telegram + a 24/7 watchdog need a **persistent process**; serverless cold-starts would miss windows. A small persistent VM gives us 100 % control over the runtime, deterministic latency, and no surprise per-invocation billing. Falkenstein datacenter ⇒ ~50 ms RTT to most providers.
 
 </details>
 
@@ -908,7 +959,7 @@ Personal secrets (API keys, refresh tokens, Telegram bot tokens) live in `.env`,
 
 <div align="center">
 
-**Built solo · 32k LOC · 841 tests · €5/mo · zero unplanned downtime in production**
+**Built solo · 32k LOC · 841 tests · 12-tool MCP integration · zero unplanned downtime in production**
 
 *If this project interests you for hiring or collaboration, [open an issue](https://github.com/igornazarenko434/mondial2026/issues) or reach me on GitHub.*
 

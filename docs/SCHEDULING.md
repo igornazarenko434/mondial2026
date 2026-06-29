@@ -104,9 +104,9 @@ the dependency-free poll-loop is enough for this single-user system.
 ## Day-9: always-on hosting on Hetzner
 
 Why hosted: your Mac sleeps / closes lid / loses Wi-Fi — none of those are
-allowed during a T-7m window. A €5 cloud VM removes the risk class.
+allowed during a T-7m window. A small cloud VM removes the risk class.
 
-Decision: **Hetzner CX22** (€4.51/mo, 2 vCPU, 4 GB RAM, Ubuntu 24.04). Order at
+Decision: **Hetzner CX22** (2 vCPU, 4 GB RAM, Ubuntu 24.04). Order at
 console.hetzner.cloud, location Falkenstein (de-falkenstein) — geographically
 closest to the football-data.org and Brave Search endpoints (lower latency
 than US-East), and Hetzner's network has no surprises with Honeycomb's
@@ -361,7 +361,7 @@ VM before running update.sh. None of the current code paths require this.
 | GitHub Actions cron | ⛔ | 5-min minimum races the 6-min T-7m window; SQLite state has no persistent home on a public-repo runner. |
 | Render/Railway free | ⛔ | Free background workers idle out (15 min) — defeats "always-on". |
 | Oracle Always-Free | 🟡 | Truly free forever but signup is fussy. Fall-back if you don't want to pay anything. |
-| **Hetzner CX22** | ✅ | Bulletproof for ~€5 total. Destroy after tournament. |
+| **Hetzner CX22** | ✅ | Bulletproof. Destroy after tournament. |
 
 ## Day-9: what the daemon does each tick (Jun-2026 final wiring)
 

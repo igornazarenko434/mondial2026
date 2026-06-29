@@ -41,16 +41,15 @@ scoring multiplier.
 |---|---|
 | Provider | Hetzner Cloud |
 | Server type | **CPX22** (2 vCPU AMD, 4 GB RAM, 80 GB NVMe, 20 TB traffic) |
-| Cost | $9.49/mo + $0.60 IPv4 = **$10.09/mo** (~$10 for the full tournament) |
 | Location | Falkenstein, Germany (de-falkenstein) |
 | Image | Ubuntu 24.04 LTS |
-| Public IPv4 | `167.233.66.192` |
-| Public IPv6 | `2a01:4f8:c015:8eb2::/64` |
+| Public IPv4 | `<vm-ip>` (kept in operator notes — not committed to repo) |
+| Public IPv6 | `<vm-ipv6>` (operator notes only) |
 | Hostname | `mondial2026` |
 | Service user | `mondial` (non-root; daemon runs as this user) |
 | Install dir | `/home/mondial/mondial2026` |
 | Python | system `python3` (= 3.12 on Ubuntu 24.04) |
-| SSH access | `ssh root@167.233.66.192` — key-only, ed25519 with passphrase in macOS keychain |
+| SSH access | `ssh root@<vm-ip>` — key-only, ed25519 with passphrase in macOS keychain |
 | TZ | `Asia/Jerusalem` (set by `timedatectl` in bootstrap) |
 
 ### Hetzner Cloud Console operations
@@ -200,7 +199,7 @@ Highlights:
 
 ## 7. Operations cheat-sheet
 
-All commands assume you SSH'd in: `ssh root@167.233.66.192`.
+All commands assume you SSH'd in: `ssh root@<vm-ip>`.
 
 ### Daemon control
 
@@ -554,7 +553,7 @@ calls silently no-op (cards still land, just without news signal).
 - **2026-06-11 22:00 Israel** (=19:00 UTC): kickoff. Result ingested ~2h later; standings update within 30 min.
 - **2026-06-27 (approx)**: group stage ends. Consider activating `STRATEGY_TILT=0.4` if behind.
 - **2026-07-19**: Final. Run `tools.calibrate.run()` afterwards for post-tournament weights tune.
-- **After Final**: destroy the Hetzner server (~€5 total for the event).
+- **After Final**: destroy the Hetzner server.
 
 ---
 

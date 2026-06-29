@@ -82,7 +82,7 @@ at 07:00 (via cron) worked perfectly.
 1. `/proc/$PID/environ` showed `FRIEND_PARTICIPANTS=Vaadia` was present
 2. `journalctl` showed `Negev fetch for tracked blocks failed: Firebase
    sign-in failed (400): INVALID_EMAIL`
-3. `.env` had `NEGEV_EMAIL=igor434@gmail.com   # your Negev Toto login email`
+3. `.env` had `NEGEV_EMAIL=<your-email>   # your Negev Toto login email`
 4. **systemd's EnvironmentFile parser doesn't strip inline `#` comments** —
    so the daemon's `NEGEV_EMAIL` actually contained the comment as part
    of the value. bash's `source .env` (used by cron) does strip it, which
