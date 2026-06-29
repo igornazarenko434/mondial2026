@@ -48,10 +48,15 @@ _FINAL = [  # §16  (SF / 3rd / Final)
     # caught the drift at 06:55 IDT; this patch realigns our payoff math so
     # ev_optimizer + score_match compute against the SAME multipliers Negev
     # will actually award. Pre-Day-9.33 values are recoverable in git history.
+    # ROW 4 explicitly enumerated (vs the older 3-row tables) because Negev's
+    # SF/Final cap kicks in at winner=5+, not winner=4 — 4-4 draws and 4-X
+    # cells pay 8.25 (not the cap 11). _KO and _GROUP don't need row 4 because
+    # their cap value EQUALS the row-4 value (no semantic difference).
     [3.75, 2.25, 3.5,  4.5,  8.25, 11, 11, 11],
     [None, 3,    2.25, 4.5,  8.25, 11, 11, 11],
     [None, None, 3.75, 4.5,  8.25, 11, 11, 11],
     [None, None, None, 8.25, 8.25, 11, 11, 11],
+    [None, None, None, None, 8.25, 11, 11, 11],
 ]
 
 def _to_dict(arr):
