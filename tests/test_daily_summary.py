@@ -120,6 +120,41 @@ def test_summary_text_includes_overnight_game_before_next_summary(conn):
     assert "through tomorrow 09:00" in txt
 
 
+def test_summary_renders_placeholder_team_during_bracket_transition(conn):
+    """Day-9.33 defense-in-depth: if a match in today's window has NULL
+    home/away (bracket-transition state where football-data temporarily
+    nullified the teams), the summary now renders 'TBD vs X' or 'X vs TBD'
+    instead of silently dropping the row. Root cause is fixed in
+    core/data/football_data.ingest, but this defends against future
+    bracket-transition surprises."""
+    ko_utc = _at("2026-06-28 22:00").isoformat()
+    # Match with NULL home (the Jun 28 incident scenario)
+    conn.execute(
+        "INSERT INTO matches (match_id, utc_kickoff, stage, grp, home, away, status) "
+        "VALUES (?, ?, 'R32', NULL, NULL, 'Canada', 'SCHEDULED')",
+        (98765, ko_utc))
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-28 09:00"))
+    # The match MUST appear (not silently dropped) — even with TBD placeholder
+    assert "Canada" in txt
+    assert "TBD" in txt or "vs Canada" in txt
+    # And not show "No games today" when there IS a game (even if TBD)
+    assert "No games today" not in txt
+
+
+def test_summary_renders_both_teams_normal_no_tbd_placeholder(conn):
+    """Backwards-compat: when both teams are populated, no placeholder text."""
+    ko_utc = _at("2026-06-28 20:00").isoformat()
+    conn.execute(
+        "INSERT INTO matches (match_id, utc_kickoff, stage, grp, home, away, status) "
+        "VALUES (?, ?, 'R32', NULL, 'Brazil', 'Japan', 'SCHEDULED')",
+        (99999, ko_utc))
+    conn.commit()
+    txt = ds.build_summary_text(conn, _at("2026-06-28 09:00"))
+    assert "Brazil vs Japan" in txt
+    assert "TBD" not in txt
+
+
 def test_summary_text_excludes_game_after_next_summary_window(conn):
     """A match kicking off at 10:00 local of TOMORROW (1h AFTER the next
     summary fires) belongs to TOMORROW's summary, not today's."""

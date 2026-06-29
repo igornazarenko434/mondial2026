@@ -43,6 +43,122 @@ def test_parse_maps_stage_and_normalizes_names(monkeypatch):
     assert by_id[1]["utc_kickoff"].startswith("2026-06-11")
 
 
+def test_ingest_preserves_teams_when_api_returns_null(monkeypatch):
+    """ROOT-CAUSE REGRESSION (Day-9.33, 2026-06-28 incident).
+
+    Bracket transition: football-data temporarily returns matches with
+    NULL homeTeam/awayTeam (or 'TBD' placeholders) while Negev computes
+    which teams advanced. Pre-Day-9.33 the upsert overwrote our
+    already-populated team names with NULL → matches disappeared from
+    every downstream filter → Jun 28 daily summary said 'No games today'
+    even though SA vs Canada was scheduled that evening.
+
+    Fix: upsert uses COALESCE / CASE so NULL or 'TBD' from the API never
+    overwrites a previously-populated team name.
+    """
+    monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy")
+    # Step 1: ingest with populated team names
+    populated = {"matches": [
+        {"id": 100, "utcDate": "2026-06-28T19:00:00Z", "status": "SCHEDULED",
+         "stage": "LAST_32", "group": None,
+         "homeTeam": {"name": "South Africa"}, "awayTeam": {"name": "Canada"},
+         "score": {"fullTime": {"home": None, "away": None}}}]}
+    class _P:
+        def json(self): return populated
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _P())
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
+        local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+    fd.ingest(conn)
+    row = conn.execute("SELECT home, away, status FROM matches WHERE match_id=100").fetchone()
+    assert row == ("South Africa", "Canada", "SCHEDULED")
+
+    # Step 2: simulate bracket-transition — API returns NULL homeTeam/awayTeam
+    null_teams = {"matches": [
+        {"id": 100, "utcDate": "2026-06-28T19:00:00Z", "status": "SCHEDULED",
+         "stage": "LAST_32", "group": None,
+         "homeTeam": None, "awayTeam": None,                # ← the bug trigger
+         "score": {"fullTime": {"home": None, "away": None}}}]}
+    class _N:
+        def json(self): return null_teams
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _N())
+    fd.ingest(conn)
+    row = conn.execute("SELECT home, away, status FROM matches WHERE match_id=100").fetchone()
+    # Teams MUST survive the transient null response
+    assert row == ("South Africa", "Canada", "SCHEDULED"), (
+        f"BUG: ingest overwrote teams with NULL during bracket transition. got {row}")
+
+
+def test_ingest_preserves_teams_when_api_returns_tbd_placeholder(monkeypatch):
+    """Variant: football-data returns 'TBD' string instead of NULL when
+    teams aren't yet resolved. Same defense — don't overwrite real names."""
+    monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy")
+    populated = {"matches": [
+        {"id": 200, "utcDate": "2026-07-02T19:00:00Z", "status": "SCHEDULED",
+         "stage": "LAST_16", "group": None,
+         "homeTeam": {"name": "Spain"}, "awayTeam": {"name": "Austria"},
+         "score": {"fullTime": {"home": None, "away": None}}}]}
+    class _P:
+        def json(self): return populated
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _P())
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
+        local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+    fd.ingest(conn)
+    # Simulate TBD response
+    tbd = {"matches": [
+        {"id": 200, "utcDate": "2026-07-02T19:00:00Z", "status": "SCHEDULED",
+         "stage": "LAST_16", "group": None,
+         "homeTeam": {"name": "TBD"}, "awayTeam": {"name": "TBD"},
+         "score": {"fullTime": {"home": None, "away": None}}}]}
+    class _T:
+        def json(self): return tbd
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _T())
+    fd.ingest(conn)
+    row = conn.execute("SELECT home, away FROM matches WHERE match_id=200").fetchone()
+    assert row == ("Spain", "Austria"), \
+        f"BUG: TBD placeholder overwrote real team names. got {row}"
+
+
+def test_ingest_preserves_finished_score_when_api_returns_null(monkeypatch):
+    """Defense-in-depth: once a match score is recorded (FINISHED), a
+    later API call returning null score must NOT clear our value."""
+    monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy")
+    finished = {"matches": [
+        {"id": 300, "utcDate": "2026-06-28T19:00:00Z", "status": "FINISHED",
+         "stage": "LAST_32", "group": None,
+         "homeTeam": {"name": "Canada"}, "awayTeam": {"name": "Sweden"},
+         "score": {"fullTime": {"home": 2, "away": 0}}}]}
+    class _F:
+        def json(self): return finished
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _F())
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
+        local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+    fd.ingest(conn)
+    # Simulate a buggy follow-up response that nulls the score
+    nulled = {"matches": [
+        {"id": 300, "utcDate": "2026-06-28T19:00:00Z", "status": "FINISHED",
+         "stage": "LAST_32", "group": None,
+         "homeTeam": {"name": "Canada"}, "awayTeam": {"name": "Sweden"},
+         "score": {"fullTime": {"home": None, "away": None}}}]}
+    class _N:
+        def json(self): return nulled
+        def raise_for_status(self): pass
+    monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _N())
+    fd.ingest(conn)
+    row = conn.execute("SELECT home_goals, away_goals FROM matches WHERE match_id=300").fetchone()
+    assert row == (2, 0), f"BUG: a transient null erased a finished score. got {row}"
+
+
 def test_ingest_writes_store_and_repo_reads(monkeypatch):
     monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "dummy")
     monkeypatch.setattr(fd.requests, "get", lambda *a, **k: _Resp())

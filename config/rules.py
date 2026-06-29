@@ -42,10 +42,16 @@ _KO = [  # §15  (R32 / R16 / QF, result at 120')
     [None, None, None, 8.25, 8.25, 8.25, 8.25, 8.25],
 ]
 _FINAL = [  # §16  (SF / 3rd / Final)
-    [5,    3,    4.5,  6,  11, 11, 11, 11],
-    [None, 4,    3,    6,  11, 11, 11, 11],
-    [None, None, 5,    6,  11, 11, 11, 11],
-    [None, None, None, 11, 11, 11, 11, 11],
+    # Day-9.33 (2026-06-29 audit alert): Negev silently re-priced semiAndFinal
+    # to a 0.75× schedule for "normal" scorelines (0-4 goals each side); only
+    # 5+ goal blowouts retained the legacy ×11 cap. tools/audit_negev_multipliers
+    # caught the drift at 06:55 IDT; this patch realigns our payoff math so
+    # ev_optimizer + score_match compute against the SAME multipliers Negev
+    # will actually award. Pre-Day-9.33 values are recoverable in git history.
+    [3.75, 2.25, 3.5,  4.5,  8.25, 11, 11, 11],
+    [None, 3,    2.25, 4.5,  8.25, 11, 11, 11],
+    [None, None, 3.75, 4.5,  8.25, 11, 11, 11],
+    [None, None, None, 8.25, 8.25, 11, 11, 11],
 ]
 
 def _to_dict(arr):

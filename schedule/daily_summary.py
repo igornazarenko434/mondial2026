@@ -76,17 +76,31 @@ def build_summary_text(conn: sqlite3.Connection, now_utc: datetime,
         day_start_utc = local_midnight.astimezone(timezone.utc).isoformat()
         day_end_utc = local_window_end.astimezone(timezone.utc).isoformat()
         today_end_utc = local_today_end.astimezone(timezone.utc).isoformat()
+        # Day-9.33: relax the NULL-team filter so bracket-transition matches
+        # (where football-data temporarily nulled the team names while Negev
+        # computes who advanced) still appear as "TBD vs X (R32)" instead of
+        # vanishing. The root cause is fixed in football_data.ingest (now
+        # uses COALESCE), but defense-in-depth here protects future
+        # bracket-transition surprises.
         rows = conn.execute(
             "SELECT match_id, utc_kickoff, stage, home, away FROM matches "
             "WHERE status IN ('SCHEDULED','TIMED') AND utc_kickoff IS NOT NULL "
             "AND utc_kickoff BETWEEN ? AND ? "
-            "AND home IS NOT NULL AND away IS NOT NULL "
             "ORDER BY utc_kickoff",
             (day_start_utc, day_end_utc)).fetchall()
         for m in rows:
             ko = datetime.fromisoformat(m["utc_kickoff"]).astimezone(tz_obj)
+            # Day-9.33: render bracket-transition placeholders explicitly
+            # rather than silently dropping the match.
+            home_display = m["home"] if m["home"] else "TBD"
+            away_display = m["away"] if m["away"] else "TBD"
+            if not m["home"] or not m["away"]:
+                log.warning("today's-games shows TBD placeholder "
+                             "(match_id=%s, stage=%s) — bracket may be "
+                             "resolving; check next football_data refresh",
+                             m["match_id"], m["stage"])
             today_games.append(
-                f"{ko.strftime('%H:%M')} {m['home']} vs {m['away']} "
+                f"{ko.strftime('%H:%M')} {home_display} vs {away_display} "
                 f"({m['stage']})")
             if m["utc_kickoff"] > today_end_utc:
                 has_overnight = True

@@ -228,11 +228,16 @@ def test_unknown_stage_label_does_not_crash():
 def test_pdf_examples_via_update_standings_end_to_end():
     """Pin all three PDF worked examples through the full standings_writer
     path (not just score_match): France 2-1 = 3.000, draw 1-1 = 5.625,
-    Final 2-2 = 12.500."""
+    Final 2-2 = 9.375.
+
+    Day-9.33 (2026-06-29): Final 2-2 expected dropped from 12.5 → 9.375
+    after Negev re-priced semiAndFinal cell [2][2] from 5 to 3.75 (×2.5 odds).
+    The PDF's original 12.5 example is now stale vs Negev's live grid;
+    Negev's server-side scoring grid is our source of truth."""
     for stage, ph, pa, ah, aa, odds, expected_bucket in [
         ("Group", 2, 1, 2, 1, {"H": 2.0, "D": 2.5, "A": 1.5}, ("group_points",  3.0)),
         ("Group", 1, 1, 1, 1, {"H": 2.0, "D": 2.5, "A": 3.0}, ("group_points",  5.625)),
-        ("Final", 2, 2, 2, 2, {"H": 2.0, "D": 2.5, "A": 2.0}, ("knockout_points", 12.5)),
+        ("Final", 2, 2, 2, 2, {"H": 2.0, "D": 2.5, "A": 2.0}, ("knockout_points", 9.375)),
     ]:
         conn = _schema_conn()
         _seed_match(conn, 1, "X", "Y", stage, ah, aa)

@@ -91,7 +91,28 @@ def fetch_wc_matches() -> list[dict]:
 
 
 def ingest(db_conn):
-    """Upsert all matches into the `matches` table. Returns count."""
+    """Upsert all matches into the `matches` table. Returns count.
+
+    Day-9.33 (2026-06-28 incident): during bracket transitions (group
+    stage → R32, R32 → R16, etc.) football-data temporarily returns
+    matches with NULL homeTeam/awayTeam or 'TBD' placeholders while
+    Negev computes which teams advanced. The previous unconditional
+    UPSERT was overwriting our already-populated team names with
+    NULL/TBD, which then dropped those matches out of every downstream
+    query that filters `home IS NOT NULL AND away IS NOT NULL`
+    (daily_summary 'today's games', kickoff_cards, upcoming_matches).
+    The Jun 28 daily summary said 'No games today' even though
+    South Africa vs Canada was scheduled that evening.
+
+    Fix: each potentially-transient field uses COALESCE so the UPDATE
+    branch only writes the new value when it's a meaningful improvement:
+      - home / away: keep existing if incoming is NULL or 'TBD'
+      - utc_kickoff / local_kickoff / stage / grp: keep existing if NULL
+      - status: ALWAYS updates (SCHEDULED → IN_PLAY → FINISHED needs to flow)
+      - home_goals / away_goals: keep existing once populated (never go back
+        to NULL — football-data won't typically do this but defends against
+        a transient mid-match-result reset)
+    """
     rows = fetch_wc_matches()
     cur = db_conn.cursor()
     for r in rows:
@@ -101,10 +122,19 @@ def ingest(db_conn):
             VALUES (:match_id,:utc_kickoff,:local_kickoff,:stage,:group,:home,
                     :away,:status,:home_goals,:away_goals)
             ON CONFLICT(match_id) DO UPDATE SET
-                utc_kickoff=excluded.utc_kickoff, local_kickoff=excluded.local_kickoff,
-                stage=excluded.stage, grp=excluded.grp, home=excluded.home,
-                away=excluded.away, status=excluded.status,
-                home_goals=excluded.home_goals, away_goals=excluded.away_goals
+                utc_kickoff   = COALESCE(excluded.utc_kickoff,   utc_kickoff),
+                local_kickoff = COALESCE(excluded.local_kickoff, local_kickoff),
+                stage         = COALESCE(excluded.stage,         stage),
+                grp           = COALESCE(excluded.grp,           grp),
+                home          = CASE
+                                  WHEN excluded.home IS NULL OR excluded.home = 'TBD'
+                                  THEN home ELSE excluded.home END,
+                away          = CASE
+                                  WHEN excluded.away IS NULL OR excluded.away = 'TBD'
+                                  THEN away ELSE excluded.away END,
+                status        = excluded.status,
+                home_goals    = COALESCE(excluded.home_goals,    home_goals),
+                away_goals    = COALESCE(excluded.away_goals,    away_goals)
         """, r)
         # NOTE: the UPDATE branch intentionally does NOT touch `detonator`, so a
         # re-ingest preserves tags set by tag_detonators().
