@@ -235,12 +235,26 @@ def sync_match_results(tid: str, *, conn: sqlite3.Connection,
             log.debug("Negev match %s vs %s not in our matches table — skipping",
                       m["home"], m["away"])
             continue
+        # Day-9.35: Negev returns scoreFullTimeHome/Away as the 120-minute
+        # (regulation + extra time) result — NOT the shootout aggregate. So
+        # we can pass these through unchanged. When the match went to pens,
+        # scorePenaltyHome/Away carry the shootout tally; we mirror them into
+        # penalty_home/penalty_away so score_match() and audit tools have a
+        # complete picture. Both writers (this + football_data.ingest) now
+        # produce byte-identical rows — no more silent flip-flop on every
+        # 30-min tick.
+        pen_h = m.get("scorePenaltyHome")
+        pen_a = m.get("scorePenaltyAway")
         try:
             conn.execute(
-                "UPDATE matches SET status=?, home_goals=?, away_goals=? "
-                "WHERE match_id=?",
-                ("FINISHED", int(m["scoreFullTimeHome"]),
-                 int(m["scoreFullTimeAway"]), ours[0]))
+                "UPDATE matches SET status=?, home_goals=?, away_goals=?, "
+                "  penalty_home=?, penalty_away=? WHERE match_id=?",
+                ("FINISHED",
+                 int(m["scoreFullTimeHome"]),
+                 int(m["scoreFullTimeAway"]),
+                 int(pen_h) if pen_h is not None else None,
+                 int(pen_a) if pen_a is not None else None,
+                 ours[0]))
             n += 1
         except sqlite3.Error as e:
             log.warning("results UPSERT for match %s failed: %s", ours[0], e)

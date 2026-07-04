@@ -8,9 +8,11 @@ CREATE TABLE IF NOT EXISTS matches (
     home          TEXT,
     away          TEXT,
     status        TEXT,        -- SCHEDULED/TIMED/IN_PLAY/FINISHED
-    home_goals    INTEGER,
-    away_goals    INTEGER,
-    detonator     INTEGER DEFAULT 0
+    home_goals    INTEGER,    -- 120-minute result (regulation + extra time); NOT shootout aggregate
+    away_goals    INTEGER,    -- 120-minute result (regulation + extra time); NOT shootout aggregate
+    detonator     INTEGER DEFAULT 0,
+    penalty_home  INTEGER,    -- Day-9.35: shootout tally for the home team; NULL if match didn't go to pens
+    penalty_away  INTEGER     -- Day-9.35: shootout tally for the away team; NULL if match didn't go to pens
 );
 
 CREATE TABLE IF NOT EXISTS odds_snapshots (

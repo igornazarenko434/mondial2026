@@ -47,10 +47,37 @@ def connect(path: str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def _apply_pending_migrations(conn: sqlite3.Connection) -> None:
+    """Idempotent schema migrations for columns added AFTER the initial deploy.
+
+    SQLite's `CREATE TABLE IF NOT EXISTS` only creates a table when it's
+    absent — it does NOT add missing columns to an existing table. So new
+    columns need explicit `ALTER TABLE ... ADD COLUMN` and we must guard
+    each with a `PRAGMA table_info` check so re-running is a no-op.
+
+    Day-9.35 (2026-07-04): added `penalty_home` / `penalty_away` to the
+    `matches` table so we can store shootout tally separately from the
+    120-minute (regulation + extra time) result. Prior to this, football-
+    data.org's aggregate `score.fullTime` for a PEN match — which includes
+    the shootout goals — was being stored verbatim in `home_goals`/
+    `away_goals`. Result: three R32 matches (Germany-Paraguay, Netherlands-
+    Morocco, Australia-Egypt) were stored as 4-5, 3-4, 3-5 instead of the
+    correct 1-1 regulation results. Fixed here + ingest layer.
+    """
+    cur = conn.execute("PRAGMA table_info(matches)")
+    cols = {r[1] for r in cur.fetchall()}
+    if "penalty_home" not in cols:
+        conn.execute("ALTER TABLE matches ADD COLUMN penalty_home INTEGER")
+    if "penalty_away" not in cols:
+        conn.execute("ALTER TABLE matches ADD COLUMN penalty_away INTEGER")
+    conn.commit()
+
+
 def init_db(path: str = DB_PATH) -> sqlite3.Connection:
     conn = connect(path)
     with open(SCHEMA) as f:
         conn.executescript(f.read())
+    _apply_pending_migrations(conn)
     conn.commit()
     return conn
 

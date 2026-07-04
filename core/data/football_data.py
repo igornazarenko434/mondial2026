@@ -75,6 +75,7 @@ def fetch_wc_matches() -> list[dict]:
         raw_group = m.get("group")
         if isinstance(raw_group, str) and raw_group.upper().startswith("GROUP_"):
             raw_group = raw_group[len("GROUP_"):]
+        hg, ag, ph, pa = _extract_120min_and_pens(m.get("score") or {})
         out.append({
             "match_id": m["id"],
             "utc_kickoff": utc.isoformat(),
@@ -84,10 +85,65 @@ def fetch_wc_matches() -> list[dict]:
             "home": normalize((m.get("homeTeam") or {}).get("name")),
             "away": normalize((m.get("awayTeam") or {}).get("name")),
             "status": m.get("status"),
-            "home_goals": (m.get("score", {}).get("fullTime") or {}).get("home"),
-            "away_goals": (m.get("score", {}).get("fullTime") or {}).get("away"),
+            "home_goals": hg,
+            "away_goals": ag,
+            "penalty_home": ph,
+            "penalty_away": pa,
         })
     return out
+
+
+def _extract_120min_and_pens(score: dict) -> tuple[int | None, int | None,
+                                                    int | None, int | None]:
+    """Split football-data.org's `score` object into (h120, a120, pens_h, pens_a).
+
+    Football-data returns:
+      score.fullTime      — AGGREGATE at end of match (regulation + ET + pens
+                            if any). For a match decided in regulation this
+                            equals regularTime; for an ET-decider it equals
+                            regulation+ET; for a PEN match it also includes
+                            the shootout tally.
+      score.regularTime   — 90-minute result (populated on FINISHED matches)
+      score.extraTime     — ET-only tally (0-0 if no ET was played)
+      score.penalties     — shootout tally (NULL if match didn't go to pens)
+      score.duration      — "REGULAR" / "EXTRA_TIME" / "PENALTY_SHOOTOUT"
+
+    Rules PDF §15/§16: knockout scoring uses the **result at 120'** — i.e.
+    regulation + extra time, but NOT the shootout. Storing fullTime verbatim
+    for a PEN match would give us e.g. Germany 4-5 Paraguay when the true
+    120-minute result was 1-1 (decided on penalties 3-4). That corrupts:
+      * `score_match()` direction and exact-score bonus math on stored rows
+      * `verify_scoring_sync.py` output
+      * daily-summary / audit-tool historical displays
+      * any backtest / calibration run using historical match rows
+
+    Returns four Optional[int]s. `penalty_home` / `penalty_away` are non-None
+    ONLY when the match went to a shootout — group-stage and ET-decided
+    matches always return None-None for the pen columns.
+    """
+    if not isinstance(score, dict):
+        return (None, None, None, None)
+    full = score.get("fullTime") or {}
+    pens = score.get("penalties") or {}
+    duration = score.get("duration")
+    fh = full.get("home")
+    fa = full.get("away")
+    ph = pens.get("home")
+    pa = pens.get("away")
+
+    if duration == "PENALTY_SHOOTOUT" and ph is not None and pa is not None:
+        # Shootout goals are baked into fullTime — subtract them to recover
+        # the true 120-minute result. Defensive int-cast so a stringified
+        # payload doesn't produce a str-int mix.
+        try:
+            return (int(fh) - int(ph), int(fa) - int(pa), int(ph), int(pa))
+        except (TypeError, ValueError):
+            # Malformed payload — keep the aggregate as-is and skip pens.
+            # Failing loud here would kill an entire ingest tick; degrade.
+            return (fh, fa, None, None)
+
+    # Regulation-decided or ET-decided: fullTime IS the 120-minute result.
+    return (fh, fa, None, None)
 
 
 def ingest(db_conn):
@@ -118,9 +174,11 @@ def ingest(db_conn):
     for r in rows:
         cur.execute("""
             INSERT INTO matches (match_id, utc_kickoff, local_kickoff, stage,
-                                 grp, home, away, status, home_goals, away_goals)
+                                 grp, home, away, status, home_goals, away_goals,
+                                 penalty_home, penalty_away)
             VALUES (:match_id,:utc_kickoff,:local_kickoff,:stage,:group,:home,
-                    :away,:status,:home_goals,:away_goals)
+                    :away,:status,:home_goals,:away_goals,
+                    :penalty_home,:penalty_away)
             ON CONFLICT(match_id) DO UPDATE SET
                 utc_kickoff   = COALESCE(excluded.utc_kickoff,   utc_kickoff),
                 local_kickoff = COALESCE(excluded.local_kickoff, local_kickoff),
@@ -134,7 +192,9 @@ def ingest(db_conn):
                                   THEN away ELSE excluded.away END,
                 status        = excluded.status,
                 home_goals    = COALESCE(excluded.home_goals,    home_goals),
-                away_goals    = COALESCE(excluded.away_goals,    away_goals)
+                away_goals    = COALESCE(excluded.away_goals,    away_goals),
+                penalty_home  = COALESCE(excluded.penalty_home,  penalty_home),
+                penalty_away  = COALESCE(excluded.penalty_away,  penalty_away)
         """, r)
         # NOTE: the UPDATE branch intentionally does NOT touch `detonator`, so a
         # re-ingest preserves tags set by tag_detonators().

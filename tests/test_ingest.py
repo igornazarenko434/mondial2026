@@ -70,7 +70,8 @@ def test_ingest_preserves_teams_when_api_returns_null(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
         local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
-        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0,
+        penalty_home INTEGER, penalty_away INTEGER)""")
     fd.ingest(conn)
     row = conn.execute("SELECT home, away, status FROM matches WHERE match_id=100").fetchone()
     assert row == ("South Africa", "Canada", "SCHEDULED")
@@ -108,7 +109,8 @@ def test_ingest_preserves_teams_when_api_returns_tbd_placeholder(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
         local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
-        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0,
+        penalty_home INTEGER, penalty_away INTEGER)""")
     fd.ingest(conn)
     # Simulate TBD response
     tbd = {"matches": [
@@ -142,7 +144,8 @@ def test_ingest_preserves_finished_score_when_api_returns_null(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
         local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
-        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0,
+        penalty_home INTEGER, penalty_away INTEGER)""")
     fd.ingest(conn)
     # Simulate a buggy follow-up response that nulls the score
     nulled = {"matches": [
@@ -165,7 +168,8 @@ def test_ingest_writes_store_and_repo_reads(monkeypatch):
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
         local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
-        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0,
+        penalty_home INTEGER, penalty_away INTEGER)""")
     n = fd.ingest(conn)
     assert n == 3
     # finished match shows up in recent_finished (who won → who advances)
@@ -180,7 +184,8 @@ def _conn():
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE matches (match_id INTEGER PRIMARY KEY, utc_kickoff TEXT,
         local_kickoff TEXT, stage TEXT, grp TEXT, home TEXT, away TEXT, status TEXT,
-        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0)""")
+        home_goals INTEGER, away_goals INTEGER, detonator INTEGER DEFAULT 0,
+        penalty_home INTEGER, penalty_away INTEGER)""")
     return conn
 
 
