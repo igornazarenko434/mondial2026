@@ -101,38 +101,135 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  ✓ Per-player totals match Negev within ±0.01 pts.")
 
     # ─────────── 2. Match results mirror ───────────
-    _banner("2. Match results sync (do scores match?)")
+    #
+    # Day-9.35 rewrite: semantics-aware per-status comparison. Previously we
+    # compared `home_goals` byte-for-byte with Negev's `scoreFullTimeHome`
+    # for FT/PEN matches only — which produced two silent failure modes:
+    #
+    #   (a) AET matches were EXCLUDED from the check (Belgium-Senegal,
+    #       Argentina-Cape Verde in the 2026 tournament). Any drift in
+    #       120'-result storage for AET rows went unreported.
+    #   (b) The FT/PEN comparison was actually correct-by-accident:
+    #       Negev's `scoreFullTimeHome` is a DISPLAY convention (regulation
+    #       result) — the same convention as broadcast scoreboards showing
+    #       "2-2 (a.e.t. 3-2)". Its ACTUAL scoring engine uses the 120'
+    #       final: proven live by Kobi's 3-2 pick on Belgium-Senegal
+    #       receiving `isCorrectDir=true, isExactScore=true, multiplier=4.5`
+    #       (the 3-2 cell of the KO grid). For PEN matches with ET=0-0
+    #       (all 3 in R32) regulation happens to equal 120', so raw compare
+    #       matched by coincidence.
+    #
+    # New logic — for each Negev-finished match, compute what Negev's
+    # scoring engine SEES for direction + exact-score cell, and check our
+    # stored (home_goals, away_goals) [+ (penalty_home, penalty_away)]
+    # would produce the same:
+    #
+    #   FT   : ours(hg,ag) == negev.scoreFullTime          (regulation = 120')
+    #   AET  : direction(ours hg,ag) == winnerTeam side    (120' ≠ reg — can
+    #                                                        only verify dir)
+    #   PEN  : direction(ours hg,ag) == D (draw at 120')   AND
+    #          (penalty_home,away) == negev.scorePenalty
+    _banner("2. Match results sync (semantics-aware per-status)")
     try:
         negev_ms = ntm.toto_get_matches(limit=300)
     except Exception as e:                                # noqa: BLE001
         print(f"  ✗ Negev matches fetch failed: {e}")
         return 2
+
+    # Include AET in the check now — the old filter dropped it.
     negev_finished = {(m["home"], m["away"]): m for m in negev_ms
-                       if m.get("status") in ("FT", "PEN")
+                       if m.get("status") in ("FT", "AET", "PEN")
                        and m.get("scoreFullTimeHome") is not None}
     our_finished = {(r["home"], r["away"]): dict(r) for r in conn.execute(
-        "SELECT home, away, home_goals, away_goals, status FROM matches "
+        "SELECT home, away, home_goals, away_goals, "
+        "       penalty_home, penalty_away, status FROM matches "
         "WHERE status='FINISHED'").fetchall()}
-    print(f"  Negev FT/PEN: {len(negev_finished)}")
+
+    from collections import Counter as _Counter
+    by_status = _Counter(m.get("status") for m in negev_finished.values())
+    print(f"  Negev finished: {len(negev_finished)}  "
+          f"(FT={by_status.get('FT', 0)} · "
+          f"AET={by_status.get('AET', 0)} · "
+          f"PEN={by_status.get('PEN', 0)})")
     print(f"  Local FINISHED: {len(our_finished)}")
-    score_mismatches = 0
+
+    def _dir(h: int | None, a: int | None) -> str | None:
+        if h is None or a is None:
+            return None
+        if h > a: return "H"
+        if h < a: return "A"
+        return "D"
+
+    ft_drift = aet_drift = pen_drift = pen_tally_drift = 0
+
     for key, nm in negev_finished.items():
         ours = our_finished.get(key)
         if not ours:
             print(f"  ⚠ Finished in Negev but NOT yet finished locally: "
                   f"{key[0]} vs {key[1]}")
             continue
-        if (int(nm.get("scoreFullTimeHome") or 0) != int(ours["home_goals"])
-            or int(nm.get("scoreFullTimeAway") or 0) != int(ours["away_goals"])):
-            print(f"  ⚠ Score mismatch on {key[0]} vs {key[1]}: "
-                  f"ours={ours['home_goals']}-{ours['away_goals']}  "
-                  f"negev={nm.get('scoreFullTimeHome')}-{nm.get('scoreFullTimeAway')}")
-            score_mismatches += 1
+
+        n_hg = int(nm.get("scoreFullTimeHome") or 0)
+        n_ag = int(nm.get("scoreFullTimeAway") or 0)
+        o_hg = int(ours["home_goals"] or 0)
+        o_ag = int(ours["away_goals"] or 0)
+        o_ph = ours.get("penalty_home")
+        o_pa = ours.get("penalty_away")
+        status = nm.get("status")
+
+        if status == "FT":
+            # Regulation-decided — Negev's scoreFullTime IS the 120' final.
+            # Both direction and exact score must match ours exactly.
+            if (n_hg, n_ag) != (o_hg, o_ag):
+                print(f"  ⚠ FT mismatch on {key[0]} vs {key[1]}: "
+                      f"ours={o_hg}-{o_ag}  negev={n_hg}-{n_ag}")
+                ft_drift += 1
+
+        elif status == "AET":
+            # Negev's scoreFullTime is regulation (draw); the 120' final
+            # (what scoring uses) differs. We can only verify direction —
+            # ours should match winnerTeam.
+            winner = nm.get("winnerTeam")
+            expected = ("H" if winner == key[0]
+                        else "A" if winner == key[1]
+                        else None)
+            our_d = _dir(o_hg, o_ag)
+            if expected and our_d != expected:
+                print(f"  ⚠ AET direction mismatch on {key[0]} vs {key[1]}: "
+                      f"ours={o_hg}-{o_ag} (dir={our_d})  "
+                      f"Negev winnerTeam={winner} (expected dir={expected})")
+                aet_drift += 1
+
+        elif status == "PEN":
+            # Regulation is a draw (Negev n_hg == n_ag). Our 120' final
+            # should also be a draw (matches ordinarily go to pens only
+            # after 120' still tied). Compare direction + pens tally.
+            our_d = _dir(o_hg, o_ag)
+            if our_d != "D":
+                print(f"  ⚠ PEN direction not draw on {key[0]} vs {key[1]}: "
+                      f"ours={o_hg}-{o_ag}  Negev scoreFullTime={n_hg}-{n_ag}")
+                pen_drift += 1
+            n_ph = nm.get("scorePenaltyHome")
+            n_pa = nm.get("scorePenaltyAway")
+            if n_ph is not None and n_pa is not None:
+                if (o_ph, o_pa) != (int(n_ph), int(n_pa)):
+                    print(f"  ⚠ PEN tally mismatch on {key[0]} vs {key[1]}: "
+                          f"ours pens={o_ph}-{o_pa}  Negev={n_ph}-{n_pa}")
+                    pen_tally_drift += 1
+
+    total_drift = ft_drift + aet_drift + pen_drift + pen_tally_drift
     if not negev_finished:
-        print(f"  ✓ No finished matches yet (pre-tournament). Scoring "
-              f"sync will activate on first FT.")
-    elif score_mismatches == 0:
-        print(f"  ✓ All {len(negev_finished)} FT scores match Negev byte-for-byte.")
+        print(f"  ✓ No finished matches yet (pre-tournament).")
+    elif total_drift == 0:
+        print(f"  ✓ All {len(negev_finished)} finished matches align with "
+              f"Negev's scoring semantics "
+              f"(FT byte-for-byte, AET direction, PEN direction + pens tally).")
+    else:
+        print(f"  ⚠ {total_drift} scoring-semantics drift(s) — "
+              f"FT={ft_drift}, AET={aet_drift}, "
+              f"PEN dir={pen_drift}, PEN tally={pen_tally_drift}")
+    # legacy variable used later
+    score_mismatches = total_drift
 
     # ─────────── 3. Predictions table coverage ───────────
     _banner("3. Predictions persistence (do we have a T-7m LOCK per match?)")
